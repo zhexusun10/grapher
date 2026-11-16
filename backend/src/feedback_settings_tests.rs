@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier};
 fn candidate(feedback: bool) -> Graph {
     let mut graph = Graph {
         original_goal: "Feedback settings".into(),
-        nodes: ["a", "b", "c"].into_iter().map(|name| Node { name: name.into(), task: format!("Work on {name}") }).collect(),
+        nodes: ["a", "b", "c"].into_iter().map(|name| Node { id: name.into(), task: format!("Work on {name}") }).collect(),
         edges: [("a", "b"), ("b", "c")].into_iter().map(|(from, to)| Edge { from: from.into(), to: to.into(), feedback: false }).collect(),
     };
     if feedback { graph.edges.push(Edge { from: "c".into(), to: "a".into(), feedback: true }); }

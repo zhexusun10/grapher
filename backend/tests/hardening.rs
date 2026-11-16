@@ -1,5 +1,5 @@
 use grapher::{
-    compiler::{compile, compile_legacy},
+    compiler::compile,
     model::{Edge, Graph, Node},
     workspace,
 };
@@ -11,7 +11,7 @@ fn graphs_larger_than_64_nodes_compile() {
         original_goal: "Large graph".into(),
         nodes: (0..128)
             .map(|i| Node {
-                name: format!("node_{i}"),
+                id: format!("node_{i}"),
                 task: "Execute task".into(),
             })
             .collect(),
@@ -24,7 +24,6 @@ fn graphs_larger_than_64_nodes_compile() {
             .collect(),
     };
     assert!(compile(&graph, true).is_ok());
-    assert!(compile_legacy(&graph, true).is_ok());
 }
 
 #[test]

@@ -171,8 +171,8 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     const graph = {
       originalGoal: 'Default environment discovery with a parallel branch and a serial create/verify/report chain',
       nodes: [
-        { name: 'left', task: 'PREP_BRANCH left' }, { name: 'right', task: 'PREP_BRANCH right' },
-        { name: 'create', task: 'CREATE_PROBE' }, { name: 'verify', task: 'VERIFY_PROBE' }, { name: 'report', task: 'REPORT_PROBE' },
+        { id: 'left', task: 'PREP_BRANCH left' }, { id: 'right', task: 'PREP_BRANCH right' },
+        { id: 'create', task: 'CREATE_PROBE' }, { id: 'verify', task: 'VERIFY_PROBE' }, { id: 'report', task: 'REPORT_PROBE' },
       ],
       edges: [
         { from: 'left', to: 'create', feedback: false }, { from: 'right', to: 'create', feedback: false },
@@ -278,7 +278,7 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     // Host Python still cannot provide the private probe.
     assert.throws(() => execFileSync(python, ['-I', '-c', 'import grapher_probe'], { cwd: source, stdio: 'pipe' }), 'host Python never provides the private probe');
     // A new Run starts unbound and never references the previous Run's E.
-    const isolated = await legacyGraph(api, data, { graph: { originalGoal: 'New Run isolation', nodes: [{ name: 'plain', task: 'NOOP_ISOLATED_RUN' }], edges: [] }, config });
+    const isolated = await legacyGraph(api, data, { graph: { originalGoal: 'New Run isolation', nodes: [{ id: 'plain', task: 'NOOP_ISOLATED_RUN' }], edges: [] }, config });
     await api('control', { runId: isolated.runId, action: 'approve' });
     const plain = await until(async () => {
       const check = await api('snapshot', { runId: isolated.runId, detail: 'metadata' });
@@ -298,7 +298,7 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     // Reuse the existing business tasks, with no new prompt or reconciliation
     // session: a bound parent forks into a local bound and a fresh unbound task.
     const fork = await legacyGraph(api, data, { graph: { originalGoal: graph.originalGoal,
-      nodes: [{ name: 'create', task: 'CREATE_PROBE' }, { name: 'left', task: 'PREP_BRANCH left' }, { name: 'right', task: 'PREP_BRANCH right' }],
+      nodes: [{ id: 'create', task: 'CREATE_PROBE' }, { id: 'left', task: 'PREP_BRANCH left' }, { id: 'right', task: 'PREP_BRANCH right' }],
       edges: [{ from: 'create', to: 'left', feedback: false }, { from: 'create', to: 'right', feedback: false }] }, config });
     await api('control', { runId: fork.runId, action: 'approve' });
     const forkSettled = () => until(async () => {

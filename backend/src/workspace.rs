@@ -8,6 +8,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
+#[path = "workspace_blob.rs"]
+mod blob;
+pub(crate) use blob::verify_git_blob;
+
 static HOST_REF_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
     OnceLock::new();
 static HOST_INDEX_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
@@ -2656,6 +2660,18 @@ pub fn verify_prepared_ancestor(path: &Path, prepared_head: &str) -> Result<(), 
     git(path, &["merge-base", "--is-ancestor", prepared_head, "HEAD"])
         .map(|_| ())
         .map_err(|_| "Node rewrote or discarded its prepared Git history; downstream dependencies cannot safely inherit its result".into())
+}
+
+/// Recover only the gate of a verified, idle host snapshot. Keep the slot
+/// leased through inspection, evidence publication and the local gate update.
+pub(crate) fn recover_snapshot_readiness(
+    path: &Path,
+    repository: &Path,
+    expected: &str,
+    exclusions: &[String],
+) -> Result<(), String> {
+    let _lease = SlotGitGuard::acquire(path)?;
+    crate::workspace_view::recover_snapshot_readiness(path, repository, expected, exclusions)
 }
 
 /// Snapshot an isolated node and import its commit into the host repository.

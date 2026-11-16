@@ -1801,6 +1801,19 @@ button.session-label-toggle:focus-visible {
   line-height: 1.35;
 }
 
+.node-kind-label {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.task-node.merger .node-kind-label {
+  color: var(--brand-default);
+}
+
 .task-node.merger p {
   min-height: 0;
   margin: 6px 0 10px;
@@ -2125,18 +2138,6 @@ button.session-label-toggle:focus-visible {
 .workbench-module-status.is-error {
   border-color: var(--status-danger-border);
   color: var(--status-danger);
-}
-
-.workbench-module-status button {
-  flex-shrink: 0;
-  color: var(--brand-default);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.workbench-module-status button:focus-visible {
-  outline: 2px solid var(--brand-default);
-  outline-offset: 3px;
 }
 
 /* 全局悬浮报错横幅 (Floating Error Banner) - 浮动展示，不占用页面流，白底告警风格 */

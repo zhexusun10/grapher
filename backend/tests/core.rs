@@ -1,5 +1,5 @@
 use grapher::{
-    compiler::{compile, compile_legacy, downstream, node_id, unremovable_node_diagnostics},
+    compiler::{compile, downstream, node_id, unremovable_node_diagnostics},
     engine::feedback,
     model::*,
     runtime::{perform, Runtime},
@@ -14,7 +14,7 @@ fn graph() -> Graph {
         nodes: ["spec", "frontend", "backend", "review"]
             .iter()
             .map(|name| Node {
-                name: (*name).into(),
+                id: (*name).into(),
                 task: format!("Implement {name}"),
             })
             .collect(),
@@ -156,17 +156,20 @@ fn workspace_selection_survives_restart_and_missing_load_preserves_state() {
 }
 
 #[test]
-fn arbitrary_node_names_map_to_safe_internal_ids() {
+fn arbitrary_node_ids_map_to_safe_path_components() {
     for name in [
         "a b".into(),
         "节点".into(),
         "a.b".into(),
         "a/../b".into(),
+        "merger".into(),
+        "merge:join".into(),
+        "merger:publication".into(),
         "x".repeat(65),
     ] {
         let graph = Graph {
             nodes: vec![Node {
-                name: name.clone(),
+                id: name.clone(),
                 task: "task".into(),
             }],
             ..Graph::default()
@@ -185,10 +188,10 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
     assert_ne!(node_id("Foo"), node_id("foo"));
     assert_ne!(node_id("a b"), node_id("a-b"));
     assert_ne!(node_id(""), node_id("node"));
-    // Empty names are presence errors, not format errors.
+    // Empty IDs are presence errors, not format errors.
     let graph = Graph {
         nodes: vec![Node {
-            name: String::new(),
+            id: String::new(),
             task: "task".into(),
         }],
         ..Graph::default()
@@ -197,12 +200,12 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
         .unwrap_err()
         .iter()
         .any(|e| e.code == "E201"));
-    // Preserve legacy refs and worktree identities.
+    // Portable IDs need no path encoding.
     for name in ["a-dep-b_9".into(), "x".repeat(64)] {
         assert_eq!(node_id(&name), name);
         let graph = Graph {
             nodes: vec![Node {
-                name,
+                id: name,
                 task: "task".into(),
             }],
             ..Graph::default()
@@ -214,7 +217,7 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
 #[test]
 fn feedback_is_edge_data_not_node_data() {
     assert!(serde_json::from_value::<Node>(serde_json::json!({
-        "name": "review",
+        "id": "review",
         "task": "Review",
         "feedback": true
     }))
@@ -239,13 +242,13 @@ fn compiler_emits_dependency_layers_and_ignores_feedback_for_topology() {
 }
 
 #[test]
-fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
+fn compiler_reports_each_transitive_dependency() {
     let mut candidate = Graph {
         original_goal: "Implement and verify two branches".into(),
         nodes: ["server", "server_tests", "web", "web_tests", "acceptance"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -283,7 +286,25 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
     assert!(diagnostics
         .iter()
         .any(|item| item.message.contains("web → web_tests → acceptance")));
-    assert!(compile_legacy(&candidate, true).is_ok());
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| item.dependency_path.as_ref().unwrap().clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["server", "server_tests", "acceptance"],
+            vec!["web", "web_tests", "acceptance"],
+        ],
+    );
+    assert_eq!(
+        serde_json::to_value(&diagnostics[0]).unwrap()["dependencyPath"],
+        serde_json::json!(["server", "server_tests", "acceptance"]),
+    );
+    // Older diagnostic payloads remain readable and do not acquire null fields.
+    let old = serde_json::json!({ "code": "E209", "message": "Legacy diagnostic" });
+    let decoded: grapher::compiler::Diagnostic = serde_json::from_value(old.clone()).unwrap();
+    assert!(decoded.dependency_path.is_none());
+    assert_eq!(serde_json::to_value(decoded).unwrap(), old);
     let mut historical = Snapshot::default();
     grapher::model::apply(
         &mut historical,
@@ -299,7 +320,7 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
         },
     );
     assert_eq!(historical.graph, candidate);
-    assert!(historical.plan.is_some());
+    assert!(historical.plan.is_none(), "Replay uses the same strict compiler as new graphs");
     candidate
         .edges
         .retain(|edge| !(edge.to == "acceptance" && (edge.from == "server" || edge.from == "web")));
@@ -321,7 +342,7 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
         ]
         .into_iter()
         .map(|(name, task)| Node {
-            name: name.into(),
+            id: name.into(),
             task: task.into(),
         })
         .collect(),
@@ -339,16 +360,56 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
     candidate
         .nodes
         .iter_mut()
-        .find(|node| node.name == "first")
+        .find(|node| node.id == "first")
         .unwrap()
         .task = "First task".into();
     candidate
         .nodes
         .iter_mut()
-        .find(|node| node.name == "other_a")
+        .find(|node| node.id == "other_a")
         .unwrap()
         .task = "Another task".into();
     assert!(compile(&candidate, true).unwrap().warnings.is_empty());
+}
+
+#[test]
+fn compiler_changed_advisories_compare_candidate_facts_without_history() {
+    use grapher::compiler::changed_advisories;
+    let before = Graph {
+        original_goal: "Advisory projection".into(),
+        nodes: [("a", "Same"), ("b", "Same"), ("review", "Use <FEEDBACK>")]
+            .into_iter()
+            .map(|(name, task)| Node { id: name.into(), task: task.into() })
+            .collect(),
+        edges: vec![Edge { from: "a".into(), to: "review".into(), feedback: false }],
+    };
+    let codes = |warnings: Vec<grapher::compiler::Diagnostic>| {
+        warnings.into_iter().map(|warning| warning.code).collect::<Vec<_>>()
+    };
+    assert_eq!(codes(changed_advisories(&Graph::default(), &before)), ["W301", "W302"]);
+    assert!(changed_advisories(&before, &before).is_empty());
+    let mut unrelated = before.clone();
+    unrelated.nodes.reverse();
+    unrelated.nodes.push(Node { id: "docs".into(), task: "Documentation".into() });
+    assert!(changed_advisories(&before, &unrelated).is_empty());
+    // A changed duplicate group is reported, but its unrelated unrouted marker is not.
+    unrelated.nodes.last_mut().unwrap().task = "Same".into();
+    assert_eq!(codes(changed_advisories(&before, &unrelated)), ["W301"]);
+    assert_eq!(codes(changed_advisories(&unrelated, &before)), ["W301"]);
+    // Compare task identity too, not the rendered warning (which never echoes tasks).
+    let mut new_task = before.clone();
+    for node in new_task.nodes.iter_mut().filter(|node| node.id != "review") {
+        node.task = "Different shared task".into();
+    }
+    assert_eq!(codes(changed_advisories(&before, &new_task)), ["W301"]);
+    let mut repaired = before.clone();
+    repaired.nodes[1].task = "Different".into();
+    repaired.edges.push(Edge { from: "review".into(), to: "a".into(), feedback: true });
+    assert!(changed_advisories(&before, &repaired).is_empty());
+    // Resolved then reintroduced facts reappear, regardless of earlier calls.
+    assert_eq!(codes(changed_advisories(&repaired, &before)), ["W301", "W302"]);
+    assert_eq!(compile(&before, true).unwrap().warnings.len(), 2);
+    assert!(compile(&repaired, true).unwrap().warnings.iter().all(|warning| warning.starts_with("W303:")));
 }
 
 #[test]
@@ -356,7 +417,7 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     let mut candidate = graph();
     for name in ["inspect", "delivery"] {
         candidate.nodes.push(Node {
-            name: name.into(),
+            id: name.into(),
             task: format!("Implement {name}"),
         });
     }
@@ -449,7 +510,7 @@ fn unremovable_published_nodes_report_a_removal_diagnostic_at_the_tool_boundary(
     assert!(removed[0].message.contains("review"));
     assert!(removed[0].message.contains("already published"));
     candidate.nodes.push(Node {
-        name: "review".into(),
+        id: "review".into(),
         task: "Review again".into(),
     });
     assert!(unremovable_node_diagnostics(&candidate, &["review".into()]).is_empty());
@@ -462,7 +523,7 @@ fn compiler_warns_when_feedback_marker_cannot_route_an_instruction() {
     candidate
         .nodes
         .iter_mut()
-        .find(|node| node.name == "review")
+        .find(|node| node.id == "review")
         .unwrap()
         .task =
         "Check acceptance and finish with <FEEDBACK> if an additional instruction is needed".into();
@@ -524,11 +585,11 @@ fn compiler_does_not_warn_about_valid_isolated_nodes() {
         original_goal: "Two independent outputs".into(),
         nodes: vec![
             Node {
-                name: "first".into(),
+                id: "first".into(),
                 task: "First output".into(),
             },
             Node {
-                name: "second".into(),
+                id: "second".into(),
                 task: "Second output".into(),
             },
         ],
@@ -568,7 +629,7 @@ fn compiler_rejects_meaningless_feedback() {
     let arbitrary = Graph {
         original_goal: "g".into(),
         nodes: vec![Node {
-            name: "../../escape".into(),
+            id: "../../escape".into(),
             task: "task".into(),
         }],
         edges: Vec::new(),
@@ -698,7 +759,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         let mut graph = graph();
         for name in ["delivery", "also_delivery"] {
             graph.nodes.push(Node {
-                name: name.into(),
+                id: name.into(),
                 task: format!("Implement {name}"),
             });
             graph.edges.push(Edge {
@@ -837,7 +898,7 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
         nodes: ["owner", "review", "related", "consumer"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -898,7 +959,7 @@ fn exhausted_budget_does_not_mask_execution_or_protocol_failures() {
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
         graph.nodes.push(Node {
-            name: "consumer".into(),
+            id: "consumer".into(),
             task: "consume".into(),
         });
         graph.edges.push(Edge {
@@ -1075,7 +1136,7 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
         .graph
         .nodes
         .iter()
-        .all(|node| runtime.state.nodes[&node.name].status != "dirty"));
+        .all(|node| runtime.state.nodes[&node.id].status != "dirty"));
     runtime
         .finish(
             &spec.execution,
@@ -1398,7 +1459,7 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
             Graph {
                 original_goal: "Resolve a composed workspace".into(),
                 nodes: vec![Node {
-                    name: "worker".into(),
+                    id: "worker".into(),
                     task: "Complete the work".into(),
                 }],
                 edges: Vec::new(),

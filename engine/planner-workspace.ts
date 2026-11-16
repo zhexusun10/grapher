@@ -55,7 +55,8 @@ export function switchPlannerWorkspace(requestedNode: string): WorkspaceTarget {
   const currentTargets = targetFile
     ? JSON.parse(readFileSync(targetFile, 'utf8')) as Record<string, WorkspaceTarget>
     : Object.fromEntries(targets);
-  const target = currentTargets[requestedNode];
+  // Arbitrary node IDs may match Object.prototype keys; only backend entries count.
+  const target = Object.hasOwn(currentTargets, requestedNode) ? currentTargets[requestedNode] : undefined;
   if (!target) throw new Error(`No current workspace is available for node '${requestedNode}'`);
   const workspace = realpathSync.native(target.workspace);
   if (process.env.GRAPHER_EXECUTION_KIND === 'graph' && workspace !== state.workspace) {

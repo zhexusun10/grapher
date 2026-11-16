@@ -587,188 +587,279 @@ fn environment_project_baseline() {
         // profiles after a fixture/tool/permission failure. This is diagnostic
         // collection only: any failed profile still fails the test below.
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let temp = tempfile::Builder::new()
-            .prefix("g-env-probe-")
-            .tempdir_in(&parent)
-            .unwrap();
-        let source = source(&temp);
-        let project = timed(&mut times, "fixtureSetup", || {
-            Project::prepare(name, &source, files, &mut gaps)
-        });
-        let tool_versions = project.tool_versions(&source);
-        completed_evidence["toolVersions"] = tool_versions.clone();
-        project.patch(&source, "captured-local-patch");
-        // Rustup's source default is exercised before redirecting HOME. The
-        // Cargo package cache is nevertheless disposable, not the host cache.
-        if let Project::Cargo { .. } = &project {
-            timed(&mut times, "sourceDefaultCargoBuild", || {
-                output(
-                    Command::new("cargo")
-                        .current_dir(&source)
-                        .args(["build", "--offline", "--quiet"])
-                        .env_remove("RUSTUP_TOOLCHAIN")
-                        .env("CARGO_HOME", source.join(".cargo-home")),
-                );
+            let temp = tempfile::Builder::new()
+                .prefix("g-env-probe-")
+                .tempdir_in(&parent)
+                .unwrap();
+            let source = source(&temp);
+            let project = timed(&mut times, "fixtureSetup", || {
+                Project::prepare(name, &source, files, &mut gaps)
             });
-        }
-        let source_output = timed(&mut times, "sourceExecution", || {
-            project.run(&source, false)
-        });
-        assert_eq!(source_output["value"], "captured-local-patch");
-        let source_size = size(&source, true);
-        completed_evidence["sourceExecutionEvidence"] = source_output.clone();
-        completed_evidence["sourceProject"] = serde_json::to_value(&source_size).unwrap();
-        let source_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
-        let source_index = bytes(&source.join(".git/index"));
-        let graph_directory = workspace::shadow_repo_dir(&source).unwrap();
-        assert!(
-            !graph_directory.exists(),
-            "Probe never takes ownership of a pre-existing graph store"
-        );
-        let _graph_cleanup = OwnedGraph(graph_directory.clone());
-        let base = timed(&mut times, "sourceSnapshot", || {
-            workspace::snapshot_repository(&source).unwrap()
-        });
-        let graph_after_base = size(&graph_directory, false);
-        completed_evidence["graphAfterBaseSnapshot"] = serde_json::to_value(&graph_after_base).unwrap();
-        let managed = if let Project::Python { .. } = &project {
-            let directory = temp.path().join("environment-evidence");
-            let files =
-                crate::workspace_files::Files::environment(&directory, &[".venv".into()], &[])
-                    .unwrap()
-                    .with_project_index(false);
-            let state = temp.path().join("managed-state");
-            put(
-                &state,
-                ".agent-home/config",
-                "explicit private business config",
-            );
-            let roots = std::collections::BTreeMap::from([
-                ("workspace".into(), source.clone()),
-                ("state".into(), state),
-            ]);
-            let layouts = std::collections::BTreeMap::from([
-                (
-                    "workspace".into(),
-                    crate::workspace_files::RootScope::normalized(vec![".venv".into()], vec![]),
-                ),
-                (
-                    "state".into(),
-                    crate::workspace_files::RootScope::normalized(
-                        vec![".agent-home".into()],
-                        vec![".agent-home/cache".into()],
-                    ),
-                ),
-            ]);
-            let version = uuid::Uuid::new_v4().to_string();
-            timed(&mut times, "managedEnvironmentCapture", || {
-                files
-                    .capture_roots(&roots, &layouts, &version, &[])
-                    .unwrap()
-            });
-            Some((files, version, directory, roots))
-        } else {
-            None
-        };
-        project.patch(&source, "source-later");
-        let mut managed_report = Value::Null;
-        if let Some((files, version, directory, roots)) = &managed {
-            put(&roots["state"], ".agent-home/config", "source state later");
-            timed(&mut times, "managedEnvironmentValidate", || {
-                files.validate(std::slice::from_ref(version)).unwrap()
-            });
-            let restored = temp.path().join("environment-byte-restore-W");
-            let restored_state = temp.path().join("environment-byte-restore-S");
-            fs::create_dir(&restored).unwrap();
-            put(&restored_state, ".agent-home/cache/value", "new cache");
-            let targets = std::collections::BTreeMap::from([
-                ("workspace".into(), restored.clone()),
-                ("state".into(), restored_state.clone()),
-            ]);
-            timed(&mut times, "managedEnvironmentMaterialize", || {
-                files.materialize_roots(&targets, version).unwrap()
-            });
-            assert_eq!(
-                fs::read_to_string(restored_state.join(".agent-home/config")).unwrap(),
-                "explicit private business config"
-            );
-            assert_eq!(
-                fs::read_to_string(restored_state.join(".agent-home/cache/value")).unwrap(),
-                "new cache"
-            );
-            assert!(fs::read_to_string(restored.join(project.dependency()))
-                .unwrap()
-                .contains("captured-local-patch"));
-            project.patch(&restored, "restored-only");
-            assert!(fs::read_to_string(source.join(project.dependency()))
-                .unwrap()
-                .contains("source-later"));
-            files.validate(std::slice::from_ref(version)).unwrap();
-            assert!(files.verify_roots(&targets, version).is_err());
-            managed_report = json!({"snapshotStore":size(directory,false),"restoredViews":{"workspace":size(&restored,false),"state":size(&restored_state,false)},
-                "coverage":"rooted schema 1: W:.venv and S:.agent-home excluding cache; byte materialization, not launcher/editable relocation or cross-slot environment reuse"});
-        }
-        completed_evidence["managedEnvironment"] = managed_report.clone();
-        let node = slot(&temp, "node");
-        timed(&mut times, "workspacePrepare", || {
-            workspace::prepare(&source, &node, &base, &[]).unwrap()
-        });
-        let mut home_discovery = Value::Null;
-        if let Project::Cargo {
-            default,
-            cargo,
-            rustc,
-            ..
-        } = &project
-        {
-            // A host PATH may expose a standalone Cargo binary (not a Rustup
-            // proxy), especially with Homebrew. Query Rustup's default directly
-            // with private configuration roots instead of assuming cargo --version
-            // must dispatch through Rustup on every host.
-            let private_home = crate::workspace_state::process_root(&node).unwrap().join(".agent-home");
-            let mut command = private_command("rustup", &node);
-            command
-                .arg("default")
-                .env_remove("RUSTUP_TOOLCHAIN")
-                .env("RUSTUP_HOME", private_home.join(".rustup"))
-                .env("CARGO_HOME", private_home.join(".cargo"));
-            let result = command.output().unwrap();
-            let diagnostic = String::from_utf8_lossy(&result.stderr).into_owned();
-            let configured = String::from_utf8_lossy(&result.stdout).trim().to_owned();
-            // Homebrew's Rustup wrapper supplies system fallback settings even
-            // with private HOME/RUSTUP_HOME. Record that real outcome instead of
-            // claiming every platform must lack a default. This query installs
-            // nothing; the actual build below uses explicit installed tools.
-            if result.status.success() {
-                assert!(!configured.is_empty(), "successful Rustup default query returned no evidence");
-            } else {
-                assert!(diagnostic.contains("toolchain") && diagnostic.contains("default"), "{diagnostic}");
+            let tool_versions = project.tool_versions(&source);
+            completed_evidence["toolVersions"] = tool_versions.clone();
+            project.patch(&source, "captured-local-patch");
+            // Rustup's source default is exercised before redirecting HOME. The
+            // Cargo package cache is nevertheless disposable, not the host cache.
+            if let Project::Cargo { .. } = &project {
+                timed(&mut times, "sourceDefaultCargoBuild", || {
+                    output(
+                        Command::new("cargo")
+                            .current_dir(&source)
+                            .args(["build", "--offline", "--quiet"])
+                            .env_remove("RUSTUP_TOOLCHAIN")
+                            .env("CARGO_HOME", source.join(".cargo-home"))
+                            .env("CARGO_TARGET_DIR", source.join("target")),
+                    );
+                });
             }
-            home_discovery = json!({"sourceDefault":default,"privateDefaultExit":result.status.code(),
+            let source_output = timed(&mut times, "sourceExecution", || {
+                project.run(&source, false)
+            });
+            assert_eq!(source_output["value"], "captured-local-patch");
+            let source_size = size(&source, true);
+            completed_evidence["sourceExecutionEvidence"] = source_output.clone();
+            completed_evidence["sourceProject"] = serde_json::to_value(&source_size).unwrap();
+            let source_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
+            let source_index = bytes(&source.join(".git/index"));
+            let graph_directory = workspace::shadow_repo_dir(&source).unwrap();
+            assert!(
+                !graph_directory.exists(),
+                "Probe never takes ownership of a pre-existing graph store"
+            );
+            let _graph_cleanup = OwnedGraph(graph_directory.clone());
+            let base = timed(&mut times, "sourceSnapshot", || {
+                workspace::snapshot_repository(&source).unwrap()
+            });
+            let graph_after_base = size(&graph_directory, false);
+            completed_evidence["graphAfterBaseSnapshot"] =
+                serde_json::to_value(&graph_after_base).unwrap();
+            let managed = if let Project::Python { .. } = &project {
+                let directory = temp.path().join("environment-evidence");
+                let files =
+                    crate::workspace_files::Files::environment(&directory, &[".venv".into()], &[])
+                        .unwrap()
+                        .with_project_index(false);
+                let state = temp.path().join("managed-state");
+                put(
+                    &state,
+                    ".agent-home/config",
+                    "explicit private business config",
+                );
+                let roots = std::collections::BTreeMap::from([
+                    ("workspace".into(), source.clone()),
+                    ("state".into(), state),
+                ]);
+                let layouts = std::collections::BTreeMap::from([
+                    (
+                        "workspace".into(),
+                        crate::workspace_files::RootScope::normalized(vec![".venv".into()], vec![]),
+                    ),
+                    (
+                        "state".into(),
+                        crate::workspace_files::RootScope::normalized(
+                            vec![".agent-home".into()],
+                            vec![".agent-home/cache".into()],
+                        ),
+                    ),
+                ]);
+                let version = uuid::Uuid::new_v4().to_string();
+                timed(&mut times, "managedEnvironmentCapture", || {
+                    files
+                        .capture_roots(&roots, &layouts, &version, &[])
+                        .unwrap()
+                });
+                let store_before = serde_json::to_value(size(&directory, false)).unwrap();
+                let before_resources = resources();
+                timed(&mut times, "managedEnvironmentUnchangedSeals", || {
+                    for _ in 0..3 {
+                        assert_eq!(
+                            files
+                                .capture_roots_reusing(&roots, &layouts, &version)
+                                .unwrap(),
+                            version
+                        );
+                    }
+                });
+                let store_after = serde_json::to_value(size(&directory, false)).unwrap();
+                assert_eq!(
+                    store_after, store_before,
+                    "unchanged seals must not retain orphan manifests"
+                );
+                let unchanged = json!({"seals":3,"storeBefore":store_before,"storeAfter":store_after,
+                "resourcesBefore":before_resources,"resourcesAfter":resources(),"sameImmutableRef":true});
+                // Disposable reference store only; never duplicate production E or
+                // execute from another workspace's mutable prefix. Both scans read
+                // this same quiescent real venv and explicitly private config.
+                let reference_directory = temp.path().join("environment-evidence-reference");
+                let reference_files =
+                    crate::workspace_files::Files::environment(&reference_directory, &[], &[])
+                        .unwrap()
+                        .with_project_index(false);
+                reference_files
+                    .capture_roots(&roots, &layouts, &version, &[])
+                    .unwrap();
+                let reference_before =
+                    serde_json::to_value(size(&reference_directory, false)).unwrap();
+                let reference_resources = resources();
+                timed(
+                    &mut times,
+                    "managedEnvironmentReferenceUnchangedSeals",
+                    || {
+                        for _ in 0..3 {
+                            assert_eq!(
+                                reference_files
+                                    .capture_roots_unbatched(&roots, &layouts, &version)
+                                    .unwrap(),
+                                version
+                            );
+                        }
+                    },
+                );
+                let reference = json!({"seals":3,"storeBefore":reference_before,
+                "storeAfter":size(&reference_directory,false),"resourcesBefore":reference_resources,
+                "resourcesAfter":resources(),"strategy":"test-only per-file single-path-check; no checked-set lookup/insertion; write-then-compare; separate disposable store"});
+                Some((
+                    files, version, directory, roots, layouts, unchanged, reference,
+                ))
+            } else {
+                None
+            };
+            project.patch(&source, "source-later");
+            let mut managed_report = Value::Null;
+            if let Some((files, version, directory, roots, layouts, unchanged, reference)) =
+                &managed
+            {
+                put(&roots["state"], ".agent-home/config", "source state later");
+                let changed = timed(&mut times, "managedEnvironmentChangedSeal", || {
+                    files
+                        .capture_roots_reusing(roots, layouts, version)
+                        .unwrap()
+                });
+                assert_ne!(
+                    changed, *version,
+                    "real dependency/config edits must append new evidence"
+                );
+                timed(&mut times, "managedEnvironmentValidate", || {
+                    files.validate(std::slice::from_ref(version)).unwrap()
+                });
+                let restored = temp.path().join("environment-byte-restore-W");
+                let restored_state = temp.path().join("environment-byte-restore-S");
+                fs::create_dir(&restored).unwrap();
+                put(&restored_state, ".agent-home/cache/value", "new cache");
+                let targets = std::collections::BTreeMap::from([
+                    ("workspace".into(), restored.clone()),
+                    ("state".into(), restored_state.clone()),
+                ]);
+                timed(&mut times, "managedEnvironmentMaterialize", || {
+                    files.materialize_roots(&targets, version).unwrap()
+                });
+                assert_eq!(
+                    fs::read_to_string(restored_state.join(".agent-home/config")).unwrap(),
+                    "explicit private business config"
+                );
+                assert_eq!(
+                    fs::read_to_string(restored_state.join(".agent-home/cache/value")).unwrap(),
+                    "new cache"
+                );
+                assert!(fs::read_to_string(restored.join(project.dependency()))
+                    .unwrap()
+                    .contains("captured-local-patch"));
+                project.patch(&restored, "restored-only");
+                assert!(fs::read_to_string(source.join(project.dependency()))
+                    .unwrap()
+                    .contains("source-later"));
+                files.validate(std::slice::from_ref(version)).unwrap();
+                assert!(files.verify_roots(&targets, version).is_err());
+                timed(&mut times, "managedEnvironmentPatchedMaterialize", || {
+                    files.materialize_roots(&targets, &changed).unwrap()
+                });
+                files.verify_roots(&targets, &changed).unwrap();
+                files.validate(&[changed.clone()]).unwrap();
+                assert!(fs::read_to_string(restored.join(project.dependency()))
+                    .unwrap()
+                    .contains("source-later"));
+                assert_eq!(
+                    fs::read_to_string(restored_state.join(".agent-home/config")).unwrap(),
+                    "source state later"
+                );
+                assert_eq!(
+                    fs::read_to_string(restored_state.join(".agent-home/cache/value")).unwrap(),
+                    "new cache"
+                );
+                managed_report = json!({"snapshotStore":size(directory,false),"unchangedSeals":unchanged,
+                "referenceUnchangedSeals":reference,"changedSealHasDistinctRef":true,"oldAndPatchedRecordedBytesRestored":true,
+                "restoredViews":{"workspace":size(&restored,false),"state":size(&restored_state,false)},
+                "coverage":"rooted schema 1: W:.venv and S:.agent-home excluding cache; byte materialization, not launcher/editable relocation or cross-slot environment reuse"});
+            }
+            completed_evidence["managedEnvironment"] = managed_report.clone();
+            let node = slot(&temp, "node");
+            timed(&mut times, "workspacePrepare", || {
+                workspace::prepare(&source, &node, &base, &[]).unwrap()
+            });
+            let mut home_discovery = Value::Null;
+            if let Project::Cargo {
+                default,
+                cargo,
+                rustc,
+                ..
+            } = &project
+            {
+                // A host PATH may expose a standalone Cargo binary (not a Rustup
+                // proxy), especially with Homebrew. Query Rustup's default directly
+                // with private configuration roots instead of assuming cargo --version
+                // must dispatch through Rustup on every host.
+                let private_home = crate::workspace_state::process_root(&node)
+                    .unwrap()
+                    .join(".agent-home");
+                let mut command = private_command("rustup", &node);
+                command
+                    .arg("default")
+                    .env_remove("RUSTUP_TOOLCHAIN")
+                    .env("RUSTUP_HOME", private_home.join(".rustup"))
+                    .env("CARGO_HOME", private_home.join(".cargo"));
+                let result = command.output().unwrap();
+                let diagnostic = String::from_utf8_lossy(&result.stderr).into_owned();
+                let configured = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+                // Homebrew's Rustup wrapper supplies system fallback settings even
+                // with private HOME/RUSTUP_HOME. Record that real outcome instead of
+                // claiming every platform must lack a default. This query installs
+                // nothing; the actual build below uses explicit installed tools.
+                if result.status.success() {
+                    assert!(
+                        !configured.is_empty(),
+                        "successful Rustup default query returned no evidence"
+                    );
+                } else {
+                    assert!(
+                        diagnostic.contains("toolchain") && diagnostic.contains("default"),
+                        "{diagnostic}"
+                    );
+                }
+                home_discovery = json!({"sourceDefault":default,"privateDefaultExit":result.status.code(),
                 "privateDefaultConfigured":result.status.success(),"privateDefaultOutput":configured,
                 "privateDiagnostic":diagnostic,"explicitCargo":cargo,"explicitRustc":rustc,
-                "setup":"direct installed cargo + explicit RUSTC/RUSTDOC; private CARGO_HOME and target; no home copy or automatic fallback"});
-        }
-        if matches!(project, Project::Cargo { .. }) {
-            timed(&mut times, "explicitPrivateBuild", || {
-                project.build_private(&node)
+                "setup":"direct installed Cargo plus explicit RUSTC/RUSTDOC; private HOME/CARGO_HOME and target; no home copy or automatic fallback"});
+            }
+            if matches!(project, Project::Cargo { .. }) {
+                timed(&mut times, "explicitPrivateBuild", || {
+                    project.build_private(&node)
+                });
+            }
+            let node_output = timed(&mut times, "nodeExecution", || project.run(&node, true));
+            assert_eq!(node_output["value"], "captured-local-patch");
+            project.patch(&node, "node-patch");
+            if matches!(project, Project::Cargo { .. }) {
+                timed(&mut times, "patchedPrivateBuild", || {
+                    project.build_private(&node)
+                });
+            }
+            let result = timed(&mut times, "nodeSnapshot", || {
+                workspace::snapshot_node(&node, &source, "node").unwrap()
             });
-        }
-        let node_output = timed(&mut times, "nodeExecution", || project.run(&node, true));
-        assert_eq!(node_output["value"], "captured-local-patch");
-        project.patch(&node, "node-patch");
-        if matches!(project, Project::Cargo { .. }) {
-            timed(&mut times, "patchedPrivateBuild", || {
-                project.build_private(&node)
-            });
-        }
-        let result = timed(&mut times, "nodeSnapshot", || {
-            workspace::snapshot_node(&node, &source, "node").unwrap()
-        });
-        let before_concurrent = resources();
-        let branches = timed(&mut times, "concurrentForkAndSnapshotWall", || {
-            std::thread::scope(|scope| {
-                let workers: Vec<_> = ["a", "b"].into_iter().map(|name| {
+            let before_concurrent = resources();
+            let branches = timed(&mut times, "concurrentForkAndSnapshotWall", || {
+                std::thread::scope(|scope| {
+                    let workers: Vec<_> = ["a", "b"].into_iter().map(|name| {
                 let (source, temp, base, result) = (&source, &temp, &base, &result);
                 scope.spawn(move || {
                     let path = slot(temp, name);
@@ -781,64 +872,64 @@ fn environment_project_baseline() {
                     (path, head, json!({"prepareMs":prepare_ms,"snapshotMs":start.elapsed().as_secs_f64()*1000.0}))
                 })
             }).collect();
-                workers
-                    .into_iter()
-                    .map(|worker| worker.join().unwrap())
-                    .collect::<Vec<_>>()
-            })
-        });
-        let after_concurrent = resources();
-        for (path, head, _) in &branches {
-            assert_eq!(project.run(path, true)["value"], "node-patch");
-            verify_result(path, &source, head).unwrap();
-        }
-        let joined = slot(&temp, "joined");
-        let parents: Vec<_> = branches.iter().map(|(_, head, _)| head.clone()).collect();
-        timed(&mut times, "mergePrepare", || {
-            workspace::prepare(&source, &joined, &base, &parents).unwrap()
-        });
-        assert_eq!(project.run(&joined, true)["value"], "node-patch");
-        let rebuild = if matches!(project, Project::Python { .. }) {
-            let evidence = timed(&mut times, "explicitOfflineRebuild", || {
-                project.explicit_rebuild(&joined)
-            })
-            .unwrap();
-            assert_eq!(evidence["runtimeEvidence"]["abi"], node_output["abi"]);
-            Some(evidence)
-        } else {
-            None
-        };
-        assert_eq!(bytes(&joined.join("branch-a.txt")), b"a");
-        assert_eq!(bytes(&joined.join("branch-b.txt")), b"b");
-        // Mutation, not inode assumptions: this detects writable hardlink/copy
-        // sharing regardless of whether the native copy used a reflink.
-        project.patch(&branches[0].0, "branch-only");
-        for path in [&node, &branches[1].0, &joined] {
-            assert_eq!(
-                fs::read_to_string(path.join(project.dependency())).unwrap(),
-                fs::read_to_string(node.join(project.dependency())).unwrap()
+                    workers
+                        .into_iter()
+                        .map(|worker| worker.join().unwrap())
+                        .collect::<Vec<_>>()
+                })
+            });
+            let after_concurrent = resources();
+            for (path, head, _) in &branches {
+                assert_eq!(project.run(path, true)["value"], "node-patch");
+                verify_result(path, &source, head).unwrap();
+            }
+            let joined = slot(&temp, "joined");
+            let parents: Vec<_> = branches.iter().map(|(_, head, _)| head.clone()).collect();
+            timed(&mut times, "mergePrepare", || {
+                workspace::prepare(&source, &joined, &base, &parents).unwrap()
+            });
+            assert_eq!(project.run(&joined, true)["value"], "node-patch");
+            let rebuild = if matches!(project, Project::Python { .. }) {
+                let evidence = timed(&mut times, "explicitOfflineRebuild", || {
+                    project.explicit_rebuild(&joined)
+                })
+                .unwrap();
+                assert_eq!(evidence["runtimeEvidence"]["abi"], node_output["abi"]);
+                Some(evidence)
+            } else {
+                None
+            };
+            assert_eq!(bytes(&joined.join("branch-a.txt")), b"a");
+            assert_eq!(bytes(&joined.join("branch-b.txt")), b"b");
+            // Mutation, not inode assumptions: this detects writable hardlink/copy
+            // sharing regardless of whether the native copy used a reflink.
+            project.patch(&branches[0].0, "branch-only");
+            for path in [&node, &branches[1].0, &joined] {
+                assert_eq!(
+                    fs::read_to_string(path.join(project.dependency())).unwrap(),
+                    fs::read_to_string(node.join(project.dependency())).unwrap()
+                );
+            }
+            assert_ne!(
+                bytes(&source.join(project.dependency())),
+                bytes(&node.join(project.dependency()))
             );
-        }
-        assert_ne!(
-            bytes(&source.join(project.dependency())),
-            bytes(&node.join(project.dependency()))
-        );
-        assert!(verify_result(&branches[0].0, &source, &branches[0].1).is_err());
-        let recovered = slot(&temp, "recovered");
-        timed(&mut times, "immutableSnapshotReconstruction", || {
-            workspace::prepare(&source, &recovered, &base, &parents).unwrap()
-        });
-        assert_eq!(project.run(&recovered, true)["value"], "node-patch");
-        assert_eq!(
-            workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
-            source_head
-        );
-        assert_eq!(bytes(&source.join(".git/index")), source_index);
-        let private_size = size(node.parent().unwrap(), false);
-        let graph_size = size(&graph_directory, false);
-        let amplification = (private_size.logical_bytes + graph_size.logical_bytes) as f64
-            / source_size.logical_bytes.max(1) as f64;
-        let report = json!({"project":name,"profile":"offline-small-real-tools","componentStatus":if gaps.len() == gap_start {"completed"} else {"incomplete"},"toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
+            assert!(verify_result(&branches[0].0, &source, &branches[0].1).is_err());
+            let recovered = slot(&temp, "recovered");
+            timed(&mut times, "immutableSnapshotReconstruction", || {
+                workspace::prepare(&source, &recovered, &base, &parents).unwrap()
+            });
+            assert_eq!(project.run(&recovered, true)["value"], "node-patch");
+            assert_eq!(
+                workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+                source_head
+            );
+            assert_eq!(bytes(&source.join(".git/index")), source_index);
+            let private_size = size(node.parent().unwrap(), false);
+            let graph_size = size(&graph_directory, false);
+            let amplification = (private_size.logical_bytes + graph_size.logical_bytes) as f64
+                / source_size.logical_bytes.max(1) as f64;
+            let report = json!({"project":name,"profile":"offline-small-real-tools","componentStatus":if gaps.len() == gap_start {"completed"} else {"incomplete"},"toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
             "timingsMs":times,"sourceProject":source_size,"graphAfterBaseSnapshot":graph_after_base,
             "graphFinal":graph_size,"fivePrivateViewsAndMetadata":private_size,
             "retainedLogicalStorageOverSourceProject":amplification,"concurrentWriters":2,
@@ -848,14 +939,20 @@ fn environment_project_baseline() {
             "explicitProjectRebuild":rebuild,"managedEnvironment":managed_report,"homeDiscovery":home_discovery,"sourceDriftIsolated":true,"mutableBranchSharingDetected":false,"validationGaps":&gaps[gap_start..],
             "nativeSandboxAcceptance":"NOT RUN by this component probe",
             "measurementLimits":"warm OS cache; test profile; logical bytes not allocated blocks; process counters exclude child Git/compiler resources; no publication timing or compatibility claim"});
-        // The owned graph guard and TempDir also run on assertion failures.
-        report
+            // The owned graph guard and TempDir also run on assertion failures.
+            report
         }));
         let mut report = match attempt {
             Ok(report) => report,
             Err(error) => {
-                let diagnostic = error.downcast_ref::<String>().cloned()
-                    .or_else(|| error.downcast_ref::<&str>().map(|message| (*message).to_owned()))
+                let diagnostic = error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        error
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                    })
                     .unwrap_or_else(|| "Non-string panic in project baseline".into());
                 json!({"project":name,"profile":"offline-small-real-tools","componentStatus":"failed",
                     "diagnostic":diagnostic,"timingsMs":times,"completedEvidence":completed_evidence,"validationGaps":&gaps[gap_start..],
@@ -867,12 +964,21 @@ fn environment_project_baseline() {
         println!("GRAPHER_ENVIRONMENT_PROBE {}", report);
         reports.push(report);
     }
-    let failed: Vec<_> = reports.iter().filter(|report| report["componentStatus"] == "failed")
-        .map(|report| report["project"].as_str().unwrap()).collect();
+    let failed: Vec<_> = reports
+        .iter()
+        .filter(|report| report["componentStatus"] == "failed")
+        .map(|report| report["project"].as_str().unwrap())
+        .collect();
     if std::env::var_os("GRAPHER_ENV_PROBE_REQUIRE_UV").is_some() && !selected.contains(&"python") {
         gaps.push("Required uv invocation NOT RUN: Python profile was not selected".into());
     }
-    let status = if !failed.is_empty() { "failed" } else if !gaps.is_empty() { "incomplete" } else { "completed" };
+    let status = if !failed.is_empty() {
+        "failed"
+    } else if !gaps.is_empty() {
+        "incomplete"
+    } else {
+        "completed"
+    };
     let report = json!({"schema":1,"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
         "componentStatus":status,"requestedProjects":selected,"profiles":reports,"failedProjects":failed,"validationGaps":gaps});
     if let Some(path) = std::env::var_os("GRAPHER_ENV_PROBE_REPORT") {
@@ -886,7 +992,10 @@ fn environment_project_baseline() {
             .unwrap();
     }
     println!("GRAPHER_ENVIRONMENT_PROBE_SUMMARY {}", report);
-    assert!(failed.is_empty(), "Project baseline failed (report retained): {failed:?}");
+    assert!(
+        failed.is_empty(),
+        "Project baseline failed (report retained): {failed:?}"
+    );
     assert!(
         std::env::var_os("GRAPHER_ENV_PROBE_REQUIRE_UV").is_none()
             || selected.contains(&"python") && gaps.is_empty(),

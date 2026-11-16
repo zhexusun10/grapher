@@ -6,11 +6,11 @@ fn composer_node_override_survives_replay_profile_saves_and_dispatch() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "a".into(),
+                id: "a".into(),
                 task: "a".into(),
             },
             Node {
-                name: "b".into(),
+                id: "b".into(),
                 task: "b".into(),
             },
         ],

@@ -119,7 +119,7 @@ test('Windows projects/backends share a persistent engine and default workspaces
       assert.equal(await realpath(path), await realpath(engine));
     }
     const draft = await first.api('save_graph', { graph: { originalGoal: 'Return Completed',
-      nodes: ['A', 'B', 'C', 'D'].map(name => ({ name, task: 'Return Completed without tools' })), edges: [] }, config: first.config });
+      nodes: ['A', 'B', 'C', 'D'].map(name => ({ id: name, task: 'Return Completed without tools' })), edges: [] }, config: first.config });
     await first.api('control', { action: 'approve', runId: draft.runId });
     let completed;
     await until(first, async () => {

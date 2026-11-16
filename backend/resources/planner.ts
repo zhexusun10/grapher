@@ -1,45 +1,34 @@
 import { Type } from "typebox";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { defineTool, formatSize, truncateHead, truncateLine, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 
-type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; feedback: boolean }[] };
+type Graph = { originalGoal: string; nodes: { id: string; task: string }[]; edges: { from: string; to: string; feedback: boolean }[] };
 
 type NodeEdit = { id: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; feedback?: boolean; delete?: boolean };
-type Diagnostic = { code: string; message: string };
+type GraphEdit = { nodes?: NodeEdit[]; edges?: EdgeEdit[] };
+type MutationTool = "edit_graph";
+type Diagnostic = { code: string; message: string; dependencyPath?: string[] };
+type FailedNodeCall = { nodeId: string; toolCallId: string };
+// A change either succeeds with a summary or is rejected before compilation.
+type Change = { summary: string; notes?: string[]; createdDependencies?: Pick<EdgeEdit, "from" | "to">[] };
+// Structured effects for logs and the UI. The model reads `content`; failure is
+// carried by the result's `isError`, as in Pi's bash tool.
+type GraphToolDetails = {
+  diagnosticCodes?: string[];
+  diagnostics?: string[];
+  warnings?: string[];
+  notes?: string[];
+  relatedFailures?: FailedNodeCall[];
+  truncation?: ReturnType<typeof truncateHead>;
+  fullOutputPath?: string;
+};
 
 function stripDiagnosticCode(message: string): string {
   return message.replace(/^(?:\[?[A-Za-z]{1,5}[-_]?\d+\]?[:\-]?\s*)/, "");
-}
-
-function topology(graph: Graph, feedbackEnabled: boolean) {
-  // Keep ordinary edges in the edge tool's from -> to direction, including
-  // every node so an empty list explicitly means no outgoing ordinary edges.
-  // Map is safe for arbitrary node names, including __proto__ and constructor.
-  const ordinaryTo = new Map(graph.nodes.map(node => [node.name, [] as string[]]));
-  const feedbackTo = new Map<string, string>();
-  const unrepresentedEdges: Graph["edges"] = [];
-  for (const edge of graph.edges) {
-    if (edge.feedback && !feedbackEnabled) continue;
-    // Valid graphs always have known endpoints and at most one feedback target
-    // per source. Preserve anomalous saved/legacy edges rather than hiding them
-    // if a rejected edit has to report an invalid pre-existing candidate.
-    if (!ordinaryTo.has(edge.from) || !ordinaryTo.has(edge.to)
-      || (edge.feedback && feedbackTo.has(edge.from))) {
-      unrepresentedEdges.push(edge);
-    } else if (edge.feedback) {
-      feedbackTo.set(edge.from, edge.to);
-    } else {
-      ordinaryTo.get(edge.from)!.push(edge.to);
-    }
-  }
-  return {
-    "from: [to]": Object.fromEntries(ordinaryTo),
-    ...(feedbackEnabled ? { feedbackTo: Object.fromEntries(feedbackTo) } : {}),
-    ...(unrepresentedEdges.length ? { unrepresentedEdges: feedbackEnabled ? unrepresentedEdges
-      : unrepresentedEdges.map(({ from, to }) => ({ from, to })) } : {}),
-  };
 }
 
 // Disabled tools still validate the complete saved graph. Preserve the error
@@ -47,34 +36,23 @@ function topology(graph: Graph, feedbackEnabled: boolean) {
 // repair instruction. Existing routes must never be silently dropped to pass.
 function diagnosticText(diagnostic: Diagnostic, feedbackEnabled: boolean): string {
   if (!feedbackEnabled && diagnostic.code === "E207") {
-    return "This edit removes a dependency path required by a retained graph constraint. Add replacement dependency paths before removing existing ones, or ask the user to review the graph in the Graph IR editor. The graph is unchanged.";
+    return "This batch removes a dependency path required by a retained graph constraint. Preserve the required path, including any replacement path in the same batch. If the constraint cannot be preserved, ask the user to repair the graph in the Graph IR editor. The graph is unchanged.";
   }
   if (!feedbackEnabled && diagnostic.code === "E208") {
     return "The saved graph contains incompatible retained routes. Ask the user to repair the graph in the Graph IR editor before continuing. The graph is unchanged.";
   }
-  return stripDiagnosticCode(diagnostic.message)
-    .replace(/^Node names\b/, "Node ids")
-    .replace(/^Node name\b/, "Node id");
-}
-
-function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {
-  const firstIndex = new Map<string, number>();
-  const diagnostics: Diagnostic[] = [];
-  targets.forEach((target, index) => {
-    const first = firstIndex.get(target);
-    if (first === undefined) firstIndex.set(target, index);
-    else diagnostics.push({
-      code: "duplicate-target",
-      message: `${field}[${index}] repeats target ${target} from ${field}[${first}]. Supply one edit per target.`,
-    });
-  });
-  return diagnostics;
+  return stripDiagnosticCode(diagnostic.message);
 }
 
 type JsonRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isDiagnostic(value: unknown): value is Diagnostic {
+  return isRecord(value) && typeof value.code === "string" && typeof value.message === "string"
+    && (value.dependencyPath === undefined || (Array.isArray(value.dependencyPath) && value.dependencyPath.every(id => typeof id === "string")));
 }
 
 function parseArguments(raw: unknown): unknown {
@@ -86,164 +64,47 @@ function parseArguments(raw: unknown): unknown {
   }
 }
 
-function parseEditString(value: unknown): unknown[] | undefined {
-  if (typeof value !== "string") return undefined;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (Array.isArray(parsed)) return parsed;
-    if (isRecord(parsed)) return [parsed];
-  } catch { }
-  return undefined;
+// Like Pi's edit, tolerate stringified collections and single collection items.
+// Field types, nullable optionals and unknown fields remain Pi's responsibility.
+function graphArguments(raw: unknown): GraphEdit {
+  const value = parseArguments(raw);
+  if (!isRecord(value)) return value as GraphEdit;
+  const prepared = { ...value };
+  for (const key of ["nodes", "edges"] as const) {
+    if (!Object.hasOwn(value, key)) continue;
+    const parsed = parseArguments(value[key]);
+    const items = isRecord(parsed) ? [parsed] : parsed;
+    prepared[key] = items;
+  }
+  return prepared as GraphEdit;
 }
 
-function singleEdit(raw: JsonRecord, fields: readonly string[]): JsonRecord {
-  const edit: JsonRecord = {};
-  for (const field of fields) {
-    if (raw[field] !== undefined) edit[field] = raw[field];
-  }
-  return edit;
+// Lifecycle start events precede Pi's validator. Record only unambiguous
+// identity/deletion intent using the same primitive meanings, never task text.
+function nodeIntent(value: unknown): NodeEdit | undefined {
+  if (!isRecord(value) || !Object.hasOwn(value, "id")) return;
+  const id = value.id;
+  if (id !== null && typeof id !== "string" && typeof id !== "boolean"
+    && !(typeof id === "number" && Number.isFinite(id))) return;
+  let deleting = false;
+  const flag = typeof value.delete === "string" ? value.delete.toLowerCase() : value.delete;
+  if (flag === true || flag === 1 || flag === "true" || flag === "1") deleting = true;
+  else if (flag !== undefined && flag !== null && flag !== false && flag !== 0 && flag !== "false" && flag !== "0") return;
+  return String(id) ? { id: String(id), delete: deleting } : undefined;
 }
 
-function normalizeEdits(raw: unknown, key: "nodes" | "edges", required: readonly string[], fields: readonly string[]): unknown {
-  if (Array.isArray(raw)) return { [key]: raw };
-  if (!isRecord(raw)) return raw;
-  const value = raw[key];
-  const hasSingle = required.every(field => raw[field] !== undefined && raw[field] !== null);
-  let list: unknown[] | undefined;
-  if (Array.isArray(value)) list = value;
-  else if (isRecord(value)) list = [value];
-  else list = parseEditString(value);
-  // Models often omit the one-element batch wrapper, or send a bare edit next
-  // to an empty batch. Treat the single edit as the intended payload.
-  if (hasSingle && (list === undefined || list.length === 0)) list = [singleEdit(raw, fields)];
-  return list === undefined ? raw : { [key]: list };
-}
-
-// Older Planner sessions may replay node calls using `name`. Keep that
-// input compatible without exposing it in the current tool schema.
-function nodeIdAlias(value: unknown): unknown {
-  if (!isRecord(value) || !Object.hasOwn(value, "name")) return value;
-  if (Object.hasOwn(value, "id")) throw new Error('Invalid node edit: supply "id", not both "id" and legacy "name".');
-  const { name, ...rest } = value;
-  return { ...rest, id: name };
-}
-
-// Project old tool-call arguments to the current Planner vocabulary without
-// rewriting stored sessions or interpreting task text as graph metadata.
-function plannerHistoryArguments(value: unknown, tool: "node" | "switch_workspace"): unknown {
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      const projected = plannerHistoryArguments(parsed, tool);
-      return projected === parsed ? value : JSON.stringify(projected);
-    } catch { return value; }
+function duplicateTargets(label: string, targets: string[]): Diagnostic[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const target of targets) {
+    if (seen.has(target)) duplicates.add(target);
+    seen.add(target);
   }
-  if (Array.isArray(value)) {
-    const items = value.map(item => plannerHistoryArguments(item, tool));
-    return items.some((item, index) => item !== value[index]) ? items : value;
-  }
-  if (!isRecord(value)) return value;
-  let projected = value;
-  const legacy = tool === "node" ? "name" : "node";
-  if (Object.hasOwn(value, legacy)) {
-    const { [legacy]: oldId, ...rest } = value;
-    projected = { ...rest, id: Object.hasOwn(value, "id") ? value.id : oldId };
-  }
-  if (tool === "node" && Object.hasOwn(value, "nodes")) {
-    const nodes = plannerHistoryArguments(value.nodes, tool);
-    if (nodes !== value.nodes) projected = { ...projected, nodes };
-  }
-  return projected;
-}
-
-function describeShape(value: unknown): string {
-  if (Array.isArray(value)) return "an array";
-  if (isRecord(value)) {
-    const keys = Object.keys(value);
-    return keys.length ? `an object with keys ${keys.join(", ")}` : "an empty object";
-  }
-  return value === null ? "null" : typeof value;
-}
-
-// Keep this item-level pass in sync with the TypeBox schema: it runs before
-// Pi's validator so invalid edits never reach the generic error path.
-function normalizeEdit(
-  raw: unknown,
-  label: string,
-  required: readonly string[],
-  fields: readonly string[],
-  booleanFields: readonly string[],
-  example: string,
-): JsonRecord {
-  if (!isRecord(raw)) {
-    throw new Error(`Invalid ${label} edit. Expected an object. Received ${describeShape(raw)}.`);
-  }
-  const allowed = new Set(fields);
-  const unsupported = Object.keys(raw).filter(field => !allowed.has(field));
-  if (unsupported.length) {
-    throw new Error(`Invalid ${label} edit: unsupported field(s) ${unsupported.join(", ")}. Allowed fields: ${fields.join(", ")}. Expected ${example}.`);
-  }
-  const optionalStrings = fields.filter(field => !required.includes(field) && !booleanFields.includes(field));
-  const edit: JsonRecord = {};
-  for (const field of required) {
-    const value = raw[field];
-    if (typeof value === "string") edit[field] = value;
-    else if (typeof value === "number" || typeof value === "boolean") edit[field] = String(value);
-    else throw new Error(`Invalid ${label} edit: "${field}" must be a string. Expected ${example}.`);
-  }
-  for (const field of optionalStrings) {
-    const value = raw[field];
-    if (value === undefined || value === null) continue;
-    if (typeof value === "string") edit[field] = value;
-    else if (typeof value === "number" || typeof value === "boolean") edit[field] = String(value);
-    else throw new Error(`Invalid ${label} edit: "${field}" must be a string. Expected ${example}.`);
-  }
-  for (const field of booleanFields) {
-    const value = raw[field];
-    if (value === undefined || value === null) continue;
-    if (typeof value === "boolean") edit[field] = value;
-    else if (value === "true" || value === "false") edit[field] = value === "true";
-    else if (value === 1 || value === 0) edit[field] = value === 1;
-    else throw new Error(`Invalid ${label} edit: "${field}" must be a boolean. Expected ${example}.`);
-  }
-  return edit;
-}
-
-// Pi validates parameters before execute(), and its generic validator reports
-// shape mismatches as `schema is false` / `must have required properties`.
-// Normalize the common single-edit variants here so the model's intent wins,
-// and keep the canonical wire schema array-only so strict providers still
-// generate the batch shape.
-function editArguments(
-  raw: unknown,
-  key: "nodes" | "edges",
-  required: readonly string[],
-  fields: readonly string[],
-  example: string,
-): any {
-  const label = key === "nodes" ? "node" : "edge";
-  const parsed = key === "nodes" ? nodeIdAlias(parseArguments(raw)) : parseArguments(raw);
-  if (isRecord(parsed)) {
-    const allowed = new Set([key, ...fields]);
-    const unsupported = Object.keys(parsed).filter(field => !allowed.has(field));
-    if (unsupported.length) {
-      throw new Error(`Invalid ${label} call: unsupported field(s) ${unsupported.join(", ")}. Expected ${example}.`);
-    }
-  }
-  const normalized = normalizeEdits(parsed, key, required, fields);
-  if (!isRecord(normalized) || !Array.isArray(normalized[key])) {
-    throw new Error(`Invalid ${label} call. Expected ${example}. Received ${describeShape(parsed)}.`);
-  }
-  if (normalized[key].length === 0) {
-    throw new Error(`Invalid ${label} call: ${key} must contain at least one edit. Expected ${example}.`);
-  }
-  const booleanFields = fields.filter(field => field === "feedback" || field === "delete");
-  const edits = normalized[key].map(edit => normalizeEdit(key === "nodes" ? nodeIdAlias(edit) : edit, label, required, fields, booleanFields, example));
-  return { [key]: edits };
+  return [...duplicates].map(target => ({ code: "duplicate-target", message: `Duplicate ${label} target ${target}. Include each target only once per batch.` }));
 }
 
 function applyNode(graph: Graph, edit: NodeEdit): Graph["edges"] {
-  graph.nodes = graph.nodes.filter(node => node.name !== edit.id);
+  graph.nodes = graph.nodes.filter(node => node.id !== edit.id);
   if (edit.delete) {
     const removed = graph.edges.filter(edge => edge.from === edit.id || edge.to === edit.id);
     if (removed.length > 0) {
@@ -251,168 +112,143 @@ function applyNode(graph: Graph, edit: NodeEdit): Graph["edges"] {
     }
     return removed;
   }
-  graph.nodes.push({ name: edit.id, task: edit.task ?? "" });
+  graph.nodes.push({ id: edit.id, task: edit.task ?? "" });
   return [];
 }
 
-function applyEdge(graph: Graph, edit: EdgeEdit): boolean {
-  const before = graph.edges.length;
-  graph.edges = graph.edges.filter(edge => edge.from !== edit.from || edge.to !== edit.to);
-  if (!edit.delete) {
-    graph.edges.push({ from: edit.from, to: edit.to, feedback: edit.feedback ?? false });
-    return true;
-  }
-  return graph.edges.length < before;
-}
+type EdgeEffect = { kind: "created" | "deleted" | "missing" | "unchanged" } | { kind: "updated"; previousFeedback: boolean };
 
-function alternateDependencyPath(edges: Graph["edges"], from: string, to: string): string[] | undefined {
-  const queue = [from];
-  const previous = new Map<string, string | undefined>([[from, undefined]]);
-  while (queue.length > 0) {
-    const name = queue.shift()!;
-    const neighbors = Array.from(new Set(
-      edges
-        .filter(edge => !edge.feedback && edge.from === name && !(edge.from === from && edge.to === to))
-        .map(edge => edge.to),
-    )).sort();
-    for (const next of neighbors) {
-      if (previous.has(next)) continue;
-      previous.set(next, name);
-      if (next === to) {
-        const path = [next];
-        let current: string | undefined = next;
-        while ((current = previous.get(current)) !== undefined) path.push(current);
-        path.reverse();
-        return path;
-      }
-      queue.push(next);
-    }
+function applyEdge(graph: Graph, edit: EdgeEdit): EdgeEffect {
+  const existing = graph.edges.find(edge => edge.from === edit.from && edge.to === edit.to);
+  if (edit.delete) {
+    if (!existing) return { kind: "missing" };
+    graph.edges = graph.edges.filter(edge => edge !== existing);
+    return { kind: "deleted" };
   }
-  return undefined;
-}
-
-function isDependencyDag(graph: Graph): boolean {
-  const names = new Set(graph.nodes.map(node => node.name));
-  if (names.size !== graph.nodes.length) return false;
-  const degrees = new Map<string, number>(graph.nodes.map(node => [node.name, 0]));
-  const outgoing = new Map<string, string[]>(graph.nodes.map(node => [node.name, []]));
-  for (const edge of graph.edges) {
-    if (!names.has(edge.from) || !names.has(edge.to) || edge.from === edge.to) return false;
-    if (edge.feedback) continue;
-    degrees.set(edge.to, (degrees.get(edge.to) ?? 0) + 1);
-    outgoing.get(edge.from)!.push(edge.to);
-  }
-  const ready = Array.from(degrees.entries()).filter(([, degree]) => degree === 0).map(([name]) => name);
-  let visited = 0;
-  while (ready.length > 0) {
-    const name = ready.shift()!;
-    visited++;
-    for (const next of outgoing.get(name) ?? []) {
-      const remaining = degrees.get(next)! - 1;
-      degrees.set(next, remaining);
-      if (remaining === 0) ready.push(next);
-    }
-  }
-  return visited === names.size;
-}
-
-function pruneRedundantEdges(graph: Graph): { from: string; to: string; path: string[] }[] {
-  if (!isDependencyDag(graph)) return [];
-  const removed: { from: string; to: string }[] = [];
-  const kept: Graph["edges"] = [];
-  const candidates = graph.edges.slice();
-  for (let index = 0; index < candidates.length; index++) {
-    const edge = candidates[index];
-    if (edge.feedback) {
-      kept.push(edge);
-      continue;
-    }
-    const remaining = [...kept, ...candidates.slice(index + 1)];
-    if (alternateDependencyPath(remaining, edge.from, edge.to)) {
-      removed.push({ from: edge.from, to: edge.to });
-    } else {
-      kept.push(edge);
-    }
-  }
-  if (removed.length === 0) return [];
-  graph.edges = kept;
-  // Recompute alternate paths against the final reduced graph so every edge
-  // cited in the explanation exists in the returned topology.
-  return removed.map(edge => ({
-    ...edge,
-    path: alternateDependencyPath(kept, edge.from, edge.to) ?? [edge.from, edge.to],
-  }));
+  const feedback = edit.feedback ?? false;
+  if (existing && existing.feedback === feedback) return { kind: "unchanged" };
+  graph.edges = graph.edges.filter(edge => edge !== existing);
+  graph.edges.push({ from: edit.from, to: edit.to, feedback });
+  return existing ? { kind: "updated", previousFeedback: existing.feedback } : { kind: "created" };
 }
 
 export default function grapherPlanner(pi: ExtensionAPI) {
   const graphPath = process.env.GRAPHER_GRAPH_PATH!;
   const feedbackEnabled = process.env.GRAPHER_FEEDBACK_ENABLED === "true";
-  // Runtime-owned constraint: node names this run may not remove because their
+  // Runtime-owned constraint: node IDs this run may not remove because their
   // results are already published. Graph structure cannot express it, so the
   // server passes it beside the graph and the edit is rejected where the
   // Planner can still react instead of failing the commit afterwards.
   const unremovableNodes: string[] = JSON.parse(process.env.GRAPHER_UNREMOVABLE_NODES ?? '[]');
-  const result = (text: string, diagnosticCodes?: string[]) => ({
-    content: [{ type: "text" as const, text }],
-    ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}),
-  } as any);
-  // Pi derives execution errors from tool_result hooks, not an isError property
-  // returned by execute. Keep diagnostic codes in internal details only.
-  pi.on("context", event => {
-    let changed = false;
-    // Provider signatures can bind an assistant turn's original content. Do
-    // not change any of its tool calls, or their corresponding tool results.
-    const signedCalls = new Set<string>();
-    for (const message of event.messages) {
-      if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-      if (!message.content.some(part => isRecord(part)
-        && ["thoughtSignature", "thinkingSignature", "textSignature"].some(key => typeof part[key] === "string" && part[key] !== ""))) continue;
-      for (const part of message.content) if (part.type === "toolCall") signedCalls.add(part.id);
+  // Only read_graph returns graph contents. Mutations follow Pi's native tools:
+  // concise feedback, with structured local effects/diagnostics for UI and logs.
+  const outputFilePath = (tool: MutationTool | "read_graph") => join(dirname(graphPath),
+    tool === "read_graph" ? `planner-graph-snapshot-${randomUUID()}.json` : `planner-${tool}-result-${randomUUID()}.txt`,
+  ).replaceAll("\\", "/");
+  const outputNotice = (path: string, truncation: ReturnType<typeof truncateHead>, text: string) => {
+    // Pi's read-style head ranges with bash's full-output file handoff. Graph
+    // tools have no offset parameter; further inspection uses read or bash.
+    if (truncation.firstLineExceedsLimit) {
+      const lineSize = formatSize(Buffer.byteLength(text.split("\n", 1)[0], "utf8"));
+      return `[Line 1 is ${lineSize}, exceeds ${formatSize(truncation.maxBytes)} limit. Full output: ${path}]`;
     }
-    const messages = event.messages.map(message => {
-      if (message.role === "toolResult" && message.toolName === "switch_workspace"
-        && !signedCalls.has(message.toolCallId) && Array.isArray(message.content)) {
-        let edited = false;
-        const content = message.content.map(part => {
-          if (part.type !== "text") return part;
-          try {
-            const value: unknown = JSON.parse(part.text);
-            if (!isRecord(value) || (!Object.hasOwn(value, "requestedNode") && !Object.hasOwn(value, "actualNode"))) return part;
-            const { requestedNode, actualNode, ...rest } = value;
-            edited = true;
-            return {
-              ...part, text: JSON.stringify({
-                ...rest,
-                ...(requestedNode !== undefined ? { requestedId: requestedNode } : {}),
-                ...(actualNode !== undefined ? { actualId: actualNode } : {}),
-              })
-            };
-          } catch { return part; }
-        });
-        if (!edited) return message;
-        changed = true;
-        return { ...message, content };
+    const limit = truncation.truncatedBy === "bytes" ? ` (${formatSize(truncation.maxBytes)} limit)` : "";
+    return `[Showing lines 1-${truncation.outputLines} of ${truncation.totalLines}${limit}. Full output: ${path}]`;
+  };
+  // Prepare output before publishing the candidate: a report-write failure must
+  // never turn an already-committed edit into an apparent rejection/rollback.
+  const result = (tool: MutationTool, text: string, details: GraphToolDetails, isError = false, rerunRisk?: number) => {
+    const truncation = truncateHead(text);
+    if (!truncation.truncated) return { content: [{ type: "text" as const, text }], details };
+    const fullOutputPath = outputFilePath(tool);
+    try {
+      writeFileSync(fullOutputPath, text, { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        try { unlinkSync(fullOutputPath); } catch { /* Clean up a partial report. */ }
       }
-      if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
-      let edited = false;
-      const content = message.content.map(part => {
-        if (part.type !== "toolCall" || signedCalls.has(part.id)
-          || (part.name !== "node" && part.name !== "switch_workspace")) return part;
-        const args = plannerHistoryArguments(part.arguments, part.name);
-        if (args === part.arguments) return part;
-        edited = true;
-        return { ...part, arguments: args as typeof part.arguments };
-      });
-      if (!edited) return message;
-      changed = true;
-      return { ...message, content };
-    });
-    return changed ? { messages } : undefined;
+      throw error;
+    }
+    // Pin status and bounded cumulative risk outside the truncated body. A long
+    // node id or diagnostic must not hide either; affected-node lists stay in it.
+    const status = isError
+      ? "Edit rejected. The graph is unchanged. Earlier successful edits remain."
+      : "The edit succeeded.";
+    const risk = rerunRisk === undefined ? ""
+      : `\nWarning: Current draft will invalidate and rerun ${rerunRisk} completed ${rerunRisk === 1 ? "node" : "nodes"} since this draft changes their tasks or execution inputs. Nodes with changed tasks use the new tasks; other affected nodes use their original tasks and the latest workspace after dependencies complete. See the full output for grouped node lists.`;
+    const preview = truncation.content || truncateLine(text.split("\n", 1)[0], 512).text;
+    return {
+      content: [{ type: "text" as const, text: `${status}${risk}\n\n${preview}\n\n${outputNotice(fullOutputPath, truncation, text)}` }],
+      // Do not put the unbounded report back into details. Small results retain
+      // their ordinary structured messages; overflow results carry a file link.
+      details: {
+        ...(details.diagnosticCodes ? { diagnosticCodes: [...new Set(details.diagnosticCodes)] } : {}),
+        truncation, fullOutputPath,
+      } as GraphToolDetails,
+    };
+  };
+  const discardReport = (details: GraphToolDetails) => {
+    if (details.fullOutputPath) {
+      try { unlinkSync(details.fullOutputPath); } catch { /* Best-effort cleanup of an unpublished result. */ }
+    }
+  };
+  // Failures use the result's own `isError`: the model sees `content` as an
+  // error like a thrown one, while `details` stays available to logs and UI.
+  const rejection = (tool: MutationTool, diagnostics: Diagnostic[], relatedFailures: FailedNodeCall[] = []) => {
+    const messages = diagnostics.map(diagnostic => diagnosticText(diagnostic, feedbackEnabled));
+    const text = messages.join("\n");
+    const related = relatedFailures.map(({ nodeId, toolCallId }) =>
+      `Earlier edit_graph call ${JSON.stringify(toolCallId)} failed to create node ${JSON.stringify(nodeId)}; this endpoint is still absent.`);
+    const diagnosticCodes = diagnostics.map(diagnostic => diagnostic.code);
+    try {
+      return {
+        ...result(tool, [
+          text.endsWith("The graph is unchanged.") ? text : `${text}\nThe graph is unchanged.`,
+          ...related,
+          "Earlier successful edits remain.",
+        ].join("\n"), {
+          diagnostics: messages, diagnosticCodes,
+          ...(relatedFailures.length ? { relatedFailures } : {}),
+        }, true),
+        isError: true,
+      };
+    } catch (error) {
+      // The edit was already rejected. Keep that fact and the primary reason
+      // visible even when the full diagnostic report cannot be persisted.
+      const summary = truncateLine(text.split("\n", 1)[0], 512).text;
+      const reportError = `Cannot save the full diagnostic report: ${(error as NodeJS.ErrnoException).code ?? "file write failed"}.`;
+      return {
+        content: [{ type: "text" as const, text: `Edit rejected. The graph is unchanged. Earlier successful edits remain.\n${summary}\n${reportError}` }],
+        details: { diagnostics: [summary, reportError], diagnosticCodes: [...new Set([...diagnosticCodes, "graph-report"])] },
+        isError: true,
+      };
+    }
+  };
+  // Pi reports finalized calls even when argument validation prevented execute().
+  // Remember only identifiable node targets within this assistant turn. Never
+  // infer a dependency on the last error, parse compiler prose, or retain tasks.
+  const pendingNodes = new Map<string, NodeEdit[]>();
+  const failedNodes = new Map<string, FailedNodeCall>();
+  pi.on("turn_start", () => { pendingNodes.clear(); failedNodes.clear(); });
+  pi.on("tool_execution_start", event => {
+    if (event.toolName !== "edit_graph") return;
+    try {
+      const edits = graphArguments(event.args)?.nodes;
+      if (!Array.isArray(edits)) return;
+      // Keep only identity and deletion intent, never tasks or raw arguments.
+      pendingNodes.set(event.toolCallId, edits.flatMap(edit => {
+        const intent = nodeIntent(edit);
+        return intent ? [intent] : [];
+      }));
+    } catch { /* Ambiguous/invalid targets cannot explain a later missing endpoint. */ }
   });
-  pi.on("tool_result", async event => {
-    if ((event.toolName === "node" || event.toolName === "edge")
-      && (event.details as { diagnosticCodes?: string[] } | undefined)?.diagnosticCodes) {
-      return { isError: true };
+  pi.on("tool_execution_end", event => {
+    if (event.toolName !== "edit_graph") return;
+    const edits = pendingNodes.get(event.toolCallId);
+    pendingNodes.delete(event.toolCallId);
+    for (const edit of edits ?? []) {
+      if (!event.isError) failedNodes.delete(edit.id);
+      else if (!edit.delete) failedNodes.set(edit.id, { nodeId: edit.id, toolCallId: event.toolCallId });
     }
   });
   // Runtime publishes one live committed-graph snapshot per tool start. The
@@ -425,6 +261,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }
     return `${graphPath}.impact-${hash.toString(16).padStart(16, "0")}.json`;
   }
+  // Without the snapshot the compiler cannot report revision impact, so a
+  // timeout fails the call instead of silently validating with less context.
   async function revisionContext(id: string, signal?: AbortSignal): Promise<unknown | undefined> {
     if (!process.env.GRAPHER_PLANNER_RUN_ID) return;
     const path = revisionContextPath(id);
@@ -440,120 +278,279 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       } catch { }
       await new Promise(resolve => setTimeout(resolve, 15));
     }
+    throw new Error("Timed out waiting for the runtime's graph snapshot. Retry the call. The graph is unchanged.");
   }
-  // The shared engine policy owns read/bash and their stable path view.
-  // Keep this extension limited to graph mutations, regardless of cwd.
-  async function mutate(id: string, signal: AbortSignal | undefined, kind: "node" | "edge", change: (graph: Graph, editNotes: string[]) => Diagnostic[] | void) {
-    const revision = await revisionContext(id, signal);
-    const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
-    const graph: Graph = structuredClone(saved);
-    const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
-      applied: false,
-      topology: topology(saved, feedbackEnabled),
-      diagnostics: diagnostics.map(diagnostic => diagnosticText(diagnostic, feedbackEnabled)),
-    }), diagnostics.map(diagnostic => diagnostic.code));
-    const editNotes: string[] = [];
-    const inputErrors = change(graph, editNotes);
-    if (inputErrors?.length) return rejected(inputErrors);
-    const pruned = kind === "edge" ? pruneRedundantEdges(graph) : [];
-    const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false, unremovableNodes, ...(revision ? { revisionContext: revision } : {}) }), encoding: "utf8", timeout: 10000 });
-    if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
-    let output;
-    try { output = JSON.parse(checked.stdout); }
-    catch { return rejected([{ code: "compiler-response", message: "Compiler returned invalid JSON." }]); }
-    if (output.diagnostics?.length) return rejected(output.diagnostics);
-    if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
-    writeFileSync(graphPath, JSON.stringify(graph));
-    // Omit conditional feedback rerun-scope descriptions from both tools.
-    // Keep actionable warnings, including actual graph-revision impact (W304).
-    const warnings = ((output.plan.warnings ?? []) as string[])
-      .filter(warning => !warning.startsWith("W303:")
-        && (feedbackEnabled || !warning.startsWith("W302:")))
-      .map(stripDiagnosticCode);
-    // The first node batch has no edges yet, so its compiler roots merely repeat
-    // every node and can be mistaken for the intended final roots. Later edits
-    // expose the compiler's sorted list as rootNodes to make extra roots visible.
-    const initialNodeBatch = kind === "node" && saved.nodes.length === 0
-      && saved.edges.length === 0 && graph.nodes.length > 0;
-    const pruneNotes = pruned.length > 0
-      ? [`Auto-removed redundant direct ${pruned.length === 1 ? "edge" : "edges"} implied by indirect paths (saved, no retry needed): ${pruned.map(item => `${item.from} → ${item.to} (via ${item.path.join(" → ")})`).join("; ")}.`]
-      : [];
-    const notes = [...editNotes, ...pruneNotes];
-    return result(JSON.stringify({
-      applied: true,
-      topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph, feedbackEnabled) },
-      ...(warnings.length ? { warnings } : {}),
-      ...(notes.length ? { notes } : {}),
-    }));
-  }
-  // Argument errors happen before execute(), so no mutation or graph read has
-  // occurred. State that invariant without echoing the graph or task text.
-  function prepareWithContext<T>(prepare: () => T): T {
+  function readCandidate(): Graph {
+    let graph: unknown;
     try {
-      return prepare();
+      graph = JSON.parse(readFileSync(graphPath, "utf8"));
     } catch (error) {
-      if (error instanceof Error) throw new Error(`${error.message}\nThe graph is unchanged.`);
-      throw error;
+      const reason = error instanceof SyntaxError ? "invalid JSON"
+        : (error as NodeJS.ErrnoException).code ?? "unreadable file";
+      throw new Error(`Cannot read the current planning candidate: ${reason}.`);
+    }
+    // Check the stored shape, not topology: even an invalid graph must remain
+    // inspectable. Reading never invokes the compiler or repairs saved data.
+    if (!isRecord(graph) || typeof graph.originalGoal !== "string"
+      || !Array.isArray(graph.nodes) || !graph.nodes.every(node => isRecord(node) && Object.keys(node).every(key => key === "id" || key === "task") && typeof node.id === "string" && typeof node.task === "string")
+      || !Array.isArray(graph.edges) || !graph.edges.every(edge => isRecord(edge) && Object.keys(edge).every(key => key === "from" || key === "to" || key === "feedback")
+        && typeof edge.from === "string" && typeof edge.to === "string" && typeof edge.feedback === "boolean")) {
+      throw new Error("Cannot read the current planning candidate: invalid Graph IR structure.");
+    }
+    return graph as Graph;
+  }
+  // Same-directory replacement publishes a complete candidate to external
+  // preview readers too. Never truncate the authoritative file or unlink it
+  // before rename; a failed write/rename leaves the previous candidate intact.
+  function saveCandidate(graph: Graph) {
+    const temporary = `${graphPath}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify(graph), { flag: "wx", mode: 0o600 });
+      renameSync(temporary, graphPath);
+    } finally {
+      try { unlinkSync(temporary); } catch { /* Renamed or best-effort cleanup after failure. */ }
     }
   }
   pi.registerTool(defineTool({
-    name: "node", label: "Graph node",
-    // Pi normalizes nullable optional edit fields before local validation.
+    name: "read_graph", label: "Read graph",
+    promptSnippet: "Read the current planning candidate",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description:
-      "Create, replace, or delete graph nodes.",
-    parameters: Type.Object({
-      nodes: Type.Array(Type.Object({
-        id: Type.String({ description: "Stable unique identifier for referencing this node in the graph" }),
-        task: Type.Optional(Type.String({ description: "Task to execute (required unless deleting)" })),
-        delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
-      }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
-    }, { additionalProperties: false }),
-    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["id"], ["id", "task", "delete"], '{"nodes":[{"id":"...","task":"..."}]}')),
-    async execute(id, parameters, signal) {
-      return mutate(id, signal, "node", (graph, editNotes) => {
-        const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.id));
-        if (duplicates.length) return duplicates;
-        for (const edit of parameters.nodes) {
-          const removedEdges = applyNode(graph, edit).filter(edge => feedbackEnabled || !edge.feedback);
-          if (removedEdges.length > 0) {
-            editNotes.push(
-              `Deleted node ${edit.id} also removed its incident ${removedEdges.length === 1 ? "edge" : "edges"}: ${removedEdges.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`).join(", ")}.`,
-            );
-          }
+    description: "Read the current graph as JSON.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute(_id, _parameters, signal) {
+      return withFileMutationQueue(graphPath, async () => {
+        if (signal?.aborted) throw new Error("Operation aborted");
+        const { nodes, edges } = readCandidate();
+        // Return only the editable graph contents, not the stored user goal.
+        // Inline output and overflow snapshots share this same projection.
+        const text = JSON.stringify({ nodes, edges }, null, 2);
+        const truncation = truncateHead(text);
+        const details: { truncation?: typeof truncation; fullOutputPath?: string } = {};
+        let content = truncation.content;
+        if (truncation.truncated) {
+          // Follow Pi's large-output convention, not a second live graph mirror.
+          // This per-read snapshot lives with the planning attempt, outside project
+          // snapshots; editing it can never modify the authoritative candidate.
+          const fullOutputPath = outputFilePath("read_graph");
+          writeFileSync(fullOutputPath, text, { flag: "wx", mode: 0o600 });
+          Object.assign(details, { truncation, fullOutputPath });
+          content += `\n\n${outputNotice(fullOutputPath, truncation, text)}`;
         }
+        return { content: [{ type: "text", text: content }], details };
       });
     },
   }));
+  // Compilation must yield to Pi's abort/RPC events. Keep the queue until the
+  // child closes, including cancellation, timeout, early exit and output overflow.
+  function compileCandidate(input: string, signal?: AbortSignal): Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }> {
+    return new Promise(resolve => {
+      const child = spawn(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      let error: Error | undefined;
+      let outputBytes = 0;
+      const stop = (reason: Error) => {
+        error ??= reason;
+        child.kill("SIGKILL");
+      };
+      const collect = (target: Buffer[], chunk: Buffer) => {
+        if (error) return;
+        outputBytes += chunk.length;
+        if (outputBytes > 1024 * 1024) stop(new Error("Compiler output exceeded 1 MiB."));
+        else target.push(chunk);
+      };
+      child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
+      child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+      child.on("error", reason => { error ??= reason; });
+      child.stdin.on("error", stop);
+      const abort = () => stop(new Error("Operation aborted"));
+      const timeout = setTimeout(() => stop(new Error("Compiler timed out after 10000 ms.")), 10000);
+      child.once("close", status => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", abort);
+        resolve({ status, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), error });
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      else child.stdin.end(input);
+    });
+  }
+  // The shared engine policy owns file read/bash and their stable path view.
+  // Graph reads and edits share Pi's native file-mutation queue, even for direct
+  // SDK callers that bypass agent-loop scheduling. Hold it through revision
+  // waits and compilation, including cancellation/failure.
+  function mutate(tool: MutationTool, id: string, signal: AbortSignal | undefined, change: (graph: Graph) => Change | Diagnostic[], endpoints: readonly string[] = []) {
+    return withFileMutationQueue(graphPath, async () => {
+      const throwIfAborted = () => {
+        if (signal?.aborted) throw new Error("Operation aborted");
+      };
+      throwIfAborted();
+      const revision = await revisionContext(id, signal);
+      throwIfAborted();
+      const previousGraph = readCandidate();
+      const graph = structuredClone(previousGraph);
+      const rejected = (diagnostics: Diagnostic[]) => rejection(tool, diagnostics,
+        diagnostics.some(diagnostic => diagnostic.code === "E204")
+          ? [...new Set(endpoints)].filter(endpoint => !graph.nodes.some(node => node.id === endpoint))
+            .flatMap(endpoint => failedNodes.has(endpoint) ? [failedNodes.get(endpoint)!] : [])
+          : []);
+      const changed = change(graph);
+      if (Array.isArray(changed)) return rejected(changed);
+      const checked = await compileCandidate(JSON.stringify({ graph, previousGraph, finalCheck: false, unremovableNodes, ...(revision ? { revisionContext: revision } : {}) }), signal);
+      throwIfAborted();
+      if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
+      let output: unknown;
+      try { output = JSON.parse(checked.stdout); }
+      catch { return rejected([{ code: "compiler-response", message: "Compiler returned invalid JSON." }]); }
+      if (!isRecord(output)) return rejected([{ code: "compiler-response", message: "Compiler returned an invalid response object." }]);
+      const diagnostics = output.diagnostics ?? [];
+      if (!Array.isArray(diagnostics) || !diagnostics.every(isDiagnostic)) {
+        return rejected([{ code: "compiler-response", message: "Compiler returned invalid diagnostics." }]);
+      }
+      if (diagnostics.length) {
+        return rejected(diagnostics.map(diagnostic => {
+          const path = diagnostic.dependencyPath;
+          const added = changed.createdDependencies?.find(edge => path && path[0] === edge.from && path.at(-1) === edge.to);
+          // The compiler describes the rejected candidate. A redundant edge
+          // created by this call was never saved, so do not ask to delete it.
+          // Keep repair hints for other, already-saved redundant edges intact.
+          if (diagnostic.code === "E209" && added && path) {
+            return { ...diagnostic, message: `No need to add dependency ${added.from} → ${added.to}: ${path.join(" → ")} already provides this dependency. Omit this edge.` };
+          }
+          return diagnostic;
+        }));
+      }
+      const plan = output.plan;
+      const stringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string");
+      if (!isRecord(plan) || Object.keys(plan).some(key => !["executionBatches", "rootNodes", "terminals", "warnings"].includes(key))
+        || !Array.isArray(plan.executionBatches) || !plan.executionBatches.every(stringList)
+        || !stringList(plan.rootNodes) || !stringList(plan.terminals)) {
+        return rejected([{ code: "compiler-response", message: "Compiler returned no valid plan." }]);
+      }
+      if (!Array.isArray(output.mutationWarnings) || !output.mutationWarnings.every(isDiagnostic)
+        || !stringList(plan.warnings)) {
+        return rejected([{ code: "compiler-response", message: "Compiler returned invalid warnings." }]);
+      }
+      // Risk counts are structured Runtime evidence, never warning-prose parsing.
+      const hasRerunRisk = output.mutationWarnings.some(warning => warning.code === "W304");
+      let rerunRisk: number | undefined;
+      if (hasRerunRisk || output.revisionImpact !== undefined) {
+        const impact = output.revisionImpact;
+        if (!isRecord(impact) || typeof impact.rerunCount !== "number"
+          || !Number.isSafeInteger(impact.rerunCount) || impact.rerunCount <= 0 || !hasRerunRisk) {
+          return rejected([{ code: "compiler-response", message: "Compiler returned invalid revision impact." }]);
+        }
+        rerunRisk = impact.rerunCount;
+      }
+      // Compare advisory facts with the saved candidate, not a session cache.
+      // W304 remains cumulative against the runtime's committed graph.
+      const warnings = output.mutationWarnings
+        .filter(warning => warning.code !== "W303" && (feedbackEnabled || warning.code !== "W302"))
+        .map(warning => warning.message);
+      const notes = changed.notes ?? [];
+      throwIfAborted();
+      let response;
+      try {
+        // Keep the cascade count and cumulative risk ahead of unbounded lists.
+        response = result(tool, [changed.summary, ...notes.slice(0, 1), ...warnings.map(warning => `Warning: ${warning}`), ...notes.slice(1)].join("\n"), {
+          ...(warnings.length ? { warnings } : {}),
+          ...(notes.length ? { notes } : {}),
+        }, false, rerunRisk);
+      } catch (error) {
+        return rejected([{ code: "graph-report", message: `Cannot save the operation report: ${(error as NodeJS.ErrnoException).code ?? "file write failed"}.` }]);
+      }
+      try {
+        throwIfAborted();
+        saveCandidate(graph);
+      } catch (error) {
+        discardReport(response.details);
+        if (signal?.aborted) throw error;
+        return rejected([{ code: "graph-write", message: `Cannot save the planning candidate: ${(error as NodeJS.ErrnoException).code ?? "file replacement failed"}.` }]);
+      }
+      return response;
+    });
+  }
+  const nodeSchema = Type.Object({
+    id: Type.String({ description: "Stable unique identifier for referencing this node in the graph" }),
+    task: Type.Optional(Type.String({ description: "Complete non-empty task (required unless deleting)" })),
+    delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
+  }, { additionalProperties: false });
+  // Compose complete schemas so feedback stays optional in TypeBox's inference.
+  const edgeSchema = Type.Object({
+    from: Type.String({ description: "Source node id" }),
+    to: Type.String({ description: "Target node id (must differ from source)" }),
+    feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
+    delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
+  }, { additionalProperties: false });
   pi.registerTool(defineTool({
-    name: "edge", label: "Graph edge",
+    name: "edit_graph", label: "Edit graph",
+    promptSnippet: "Create, replace, or delete one or more graph nodes, dependency edges, or both",
+    promptGuidelines: ["Batch related node and edge changes in one edit_graph call. Supply the complete task when creating or replacing a node."],
+    executionMode: "sequential",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, the `to` node depends on the `from` node and waits for it to complete. Multiple dependencies' workspace states are merged before the `to` node runs."
-      + (feedbackEnabled ? " With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace state and feedback, and continues from its own context to improve its previous work. The source and other previously run descendants retain their own context and recheck their tasks using updated workspace state after their dependencies complete." : ""),
+      "Create, replace, or delete one or more graph nodes, dependency edges, or both. Only one edge per ordered pair. For a dependency edge, the `to` node depends on the `from` node and waits for it to complete."
+      + (feedbackEnabled ? " With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace and feedback, and continues from its own context to improve its previous work. The source and other previously run descendants retain their own context and recheck their tasks using the updated workspace after their dependencies complete." : "")
+      + " Replacing a node overwrites its entire task; an existing ordered edge pair is replaced. Deleting a node removes its incident edges; deleting a missing node or edge, or a published node, is an error. Include each node id and ordered edge pair only once. Edges may reference nodes created in the same batch. Only the final graph is validated: dependency cycles and redundant direct dependencies are rejected, never auto-removed. The batch is committed together or leaves the graph unchanged.",
     parameters: Type.Object({
-      edges: Type.Array(Type.Object({
-        from: Type.String({ description: "Source node id" }),
-        to: Type.String({ description: "Target node id (differ from source)" }),
-        ...(feedbackEnabled ? { feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })) } : {}),
-        delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
-      }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
+      nodes: Type.Optional(Type.Array(nodeSchema, { description: "Node creations, complete task replacements, or deletions" })),
+      edges: Type.Optional(Type.Array(feedbackEnabled ? edgeSchema : Type.Omit(edgeSchema, ["feedback"], { additionalProperties: false }), { description: feedbackEnabled ? "Dependency or feedback edge creations, replacements, or deletions" : "Dependency edge creations, replacements, or deletions" })),
     }, { additionalProperties: false }),
-    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], feedbackEnabled ? ["from", "to", "feedback", "delete"] : ["from", "to", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
+    prepareArguments: graphArguments,
     async execute(id, parameters, signal) {
-      return mutate(id, signal, "edge", (graph, editNotes) => {
-        const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));
+      const nodes: NodeEdit[] = parameters.nodes ?? [];
+      const edges: EdgeEdit[] = parameters.edges ?? [];
+      if (nodes.length + edges.length === 0) throw new Error("edit_graph requires at least one node or edge edit.");
+      return mutate("edit_graph", id, signal, graph => {
+        const duplicates = [
+          ...duplicateTargets("node", nodes.map(edit => JSON.stringify(edit.id))),
+          ...duplicateTargets("edge", edges.map(edit => JSON.stringify([edit.from, edit.to]))),
+        ];
         if (duplicates.length) return duplicates;
-        const missingDeletes: EdgeEdit[] = [];
-        for (const edit of parameters.edges) {
-          if (!applyEdge(graph, edit)) missingDeletes.push(edit);
+        const missing: Diagnostic[] = [];
+        for (const edit of nodes) {
+          if (edit.delete && !graph.nodes.some(node => node.id === edit.id)) {
+            missing.push({ code: "not-found", message: `Node ${JSON.stringify(edit.id)} does not exist; nothing to delete.` });
+          }
         }
-        if (missingDeletes.length > 0) {
-          editNotes.push(
-            `Ignored delete for non-existent ${missingDeletes.length === 1 ? "edge" : "edges"}: ${missingDeletes.map(edge => `${edge.from} → ${edge.to}`).join(", ")}.`,
-          );
+        // Resolve deletion targets against the saved graph, before cascades.
+        // Explicit edge deletion plus deletion of its endpoint is not an error.
+        for (const edit of edges) {
+          if (edit.delete && !graph.edges.some(edge => edge.from === edit.from && edge.to === edit.to)) {
+            missing.push({ code: "not-found", message: `Edge ${JSON.stringify(edit.from)} → ${JSON.stringify(edit.to)} does not exist; nothing to delete.` });
+          }
         }
-      });
+        if (missing.length) return missing;
+        const summaries: string[] = [];
+        for (const edit of edges.filter(edit => edit.delete)) {
+          applyEdge(graph, edit);
+          summaries.push(`Successfully deleted edge ${JSON.stringify(edit.from)} → ${JSON.stringify(edit.to)}.`);
+        }
+        const removedEdges: Graph["edges"] = [];
+        for (const edit of nodes) {
+          const existed = graph.nodes.some(node => node.id === edit.id);
+          removedEdges.push(...applyNode(graph, edit));
+          summaries.push(`Successfully ${edit.delete ? "deleted" : existed ? "updated" : "created"} node ${JSON.stringify(edit.id)}.`);
+        }
+        const createdDependencies: NonNullable<Change["createdDependencies"]> = [];
+        for (const edit of edges.filter(edit => !edit.delete)) {
+          const label = `${JSON.stringify(edit.from)} → ${JSON.stringify(edit.to)}`;
+          const effect = applyEdge(graph, edit);
+          if (effect.kind === "unchanged") summaries.push(`Edge ${label} already exists with these settings; no change.`);
+          else if (effect.kind === "updated") summaries.push(`Successfully updated edge ${label}${feedbackEnabled ? ` (feedback: ${effect.previousFeedback} → ${edit.feedback ?? false})` : ""}.`);
+          else {
+            summaries.push(`Successfully created edge ${label}${feedbackEnabled && edit.feedback ? " (feedback)" : ""}.`);
+            if (!edit.feedback) createdDependencies.push({ from: edit.from, to: edit.to });
+          }
+        }
+        const visibleRemovals = removedEdges.filter(edge => feedbackEnabled || !edge.feedback);
+        return {
+          summary: summaries.length === 1 ? summaries[0] : `Successfully applied ${nodes.length} node edit(s) and ${edges.length} edge edit(s).`,
+          notes: visibleRemovals.length ? [`Removed ${visibleRemovals.length} incident ${visibleRemovals.length === 1 ? "edge" : "edges"}:`,
+            ...visibleRemovals.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)] : [],
+          createdDependencies,
+        };
+      }, edges.flatMap(edit => [edit.from, edit.to]));
     },
   }));
 }

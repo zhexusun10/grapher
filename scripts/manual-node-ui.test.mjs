@@ -9,7 +9,7 @@ test("returning from node creation keeps Planner history scrollable and restores
   const empty = { runId: "", graph: { originalGoal: "", nodes: [], edges: [] }, config: null, nodes: {}, executions: [], events: [],
     approved: false, paused: false, phase: "draft", plan: null, base: "", feedbackCounts: {} };
   const snapshot = { ...empty, runId: "scroll-graph", planningId: "scroll-plan", planType: "graph", config, approved: true, phase: "completed",
-    graph: { originalGoal: "Scroll test", nodes: [{ name: "worker", task: "Work" }], edges: [] },
+    graph: { originalGoal: "Scroll test", nodes: [{ id: "worker", task: "Work" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, head: "head", instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, planning_id: "scroll-plan", timestamp: 1 }] };
   const rows = Array.from({ length: 120 }, (_, index) => JSON.stringify({ type: "message_end",
@@ -182,7 +182,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
   const empty = { runId: "", graph: { originalGoal: "", nodes: [], edges: [] }, config: null, nodes: {}, executions: [], events: [],
     approved: false, paused: false, phase: "draft", plan: null, base: "", feedbackCounts: {} };
   let snapshot = { ...empty, runId: "graph-a", planType: "graph", config, approved: true, phase: "completed",
-    graph: { originalGoal: "Example", nodes: ["up", "target", "child"].map(name => ({ name, task: `Task ${name}` })),
+    graph: { originalGoal: "Example", nodes: ["up", "target", "child"].map(name => ({ id: name, task: `Task ${name}` })),
       edges: [{ from: "up", to: "target", feedback: false }, { from: "target", to: "child", feedback: false }] },
     nodes: { up: nodeState(), target: nodeState(), child: nodeState() } };
   const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
@@ -222,7 +222,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
             return;
           }
           snapshot = { ...snapshot, graph: { ...snapshot.graph, nodes: snapshot.graph.nodes.map(node =>
-            node.name === body.node ? { ...node, task: body.task } : node) } };
+            node.id === body.node ? { ...node, task: body.task } : node) } };
           result = snapshot;
           break;
         }
@@ -235,10 +235,10 @@ test("graph background menu creates nodes with explicit completed-result confirm
           }
           const { node, from, to, feedback } = body.request;
           const edges = snapshot.graph.edges.filter(edge => feedback || !from || !to || edge.from !== from || edge.to !== to);
-          if (from) edges.push({ from, to: node.name, feedback: false });
-          if (to) edges.push({ from: node.name, to, feedback });
+          if (from) edges.push({ from, to: node.id, feedback: false });
+          if (to) edges.push({ from: node.id, to, feedback });
           snapshot = { ...snapshot, phase: "running", graph: { ...snapshot.graph, nodes: [...snapshot.graph.nodes, node], edges },
-            nodes: { ...snapshot.nodes, [node.name]: nodeState("waiting") } };
+            nodes: { ...snapshot.nodes, [node.id]: nodeState("waiting") } };
           result = snapshot;
           break;
         }
@@ -274,7 +274,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
     assert.deepEqual(await form.locator("input, textarea, select").evaluateAll(elements =>
       elements.map(element => getComputedStyle(element).backgroundColor)), Array(5).fill("rgb(255, 255, 255)"),
     "node inputs and selects use a white background");
-    await form.getByLabel("Name (name)").fill("inserted");
+    await form.getByLabel("Identifier (id)").fill("inserted");
     await form.getByLabel("Task (task)").fill("Implement the new step");
     await form.getByLabel("Predecessor (from)").selectOption("up");
     await form.getByLabel("Target (to)").selectOption("target");
@@ -288,7 +288,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
     await form.getByRole("button", { name: "Save" }).click();
     await dialog.getByRole("button", { name: "Confirm and save" }).click();
     await page.getByRole("alert").filter({ hasText: "Mock save failure" }).waitFor();
-    assert.equal(await form.getByLabel("Name (name)").inputValue(), "inserted", "failed saves retain the draft");
+    assert.equal(await form.getByLabel("Identifier (id)").inputValue(), "inserted", "failed saves retain the draft");
     await page.locator(".floating-error-close").click();
     await form.getByRole("button", { name: "Save" }).click();
     await dialog.getByRole("button", { name: "Confirm and save" }).click();
@@ -296,13 +296,13 @@ test("graph background menu creates nodes with explicit completed-result confirm
     await page.getByRole("heading", { name: "inserted" }).waitFor();
     assert.equal(requests.length, 2);
     assert.equal(requests[1].runId, "graph-a");
-    assert.deepEqual(requests[1].request, { node: { name: "inserted", task: "Implement the new step" },
+    assert.deepEqual(requests[1].request, { node: { id: "inserted", task: "Implement the new step" },
       from: "up", to: "target", feedback: false,
-      confirmedCompleted: [{ name: "target", revision: 1, head: "head" }, { name: "child", revision: 1, head: "head" }] });
+      confirmedCompleted: [{ id: "target", revision: 1, head: "head" }, { id: "child", revision: 1, head: "head" }] });
 
     await openMenu();
     await page.getByRole("menuitem", { name: "New node" }).click();
-    await form.getByLabel("Name (name)").fill("review");
+    await form.getByLabel("Identifier (id)").fill("review");
     await form.getByLabel("Task (task)").fill("Review the result");
     await form.getByLabel("Predecessor (from)").selectOption("up");
     await form.getByLabel("Target (to)").selectOption("up");
@@ -323,7 +323,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
 
     await openMenu();
     await page.getByRole("menuitem", { name: "New node" }).click();
-    await form.getByLabel("Name (name)").fill("independent");
+    await form.getByLabel("Identifier (id)").fill("independent");
     await form.getByLabel("Task (task)").fill("Independent work");
     await form.getByRole("button", { name: "Save" }).click();
     await page.locator('.react-flow__node[data-id="independent"]').waitFor();

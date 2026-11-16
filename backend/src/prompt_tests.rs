@@ -116,7 +116,7 @@ fn reopening_a_paused_run_does_not_append_pause_events() {
         graph: Graph {
             original_goal: "test".into(),
             nodes: vec![Node {
-                name: "task".into(),
+                id: "task".into(),
                 task: "test".into(),
             }],
             edges: vec![],
@@ -152,7 +152,7 @@ fn intervention_unpause_control_does_not_retry_unknown_failure() {
             graph: Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],
@@ -223,7 +223,7 @@ fn completed_node_message_control_does_not_wait_for_planner_or_start_driver() {
             graph: Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],
@@ -289,7 +289,7 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
             graph: Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],
@@ -447,7 +447,7 @@ fn control_resume_node_targets_the_requested_run_and_node() {
     runtime.create(Graph {
         original_goal: "two branches".into(),
         nodes: ["left", "right"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
+            id: name.into(), task: name.into(),
         }).collect(),
         edges: vec![],
     }, serde_json::from_value(serde_json::json!({
@@ -489,7 +489,7 @@ fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_ses
                     nodes: ["left", "right"]
                         .into_iter()
                         .map(|name| Node {
-                            name: name.into(),
+                            id: name.into(),
                             task: name.into(),
                         })
                         .collect(),
@@ -608,7 +608,7 @@ fn planner_conversation_stop_does_not_pause_running_nodes_and_restart_offers_con
                 nodes: ["left", "right"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),
@@ -693,7 +693,7 @@ fn failed_node_instruction_control_starts_a_new_running_execution() {
                 Graph {
                     original_goal: "test".into(),
                     nodes: vec![Node {
-                        name: "task".into(),
+                        id: "task".into(),
                         task: "test".into(),
                     }],
                     edges: vec![],
@@ -772,7 +772,7 @@ fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     let id = uuid::Uuid::new_v4().to_string();
     let mut runtime = Runtime::open(&root).unwrap();
     runtime.create_with_planning(Graph {
-        original_goal: "original".into(), nodes: vec![Node { name: "task".into(), task: "old".into() }], edges: vec![],
+        original_goal: "original".into(), nodes: vec![Node { id: "task".into(), task: "old".into() }], edges: vec![],
     }, serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "mock/model", "engine": "fixture", "maxParallel": 1, "maxFeedback": 0,
     })).unwrap(), Some(id.clone()), None).unwrap();
@@ -930,7 +930,7 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
             Graph {
                 original_goal: "original".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "original".into(),
                 }],
                 edges: vec![],
@@ -1091,7 +1091,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
                 Graph {
                     original_goal: "test".into(),
                     nodes: vec![Node {
-                        name: "task".into(),
+                        id: "task".into(),
                         task: "test".into(),
                     }],
                     edges: vec![],
@@ -1191,7 +1191,7 @@ fn planner_revision_updates_approved_run_without_reapproval() {
     fs::write(&script, r#"input="$(cat)"
 printf '%s' "$input" | grep -q -- '- keep: waiting' || exit 11
 printf '%s' "$input" | grep -q 'Add a node' || exit 12
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"id":"keep","task":"keep"},{"id":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Revised"}]}}'
 "#).unwrap();
     let root = temp.path().join("runtime");
@@ -1218,7 +1218,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "keep".into(),
+                    id: "keep".into(),
                     task: "keep".into(),
                 }],
                 edges: vec![],
@@ -1264,7 +1264,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(snapshot.nodes["added"].status, "waiting");
     let replay = service.runtime.lock().unwrap().store.load(&run_id).unwrap();
     assert!(replay.approved);
-    assert!(replay.graph.nodes.iter().any(|node| node.name == "added"));
+    assert!(replay.graph.nodes.iter().any(|node| node.id == "added"));
     assert_eq!(
         replay
             .events
@@ -1297,9 +1297,9 @@ case "$GRAPHER_MODE" in
   planner)
     printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
     if [ -f "$session/turns.jsonl" ]; then
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"after","task":"after"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first v2"},{"id":"after","task":"after"},{"id":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
     else
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"},{"name":"after","task":"after"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first"},{"id":"after","task":"after"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
       mkdir -p "$session"
       cwd="$PWD"
       if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
@@ -1414,10 +1414,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         .graph
         .nodes
         .iter()
-        .find(|node| node.name == "first")
+        .find(|node| node.id == "first")
         .unwrap();
     assert_eq!(first_node.task, "first v2");
-    assert!(revised.graph.nodes.iter().any(|node| node.name == "extra"));
+    assert!(revised.graph.nodes.iter().any(|node| node.id == "extra"));
     assert!(matches!(
         revised.nodes["first"].status.as_str(),
         "waiting" | "dirty"
@@ -1494,9 +1494,9 @@ printf '%s\n' "$model" >> "$(dirname "$0")/model-trace.txt"
 case "$GRAPHER_MODE" in
   planner)
     if [ -f "$session/turns.jsonl" ]; then
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"extra","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first v2"},{"id":"extra","task":"extra"}],"edges":[{"from":"first","to":"extra","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
     else
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
       mkdir -p "$session"
       cwd="$PWD"
       if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
@@ -1574,7 +1574,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "first".into(),
+                    id: "first".into(),
                     task: "first".into(),
                 }],
                 edges: vec![],
@@ -1636,23 +1636,23 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
         original_goal: "test goal".into(),
         nodes: vec![
             Node {
-                name: "completed_task".into(),
+                id: "completed_task".into(),
                 task: "finished task".into(),
             },
             Node {
-                name: "paused_task".into(),
+                id: "paused_task".into(),
                 task: "manually stopped task".into(),
             },
             Node {
-                name: "app_interrupted_task".into(),
+                id: "app_interrupted_task".into(),
                 task: "interrupted task".into(),
             },
             Node {
-                name: "failed_task".into(),
+                id: "failed_task".into(),
                 task: "broken task".into(),
             },
             Node {
-                name: "waiting_task".into(),
+                id: "waiting_task".into(),
                 task: "pending task".into(),
             },
         ],
@@ -1743,11 +1743,11 @@ fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
         original_goal: "test goal".into(),
         nodes: vec![
             Node {
-                name: "first".into(),
+                id: "first".into(),
                 task: "first".into(),
             },
             Node {
-                name: "second".into(),
+                id: "second".into(),
                 task: "second".into(),
             },
         ],
@@ -1808,11 +1808,11 @@ fn planner_node_status_uses_completed_after_loading_a_legacy_snapshot() {
     snapshot.approved = true;
     snapshot.plan_type = Some("graph".into());
     snapshot.graph.nodes.push(Node {
-        name: "task".into(),
+        id: "task".into(),
         task: "Retain the result".into(),
     });
     snapshot.graph.nodes.push(Node {
-        name: "pending".into(),
+        id: "pending".into(),
         task: "Keep working".into(),
     });
     snapshot.nodes.insert("task".into(), NodeState::default());
@@ -1838,7 +1838,7 @@ fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
     snapshot.graph = Graph {
         original_goal: "test goal".into(),
         nodes: vec![Node {
-            name: "stopped_worker".into(),
+            id: "stopped_worker".into(),
             task: "do work".into(),
         }],
         edges: vec![],
@@ -1892,7 +1892,7 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "first".into(),
+                    id: "first".into(),
                     task: "first".into(),
                 }],
                 edges: vec![],
@@ -1964,9 +1964,9 @@ done
 printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
 if [ -f "$session/turns.jsonl" ]; then
   grep -q "\"id\":\"$identity\"" "$session/turns.jsonl" || exit 12
-  printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"},{"name":"next","task":"next"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+  printf '%s' '{"originalGoal":"initial","nodes":[{"id":"first","task":"first"},{"id":"next","task":"next"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 else
-  printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+  printf '%s' '{"originalGoal":"initial","nodes":[{"id":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
   cwd="$PWD"
   if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
   printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
@@ -2071,7 +2071,7 @@ fn planner_revises_without_waiting_for_a_running_node() {
 printf '%s' "$input" | grep -q -- '- keep: running' || exit 11
 printf '%s' "$input" | grep -q -- '- pending: waiting' || exit 12
 printf '%s' "$input" | grep -q 'Update pending' || exit 13
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"id":"keep","task":"keep"},{"id":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
@@ -2097,11 +2097,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
                 original_goal: "test".into(),
                 nodes: vec![
                     Node {
-                        name: "keep".into(),
+                        id: "keep".into(),
                         task: "keep".into(),
                     },
                     Node {
-                        name: "pending".into(),
+                        id: "pending".into(),
                         task: "pending".into(),
                     },
                 ],
@@ -2182,7 +2182,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             .graph
             .nodes
             .iter()
-            .find(|node| node.name == "pending")
+            .find(|node| node.id == "pending")
             .unwrap()
             .task,
         "updated"
@@ -2196,7 +2196,7 @@ fn running_revision_uses_the_latest_workspace_without_draining_its_writer() {
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("running-revise.sh");
     fs::write(&script, r#"cat >/dev/null
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"change"},{"name":"other","task":"other"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"id":"change","task":"change"},{"id":"other","task":"other"},{"id":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
@@ -2223,7 +2223,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
                 nodes: ["change", "other"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),
@@ -2300,7 +2300,7 @@ fn planner_auto_approve_only_when_enabled() {
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("auto-approve.sh");
     fs::write(&script, r#"cat >/dev/null
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"id":"work","task":"work"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
     let config = Config {
@@ -2379,7 +2379,7 @@ fn draft_planner_revision_stays_unapproved_and_approvable() {
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("revise-draft.sh");
     fs::write(&script, r#"test "$(cat)" = "Update the draft" || exit 14
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"id":"keep","task":"keep"},{"id":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Revised"}]}}'
 "#).unwrap();
     let root = temp.path().join("runtime");
@@ -2406,7 +2406,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "keep".into(),
+                    id: "keep".into(),
                     task: "keep".into(),
                 }],
                 edges: vec![],
@@ -2507,7 +2507,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![Node {
-            name: "task".into(),
+            id: "task".into(),
             task: "original prompt".into(),
         }],
         edges: vec![],
@@ -2592,7 +2592,7 @@ case "$GRAPHER_MODE" in
     ;;
   planner)
     printf '%s' "$GRAPHER_WORKSPACE_ROOT" > planner-cwd.txt
-    printf '%s' '{"originalGoal":"test","nodes":[{"name":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+    printf '%s' '{"originalGoal":"test","nodes":[{"id":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
     printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
     ;;
   *) exit 18 ;;
@@ -2802,7 +2802,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
     let second_release = temp.path().join("second-release");
     let first_script = temp.path().join("first.sh");
     let second_script = temp.path().join("second.sh");
-    let graph = "printf '%s' '{\"originalGoal\":\"test\",\"nodes\":[{\"name\":\"worker\",\"task\":\"test\"}],\"edges\":[]}' > \"$GRAPHER_GRAPH_PATH\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Planned\"}]}}'\n";
+    let graph = "printf '%s' '{\"originalGoal\":\"test\",\"nodes\":[{\"id\":\"worker\",\"task\":\"test\"}],\"edges\":[]}' > \"$GRAPHER_GRAPH_PATH\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Planned\"}]}}'\n";
     fs::write(
         &first_script,
         format!(
@@ -3046,7 +3046,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         let graph = Graph {
             original_goal: "original graph".into(),
             nodes: vec![Node {
-                name: "worker".into(),
+                id: "worker".into(),
                 task: "original task".into(),
             }],
             edges: vec![],
@@ -3148,7 +3148,7 @@ rm deleted.txt
 touch '{}'
 while [ ! -f '{}' ]; do sleep 0.02; done
 {}
-printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{{"originalGoal":"test","nodes":[{{"id":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
             let config = Config {
@@ -3260,7 +3260,7 @@ fn same_project_planners_run_together_and_write_disjoint_source_files() {
 touch '{}'
 while [ ! -f '{}' ]; do sleep 0.02; done
 printf '%s' '{}' > '{}.txt'
-printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{{"originalGoal":"test","nodes":[{{"id":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), label, label)).unwrap();
         let config = Config {
@@ -3338,7 +3338,7 @@ fn independent_repositories_can_plan_concurrently() {
         fs::write(&script, format!(r#"cat >/dev/null
 touch '{}'
 while [ ! -f '{}' ]; do sleep 0.02; done
-printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{{"originalGoal":"test","nodes":[{{"id":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display())).unwrap();
         let config = Config {
@@ -3429,7 +3429,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     Graph {
                         original_goal: name.into(),
                         nodes: vec![Node {
-                            name: "task".into(),
+                            id: "task".into(),
                             task: "wait".into(),
                         }],
                         edges: vec![],
@@ -3638,7 +3638,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 nodes: ["a_slow", "z_fast", "after_fast"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: "Write your result".into(),
                     })
                     .collect(),
@@ -4110,7 +4110,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 nodes: ["owner", "slow", "related", "review", "consumer"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),
@@ -4456,7 +4456,7 @@ fn planning_metrics_parsing_and_persistence() {
             Graph {
                 original_goal: "Test plan persistence".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "Run task".into(),
                 }],
                 edges: Vec::new(),
@@ -4611,7 +4611,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
             Graph {
                 original_goal: "Test execution metrics".into(),
                 nodes: vec![Node {
-                    name: "worker".into(),
+                    id: "worker".into(),
                     task: "Run worker".into(),
                 }],
                 edges: Vec::new(),
@@ -4730,7 +4730,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
             Graph {
                 original_goal: "Goal A".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "Run task".into(),
                 }],
                 edges: Vec::new(),
@@ -4854,7 +4854,7 @@ fn completed_graph_is_published_by_driver() {
             Graph {
                 original_goal: "Publish an isolated batch of independent outcomes".into(),
                 nodes: ["first", "middle", "last", "extra"].into_iter().map(|name| Node {
-                    name: name.into(), task: name.into(),
+                    id: name.into(), task: name.into(),
                 }).collect(),
                 edges: Vec::new(),
             },
@@ -5452,11 +5452,11 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
                     graph: Graph {
                         nodes: vec![
                             Node {
-                                name: "task".into(),
+                                id: "task".into(),
                                 task: "test".into(),
                             },
                             Node {
-                                name: "pending".into(),
+                                id: "pending".into(),
                                 task: "wait for task".into(),
                             },
                         ],
@@ -5616,7 +5616,7 @@ fn save_config_updates_bootstrap_and_persists() {
             .create(
                 Graph {
                     nodes: vec![Node {
-                        name: "task".into(),
+                        id: "task".into(),
                         task: "test".into(),
                     }],
                     ..Graph::default()
@@ -5730,7 +5730,7 @@ fn pending_graph_run(
             .emit(EventKind::Created {
                 graph: Graph {
                     nodes: vec![Node {
-                        name: "work".into(),
+                        id: "work".into(),
                         task: "work".into(),
                     }],
                     ..Graph::default()
@@ -5866,7 +5866,7 @@ fn independent_role_settings_persist_and_invalid_levels_do_not_replace_saved_con
         .create(
             Graph {
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 ..Graph::default()
@@ -5916,7 +5916,7 @@ case "$GRAPHER_MODE" in
         ;;
     planner)
         test "$model:$thinking" = 'example/large:high' || exit 22
-        printf '%s' '{"originalGoal":"test","nodes":[{"name":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+        printf '%s' '{"originalGoal":"test","nodes":[{"id":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
         text=planned
         ;;
     node)
@@ -6039,11 +6039,11 @@ fn parallel_first_batch_materializes_the_plain_directory_once() {
                 original_goal: "test".into(),
                 nodes: vec![
                     Node {
-                        name: "left".into(),
+                        id: "left".into(),
                         task: "left".into(),
                     },
                     Node {
-                        name: "right".into(),
+                        id: "right".into(),
                         task: "right".into(),
                     },
                 ],
@@ -6184,7 +6184,7 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
         .graph
         .nodes
         .push(Node {
-            name: "feat_qa".into(),
+            id: "feat_qa".into(),
             task: "Feature QA verification task".into(),
         });
 

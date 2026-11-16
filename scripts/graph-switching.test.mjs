@@ -46,10 +46,12 @@ async function assertOpaqueComposerNavigation(page, navigate) {
       const visibleButtons = [...document.querySelectorAll(".prompt-box-send-btn")].filter(button =>
         button.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })).length;
       window.navigationComposerFrames.push({ homeActive, opacity, visibleButtons,
+        inert: !!box?.closest("[inert]"),
         sendPainted: !!painted && send.contains(painted), paintedClass: painted?.getAttribute("class"),
         sendTop: rect?.top, sendBottom: rect?.bottom, viewportHeight: innerHeight,
         attachPainted: !!attachPainted && attach.contains(attachPainted),
         boxTop: boxRect?.top, boxBottom: boxRect?.bottom,
+        controlsVisible: [send, attach].every(control => control?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })),
         controlsInViewport: [rect, attachRect].every(bounds => bounds && bounds.top >= 0 &&
           bounds.bottom <= innerHeight && bounds.left >= 0 && bounds.right <= innerWidth) });
       if (window.sampleNavigationComposer) requestAnimationFrame(sample);
@@ -64,9 +66,12 @@ async function assertOpaqueComposerNavigation(page, navigate) {
   }
   const frames = await page.evaluate(() => window.navigationComposerFrames);
   assert.ok(frames.length > 0);
+  assert.equal(frames.at(-1).inert, false, "settled navigation restores composer interactivity");
   for (const frame of frames) {
-    assert.ok(frame.opacity > 0.99 && frame.visibleButtons === 1 && frame.sendPainted &&
-      frame.attachPainted && frame.controlsInViewport,
+    // A retained view is deliberately inert until its replacement snapshot is
+    // validated. It is still painted, but browser hit-testing skips its controls.
+    assert.ok(frame.opacity > 0.99 && frame.visibleButtons === 1 && frame.controlsVisible && frame.controlsInViewport &&
+      (frame.inert || (frame.sendPainted && frame.attachPainted)),
       `navigation keeps the input and both controls visible, even when draft heights differ: ${JSON.stringify(frame)}`);
     assert.ok(Math.abs(frame.boxBottom - frames[0].boxBottom) < 1 &&
       Math.abs(frame.sendBottom - frames[0].sendBottom) < 1,
@@ -81,7 +86,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     const makeSnapshot = (runId, names) => ({
       runId, config, planType: "graph", phase: "completed", approved: true, paused: false,
       planningId: `plan-${runId}`,
-      graph: { originalGoal: `Goal ${runId}`, nodes: names.map(name => ({ name, task: `Task ${name}` })),
+      graph: { originalGoal: `Goal ${runId}`, nodes: names.map(name => ({ id: name, task: `Task ${name}` })),
         edges: names.slice(1).map((name, index) => ({ from: names[index], to: name, feedback: false })) },
       nodes: Object.fromEntries(names.map(name => [name, { status: "completed" }])),
       plan: null, executions: [], events: [], base: "", feedbackCounts: {},

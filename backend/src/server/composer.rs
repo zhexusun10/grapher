@@ -432,11 +432,11 @@ mod tests {
                     original_goal: "test".into(),
                     nodes: vec![
                         Node {
-                            name: "a".into(),
+                            id: "a".into(),
                             task: "test".into(),
                         },
                         Node {
-                            name: "b".into(),
+                            id: "b".into(),
                             task: "test".into(),
                         },
                     ],
@@ -488,7 +488,7 @@ mod tests {
         runtime.state.run_id = Uuid::new_v4().to_string();
         let run = runtime.state.run_id.clone();
         runtime.emit(EventKind::Created {
-            graph: Graph { original_goal:"test".into(), nodes:vec![Node{name:"a".into(),task:"test".into()}], edges:vec![] },
+            graph: Graph { original_goal:"test".into(), nodes:vec![Node{id:"a".into(),task:"test".into()}], edges:vec![] },
             config, planning_id:None, planning:None,
         }).unwrap();
         let service = Arc::new(Service { runtime:Mutex::new(runtime), driving:AtomicBool::new(false),
@@ -531,7 +531,7 @@ mod tests {
                 graph: Graph {
                     original_goal: "Original user prompt".into(),
                     nodes: vec![Node {
-                        name: "a".into(),
+                        id: "a".into(),
                         task: "test".into(),
                     }],
                     edges: vec![],

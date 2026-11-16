@@ -49,15 +49,15 @@ if (process.env.GRAPHER_MODE === 'planner') {
   if (fs.existsSync('second.txt')) { say('Final reply'); process.exit(0); }
   fs.writeFileSync('review.txt', 'fresh source');
   const graph = JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH));
-  graph.nodes.push({name:'second',task:'second'});
-  if (fs.existsSync('parallel-review')) graph.nodes.push({name:'third',task:'second'}, {name:'fourth',task:'second'}, {name:'fifth',task:'second'});
+  graph.nodes.push({id:'second',task:'second'});
+  if (fs.existsSync('parallel-review')) graph.nodes.push({id:'third',task:'second'}, {id:'fourth',task:'second'}, {id:'fifth',task:'second'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
-  emit({type:'tool_execution_end',toolName:'node',isError:false});
+  emit({type:'tool_execution_end',toolName:'edit_graph',isError:false});
   if (fs.existsSync('fail-review')) throw Error('review failed deliberately');
   while (!fs.existsSync('release-review')) await new Promise(completed=>setTimeout(completed,20));
-  for (const node of graph.nodes.filter(node => node.name !== 'first')) graph.edges.push({from:'first',to:node.name,feedback:false});
+  for (const node of graph.nodes.filter(node => node.id !== 'first')) graph.edges.push({from:'first',to:node.id,feedback:false});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
-  emit({type:'tool_execution_end',toolName:'edge',isError:false});
+  emit({type:'tool_execution_end',toolName:'edit_graph',isError:false});
   say('A next step');
 } else {
   if (task.includes('second')) {
@@ -83,7 +83,7 @@ if (process.env.GRAPHER_MODE === 'planner') {
             Graph {
                 original_goal: "Original user goal".into(),
                 nodes: vec![Node {
-                    name: "first".into(),
+                    id: "first".into(),
                     task: "first".into(),
                 }],
                 edges: vec![],
@@ -163,7 +163,7 @@ fn manual_node_after_publication_reuses_the_run_and_drives_with_fresh_source() {
         "add_manual_node",
         serde_json::json!({
             "runId": before.run_id, "detail": "metadata",
-            "request": { "node": { "name": "second", "task": "second" }, "from": "first",
+            "request": { "node": { "id": "second", "task": "second" }, "from": "first",
                 "to": null, "feedback": false, "confirmedCompleted": [] }
         }),
     )
@@ -225,9 +225,9 @@ fn manual_node_to_completed_target_reruns_that_target_after_confirmation() {
         "add_manual_node",
         serde_json::json!({
             "runId": before.run_id,
-            "request": { "node": { "name": "prerequisite", "task": "prerequisite" }, "from": null,
+            "request": { "node": { "id": "prerequisite", "task": "prerequisite" }, "from": null,
                 "to": "first", "feedback": false, "confirmedCompleted": [{
-                    "name": "first", "revision": result.revision, "head": result.head,
+                    "id": "first", "revision": result.revision, "head": result.head,
                 }] }
         }),
     )
@@ -444,13 +444,13 @@ if (process.env.GRAPHER_MODE !== 'planner') {
   process.exit(0);
 }
 const id = 'call/一';
-console.log(JSON.stringify({type:'tool_execution_start', toolName:'edge', toolCallId:id, args:{edges:[]}}));
+console.log(JSON.stringify({type:'tool_execution_start', toolName:'edit_graph', toolCallId:id, args:{edges:[]}}));
 const path = `${process.env.GRAPHER_GRAPH_PATH}.impact-3fb43c6ba852b42a.json`;
 const until = Date.now() + 3000;
 while (!fs.existsSync(path) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
 const context = JSON.parse(fs.readFileSync(path, 'utf8'));
 fs.writeFileSync(new URL('./impact-observed.json', import.meta.url), JSON.stringify({path, context}));
-console.log(JSON.stringify({type:'tool_execution_end', toolName:'edge', toolCallId:id, isError:false}));
+console.log(JSON.stringify({type:'tool_execution_end', toolName:'edit_graph', toolCallId:id, isError:false}));
 console.log(JSON.stringify({type:'message_end', message:{role:'assistant',content:[{type:'text',text:'Done'}]}}));
 "#).unwrap();
         drive(service.clone());
@@ -496,7 +496,7 @@ console.log(JSON.stringify({type:'message_end', message:{role:'assistant',conten
             serde_json::json!(["first"])
         );
         assert_eq!(
-            observed["context"]["revisionContext"]["graph"]["nodes"][0]["name"],
+            observed["context"]["revisionContext"]["graph"]["nodes"][0]["id"],
             "first"
         );
         assert!(
@@ -791,7 +791,7 @@ fn post_task_review_interruption_discards_candidate_and_never_retries_model() {
     runtime.emit(EventKind::PlannerReworkNoteInjected).unwrap();
     let mut candidate = runtime.state.graph.clone();
     candidate.nodes.push(Node {
-        name: "uncommitted".into(),
+        id: "uncommitted".into(),
         task: "uncommitted".into(),
     });
     runtime
@@ -876,15 +876,15 @@ if (process.env.GRAPHER_MODE !== 'planner') process.exit(0);
 const emit = event => console.log(JSON.stringify(event));
 const path = process.env.GRAPHER_GRAPH_PATH;
 const graph = JSON.parse(fs.readFileSync(path, 'utf8'));
-graph.nodes.push({ name: 'one', task: 'Do one' });
+graph.nodes.push({ id: 'one', task: 'Do one' });
 fs.writeFileSync(path, JSON.stringify(graph));
-emit({ type: 'tool_execution_end', toolCallId: 'node-one', toolName: 'node', isError: false });
+emit({ type: 'tool_execution_end', toolCallId: 'node-one', toolName: 'edit_graph', isError: false });
 const release = new URL('./release-draft', import.meta.url);
 while (!fs.existsSync(release)) await new Promise(done => setTimeout(done, 20));
-graph.nodes.push({ name: 'two', task: 'Do two' });
+graph.nodes.push({ id: 'two', task: 'Do two' });
 graph.edges.push({ from: 'one', to: 'two', feedback: false });
 fs.writeFileSync(path, JSON.stringify(graph));
-emit({ type: 'tool_execution_end', toolCallId: 'edge-two', toolName: 'edge', isError: false });
+emit({ type: 'tool_execution_end', toolCallId: 'graph-two', toolName: 'edit_graph', isError: false });
 emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Ready' }] } });
 "#).unwrap();
     let service = Arc::new(Service {
@@ -929,7 +929,7 @@ emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'tex
         "the committed graph is unchanged during the turn"
     );
     let projected = snapshot_metadata(&live).unwrap();
-    assert_eq!(projected["graph"]["nodes"][0]["name"], "one");
+    assert_eq!(projected["graph"]["nodes"][0]["id"], "one");
     assert_eq!(projected["graph"]["nodes"][0]["task"], "Do one");
     // The draft is durable, not browser state: a reload (or another client)
     // rebuilds the same preview before the turn commits.
@@ -959,7 +959,7 @@ emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'tex
             .graph
             .nodes
             .iter()
-            .map(|node| node.name.as_str())
+            .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
         ["one", "two"]
     );

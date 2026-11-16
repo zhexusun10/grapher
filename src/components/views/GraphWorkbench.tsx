@@ -13,8 +13,9 @@ import { motion, AnimatePresence, useAnimationControls, useIsPresent, useReduced
 import {
   Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
   Graph, GraphNode, ManualNodeRequest, Execution, Status, PlanningSummary, TranscriptItem,
-  ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, publicationMergerCardId, GraphEvent
+  ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, GraphEvent
 } from "../../types";
+import { graphCardIds, selectedMergerNode } from "../../lib/graphNodeIdentity";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -584,7 +585,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [state.runId, setSelectedMergerId]);
   // The publication Merger has no planner node; it is addressed through the
   // synthetic card selected in the topology.
-  const publicationMergerSelected = selected === publicationMergerCardId;
+  const cardIds = useMemo(() => graphCardIds(state.graph), [state.graph.nodes]);
+  const mergerConversation = selectedMergerNode(state.graph, state.mergers, selected, selectedMergerId, cardIds);
+  const publicationMergerSelected = mergerConversation === "merger";
   const selectedPublicationMerger = useMemo(() => {
     if (!publicationMergerSelected) return undefined;
     const publicationMergers = (state.mergers ?? []).filter((item) => item.node === "merger");
@@ -596,11 +599,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [publicationMergerSelected, selectedMergerId, state.mergers]);
 
   // A node-composition merger also has its own independent card identity and conversation.
-  const isNodeMergerSelected = (selected.startsWith("merger:") && selected !== publicationMergerCardId)
-    || Boolean(selectedMergerId && selected && (state.mergers ?? []).some(m => m.id === selectedMergerId && m.node === `merge:${selected}`));
-  const nodeMergerTarget = isNodeMergerSelected
-    ? (selected.startsWith("merger:") ? selected.slice(7) : selected)
-    : "";
+  const isNodeMergerSelected = mergerConversation?.startsWith("merge:") ?? false;
+  const nodeMergerTarget = isNodeMergerSelected ? mergerConversation!.slice(6) : "";
   const selectedNodeMerger = useMemo(() => {
     if (!isNodeMergerSelected) return undefined;
     const targetMergers = (state.mergers ?? []).filter((item) => item.node === `merge:${nodeMergerTarget}`);
@@ -680,7 +680,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!isNodeMergerSelected && !selectedPublicationMerger) return "";
     const originalGoal = state.graph.originalGoal || state.planning?.goal || "";
     const targetTask = isNodeMergerSelected
-      ? (state.graph.nodes.find((item) => item.name === nodeMergerTarget)?.task || originalGoal)
+      ? (state.graph.nodes.find((item) => item.id === nodeMergerTarget)?.task || originalGoal)
       : originalGoal;
     return getMergerSystemPrompt(targetTask);
   }, [isNodeMergerSelected, selectedPublicationMerger, nodeMergerTarget, state.graph.nodes, state.graph.originalGoal, state.planning?.goal]);
@@ -688,11 +688,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const activeMergerPrompt = (selectedMerger?.id ? mergerPrompts[selectedMerger.id] : undefined) || nodeMergerPrompt;
 
   const selectedNode = (isNodeMergerSelected
-    ? { name: selected, task: activeMergerPrompt }
-    : state.graph.nodes.find((item) => item.name === selected))
-    ?? (selectedPublicationMerger ? { name: publicationMergerCardId, task: activeMergerPrompt } : undefined);
+    ? { id: selected, task: activeMergerPrompt }
+    : state.graph.nodes.find((item) => item.id === selected))
+    ?? (selectedPublicationMerger ? { id: cardIds.publication, task: activeMergerPrompt } : undefined);
   const selectedState = selectedNode && !publicationMergerSelected && !isNodeMergerSelected
-    ? state.nodes[selectedNode.name]
+    ? state.nodes[selectedNode.id]
     : undefined;
   // Publication Mergers record their steered turns under the literal node name
   // "merger", while node Mergers record under `merge:<node>`.
@@ -700,19 +700,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     ? "merger"
     : isNodeMergerSelected
       ? `merge:${nodeMergerTarget}`
-      : (selectedNode?.name ?? "");
+      : (selectedNode?.id ?? "");
   const selectedNodeLabel = publicationMergerSelected
     ? t("publication merger")
     : isNodeMergerSelected
       ? t("merger · {0}", nodeMergerTarget)
-      : (selectedNode?.name ?? "");
+      : (selectedNode?.id ?? "");
   const selectedMergerContinuable = !!selectedMerger && !selectedMergerRunning &&
     (selectedMerger.node === "merger" || selectedMerger.status === "failed");
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
     // Older clients could persist the synthetic task-card edit as a chat turn.
-    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode && msg.runId === state.runId && msg.id !== `task-${conversationNode}`);
-    const latestEdit = [...state.events].reverse().find((event) =>
+    const mergerConversation = !!selectedMerger;
+    const conversationExecutions = mergerConversation ? state.mergers ?? [] : state.executions;
+    const conversationExecutionIds = new Set(conversationExecutions
+      .filter(execution => execution.node === conversationNode).map(execution => execution.id));
+    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode &&
+      msg.runId === state.runId && msg.id !== `task-${conversationNode}` &&
+      (mergerConversation ? msg.conversationKind === "merger" : msg.conversationKind !== "merger"));
+    const latestEdit = mergerConversation ? undefined : [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === conversationNode && event.nodes?.includes(conversationNode));
     const local = latestEdit?.old_instruction
       ? (() => {
@@ -736,10 +742,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         }
       }
     }
-    const activeEvents = activeNodeConversationEvents(state, conversationNode).filter((event) =>
-      ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === conversationNode && !!event.instruction ||
-      ((event.type === "steered" || event.type === "node_messaged") && event.node === conversationNode)
-    ).filter((event) => {
+    const activeEvents = (mergerConversation ? state.events : activeNodeConversationEvents(state, conversationNode)).filter((event) => {
+      if (mergerConversation) {
+        return event.type === "steered" && event.node === conversationNode &&
+          !!event.execution_id && conversationExecutionIds.has(event.execution_id);
+      }
+      if (event.type === "steered") {
+        return event.node === conversationNode && !!event.execution_id && conversationExecutionIds.has(event.execution_id);
+      }
+      if (event.type === "node_messaged") return event.node === conversationNode && state.graph.nodes.some(node => node.id === conversationNode);
+      if (event.type === "invalidated") return event.human && event.target === conversationNode && state.graph.nodes.some(node => node.id === conversationNode);
+      if (event.type === "conversation_edited") return event.target === conversationNode &&
+        event.nodes?.includes(conversationNode) && conversationExecutionIds.has(event.from_execution_id ?? "");
+      return false;
+    }).filter((event) => {
       if (event.instruction && rolledBackTurns.has(event.instruction.trim())) return false;
       return true;
     });
@@ -771,7 +787,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const key = steerRollbackKey(message);
       return !key || !rolledBackSteerKeys.has(key);
     });
-  }, [selectedNode?.name, conversationNode, effectiveMessages, state.runId, state.events, rolledBackSteerKeys]);
+  }, [selectedNode?.id, conversationNode, effectiveMessages, state.runId, state.events, rolledBackSteerKeys]);
   const attempts = useMemo(() => {
     if (!selectedNode) return [];
     if (publicationMergerSelected) {
@@ -780,8 +796,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (isNodeMergerSelected) {
       return (state.mergers ?? []).filter((item) => item.node === `merge:${nodeMergerTarget}`).sort((a, b) => a.startedAt - b.startedAt);
     }
-    return nodeConversationExecutions(state, selectedNode.name).sort((a, b) => a.startedAt - b.startedAt);
-  }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
+    return nodeConversationExecutions(state, selectedNode.id).sort((a, b) => a.startedAt - b.startedAt);
+  }, [selectedNode?.id, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   // Session details describe the Pi session, not one attempt: follow-ups and
   // retries resume the same session file, so its clock accumulates too.
@@ -807,7 +823,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // Before the first execution, the task at the top is the newest information.
   // Count superseded executions too: an edited node is not a never-run node.
   const isUnrunNode = !!selectedNode && !isMerger &&
-    !state.executions.some(item => item.node === selectedNode.name);
+    !state.executions.some(item => item.node === selectedNode.id);
   const snapshotModelInfo = useMemo(() => {
     if (!execution) return null;
     return resolveExecutionModelAndThinking(
@@ -840,7 +856,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       steerMessages?: ChatMessage[];
       executions: ConversationExecution[];
     }> = [{
-      id: `turn-0-${selectedNode.name}`,
+      id: `turn-0-${selectedNode.id}`,
       isInitial: true,
       // A replacement for a Steer/follow-up owns its new execution even when
       // the abandoned attempt was the session's first execution.
@@ -900,11 +916,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (unassigned.length > 0) turns[0].executions.push(...unassigned);
     turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
     return turns;
-  }, [selectedNode?.name, attempts, nodeMessages]);
+  }, [selectedNode?.id, attempts, nodeMessages]);
   // While a merger is selected its own process decides the working state, not
   // the node status that covers the whole preparation/execution cycle.
   const selectedDependenciesCompleted = !selectedNode ||
-    nodeDependenciesCompleted(state.graph, state.nodes, selectedNode.name);
+    nodeDependenciesCompleted(state.graph, state.nodes, selectedNode.id);
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage,
@@ -1558,7 +1574,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
-    const targetNode = routeType === "serial" ? state.graph.nodes[0]?.name : selectedNode?.name;
+    const targetNode = routeType === "serial" ? state.graph.nodes[0]?.id : selectedNode?.id;
     const targetExecution = selectedMerger
       ? (selectedMerger.status === "running" ? selectedMerger : undefined)
       : [...state.executions].reverse().find(item => item.node === targetNode && item.status === "running");
@@ -1596,7 +1612,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     return accepted !== false;
   }, [onSendMessage, stopLatestScroll, setScrollBottomVisible, setUserScrolledUp, composerDrafts, composerDraftKey,
-    routeType, state.graph.nodes, state.executions, state.events, selectedNode?.name, selectedMerger, effectiveMessages, inlineUserTurns, liveSteers]);
+    routeType, state.graph.nodes, state.executions, state.events, selectedNode?.id, selectedMerger, effectiveMessages, inlineUserTurns, liveSteers]);
 
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
@@ -2164,7 +2180,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const summaryBatches = useMemo(() => {
     if (!showExecutionOverview || !state.graph.nodes.length) return [];
-    const nodeMap = new Map(state.graph.nodes.map((node) => [node.name, node]));
+    const nodeMap = new Map(state.graph.nodes.map((node) => [node.id, node]));
     const layers = computeExecutionLayers(state.graph, state.plan);
     const seen = new Set<string>();
     const batches: GraphNode[][] = [];
@@ -2179,18 +2195,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       if (batchNodes.length > 0) batches.push(batchNodes);
     }
-    const remaining = state.graph.nodes.filter((node) => !seen.has(node.name));
+    const remaining = state.graph.nodes.filter((node) => !seen.has(node.id));
     if (remaining.length > 0) batches.push(remaining);
     return batches;
   }, [showExecutionOverview, state.graph, state.plan]);
 
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
-  const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
+  const serialNodeState = serialNode ? state.nodes[serialNode.id] : undefined;
   const serialExecutions = useMemo(() => {
     if (!serialNode) return [];
-    return nodeConversationExecutions(state, serialNode.name)
+    return nodeConversationExecutions(state, serialNode.id)
       .sort((a, b) => a.startedAt - b.startedAt);
-  }, [serialNode?.name, state.executions, state.supersededExecutionIds]);
+  }, [serialNode?.id, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
   // Successful Serial turns remain an uninterrupted conversation. Add record
   // controls when unsuccessful history needs an explicit way to reopen it.
@@ -2249,7 +2265,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }));
     }
     const latestEdit = [...state.events].reverse().find((event) =>
-      event.type === "conversation_edited" && event.target === serialNode.name && event.nodes?.includes(serialNode.name));
+      event.type === "conversation_edited" && event.target === serialNode.id && event.nodes?.includes(serialNode.id));
     if (latestEdit?.old_instruction) {
       const oldIndex = messages.findIndex((msg) =>
         msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
@@ -2260,12 +2276,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         }
       }
     }
-    const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
+    const localRemaining = messages.filter((msg) => msg.node === serialNode.id);
     const replacedIds = new Set<string>();
     const matchedLocals = new Map<number, ChatMessage>();
-    const activeEvents = activeNodeConversationEvents(state, serialNode.name).filter((event) =>
-      ((event.type === "node_messaged" || event.type === "steered") && event.node === serialNode.name) ||
-      ((event.type === "invalidated" && event.human || (event.type === "conversation_edited" && !event.first_turn)) && event.target === serialNode.name && !!event.instruction)
+    const activeEvents = activeNodeConversationEvents(state, serialNode.id).filter((event) =>
+      ((event.type === "node_messaged" || event.type === "steered") && event.node === serialNode.id) ||
+      ((event.type === "invalidated" && event.human || (event.type === "conversation_edited" && !event.first_turn)) && event.target === serialNode.id && !!event.instruction)
     );
     const ordinals = steerEventOrdinals(activeEvents);
     const recorded = activeEvents.reverse().filter((event) => {
@@ -2279,22 +2295,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       return true;
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
-      text: event.instruction || "", images: event.images, files: matchedLocals.get(event.sequence)?.files, node: serialNode.name, runId: state.runId,
+      text: event.instruction || "", images: event.images, files: matchedLocals.get(event.sequence)?.files, node: serialNode.id, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
       executionId: executionIdForMessage(state, event), steerRequestId: event.request_id,
-      pendingExecution: state.nodes[serialNode.name]?.pendingMessages?.some(message => message.sequence === event.sequence),
+      pendingExecution: state.nodes[serialNode.id]?.pendingMessages?.some(message => message.sequence === event.sequence),
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
     messages = messages.filter(message => !replacedIds.has(message.id));
     // A fresh browser session may have only a recorded follow-up, not the
     // original prompt in local state. Keep the initial task paired with its execution.
-    if ((messages.length === 0 || messages[0]?.node === serialNode.name) && state.graph.originalGoal) {
+    if ((messages.length === 0 || messages[0]?.node === serialNode.id) && state.graph.originalGoal) {
       messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal });
     }
     if (messages.length === 0) return [];
     const initialEdit = [...state.events].reverse().find((event) =>
-      event.type === "conversation_edited" && event.target === serialNode.name && event.first_turn);
+      event.type === "conversation_edited" && event.target === serialNode.id && event.first_turn);
     if (initialEdit && !messages[0].versions) {
       const versions = versionsForEdit(state, initialEdit);
       messages[0] = { ...messages[0], versions, currentVersionIndex: versionIndexForEdit(state, initialEdit, versions) };
@@ -2345,7 +2361,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return turns;
-  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events, rolledBackSteerKeys]);
+  }, [routeType, serialNode?.id, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events, rolledBackSteerKeys]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
   // Pausing a node must not strand a steer Pi never read: the card disappears
@@ -2381,7 +2397,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0 &&
     !serialTurns[serialTurns.length - 1].userMessage.executionId;
   const serialDependenciesCompleted = !serialNode ||
-    nodeDependenciesCompleted(state.graph, state.nodes, serialNode.name);
+    nodeDependenciesCompleted(state.graph, state.nodes, serialNode.id);
   const isSerialWorking = isNodeWorking(serialNodeState?.status, serialExecution, pendingRequest,
     serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined,
     state.paused, serialDependenciesCompleted, (serialNodeState?.pendingMessages?.length ?? 0) > 0);
@@ -2398,7 +2414,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable);
   const mainComposerDisabled = !!editingMessage || (locked && !isPlanning);
   const withdrawMessages = onWithdrawMessages ? (requestId: string) =>
-    onWithdrawMessages(selectedNode ? conversationNode : serialNode?.name, requestId) : undefined;
+    onWithdrawMessages(selectedNode ? conversationNode : serialNode?.id, requestId) : undefined;
   // Live SSE and the durable-JSONL poller can both observe the Planner's
   // compaction; either source is enough to relabel the working indicator.
   const isMainViewCompacting = isMainViewWorking &&
@@ -2470,10 +2486,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const footerMotion = reduceMotion ? { duration: 0 } : { duration: 0.24, ease: [0.22, 1, 0.36, 1] as const };
   // Each conversation owns a fresh ReactFlow store and measured viewport.
   // Only an accepted graph mutation may open the pane: a failed or still-running
-  // `node`/`edge` call leaves the draft graph unchanged, so it must not reveal an
-  // empty topology on the right.
+  // `edit_graph` call leaves the draft unchanged, so it must not reveal an empty
+  // topology on the right.
   const hasAcceptedGraphTool = (t: any) =>
-    (t?.toolName === "node" || t?.toolName === "edge") && t.status === "success" && !t.isError;
+    t?.toolName === "edit_graph" && t.status === "success" && !t.isError;
   const hasGraphToolCalled =
     (plannerStream.items || []).some(hasAcceptedGraphTool) ||
     (plannerStream.tools || []).some(hasAcceptedGraphTool);
@@ -2573,7 +2589,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [conversationViewKey, syncViewScroll, setScrollBottomVisible]);
 
   const foregroundExecutionId = routeType === "serial" ? serialExecutions.at(-1)?.id : attempts.at(-1)?.id;
-  const foregroundExecutionKey = JSON.stringify([conversationViewKey, foregroundExecutionId]);
+  // Re-entering the same view must not reuse readiness if an intervening read stalled.
+  const foregroundExecutionKey = JSON.stringify([conversationViewKey, conversationGenerationRef.current, foregroundExecutionId]);
   const foregroundExecutionReady = readyForegroundExecution === foregroundExecutionKey;
   const handleExecutionOutputReady = useCallback((execId: string) => {
     // Wait only to activate *automatic* older readers, never to paint the pane.
@@ -2653,17 +2670,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       // Only the narrow layout exposes this button; desktop focus is unchanged.
       if (conversationSwitchRef.current?.getClientRects().length) conversationSwitchRef.current.focus();
     }
-    if (id === publicationMergerCardId) {
+    const mergerNode = selectedMergerNode(state.graph, state.mergers, id, "", cardIds);
+    if (mergerNode === "merger") {
       const publicationMergers = (state.mergers ?? []).filter(item => item.node === "merger");
       const runningMerger = publicationMergers.find(item => item.status === "running");
       const merger = runningMerger ?? publicationMergers.at(-1);
-      setSelected(publicationMergerCardId);
+      setSelected(id);
       setSelectedMergerId(merger?.id ?? "");
       setAttemptId(merger?.id ?? "");
       return;
     }
-    if (id.startsWith("merger:")) {
-      const target = id.slice(7);
+    if (mergerNode?.startsWith("merge:")) {
+      const target = mergerNode.slice(6);
       const targetMergers = (state.mergers ?? []).filter(item => item.node === `merge:${target}`);
       const runningMerger = targetMergers.find(item => item.status === "running");
       const merger = runningMerger ?? targetMergers.at(-1);
@@ -2723,19 +2741,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const privateBatchCompleted = privateBatch.filter(name => state.nodes[name]?.status === "completed").length;
 
   const renderSummaryNodeChip = (node: GraphNode) => {
-    const rawStatus = state.nodes[node.name]?.status ?? "waiting";
+    const rawStatus = state.nodes[node.id]?.status ?? "waiting";
     const status = rawStatus === "running" && (state.mergers ?? []).some(
-      (merger) => merger.node === `merge:${node.name}` && merger.status === "running",
+      (merger) => merger.node === `merge:${node.id}` && merger.status === "running",
     ) ? "waiting" : rawStatus;
     return (
       <button
         type="button"
-        key={node.name}
+        key={node.id}
         className="node-chip"
-        onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
+        onClick={() => { setSelected(node.id); setSelectedMergerId(""); }}
       >
         <span className={`chip-dot ${status}`} aria-hidden="true" />
-        <span className="chip-name">{node.name}</span>
+        <span className="chip-name">{node.id}</span>
       </button>
     );
   };
@@ -2837,7 +2855,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 creationRunRef.current = "";
                 setCreatingNode(false);
                 setSelectedMergerId("");
-                setSelected(request.node.name);
+                setSelected(request.node.id);
               }
               return accepted;
             }} />
@@ -2873,15 +2891,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 style={{ opacity: isConversationReady ? 1 : 0 }}
               >
                 <NodeTaskCard
-                  nodeName={selectedNode.name}
+                  key={conversationViewKey}
+                  nodeName={selectedNode.id}
                   taskText={nodeTaskText}
+                  historyReady={!foregroundExecutionId || foregroundExecutionReady ||
+                    (showExecutionRecords && collapsedAttemptIds.has(foregroundExecutionId))}
                   badgeText={isNodeMergerSelected || publicationMergerSelected ? t("Merger 系统提示词") : undefined}
-                  editing={editingTaskNode === selectedNode.name}
+                  editing={editingTaskNode === selectedNode.id}
                   draft={taskDraft}
                   onDraftChange={setTaskDraft}
-                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId ? () => {
+                  onEdit={!isNodeMergerSelected && !publicationMergerSelected ? () => {
                     onCancelEditMessage?.();
-                    setEditingTaskNode(selectedNode.name);
+                    setEditingTaskNode(selectedNode.id);
                     setTaskDraft(selectedNode.task);
                   } : undefined}
                   onCancel={() => setEditingTaskNode("")}
@@ -2889,7 +2910,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onSave={(value) => {
                     const first = attempts[0];
                     if (!first) {
-                      void onUpdateUnstartedNodeTask(state.runId, selectedNode.name, selectedNode.task, value)
+                      void onUpdateUnstartedNodeTask(state.runId, selectedNode.id, selectedNode.task, value)
                         .then(accepted => { if (accepted) setEditingTaskNode(""); });
                       return;
                     }
@@ -2897,10 +2918,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       if (first && onEditMessageSubmit) {
                         const submitEdit = () => {
                           void Promise.resolve(onEditMessageSubmit({
-                            id: `task-${selectedNode.name}`,
+                            id: `task-${selectedNode.id}`,
                             role: "user",
                             text: selectedNode.task,
-                            node: selectedNode.name,
+                            node: selectedNode.id,
                             executionId: first.id,
                             runId: state.runId,
                           }, value)).then((accepted) => {
@@ -2925,8 +2946,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     // An unapproved graph with prior executions must not reset their history.
                     if (onEditMessageSubmit) {
                       void Promise.resolve(onEditMessageSubmit({
-                        id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
-                        node: selectedNode.name, executionId: first.id, runId: state.runId,
+                        id: `task-${selectedNode.id}`, role: "user", text: selectedNode.task,
+                        node: selectedNode.id, executionId: first.id, runId: state.runId,
                       }, value)).then(accepted => { if (accepted !== false) setEditingTaskNode(""); });
                     }
                   }}
@@ -3031,7 +3052,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 })}
 
                 <WorkspaceDetailsPanel
-                  key={`${state.runId}:${selectedNode.name}`}
+                  key={`${state.runId}:${selectedNode.id}`}
                   open={detailsPanelOpen}
                   onToggle={() => toggleFooterPanel("details")}
                   showWorking={isSelectedNodeWorking}
@@ -3123,9 +3144,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 placeholder={nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
-                onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.name); onInterrupt(selectedNode?.name); } : undefined}
+                onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.id); onInterrupt(selectedNode?.id); } : undefined}
                 onWithdraw={withdrawMessages}
-                onContinue={!selectedMerger && selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.name) : undefined}
+                onContinue={!selectedMerger && selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.id) : undefined}
                 disabled={nodeComposerDisabled}
               />
             </motion.div>
@@ -3571,7 +3592,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 layoutId="conversation-composer"
                 repository={config?.repository}
                 runId={state.runId}
-                node={isSerialExecution ? state.graph.nodes[0]?.name : undefined}
+                node={isSerialExecution ? state.graph.nodes[0]?.id : undefined}
                 conversationModel
                 draftStore={composerDrafts}
                 draftKey={composerDraftKey}
@@ -3581,7 +3602,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
                 onWithdraw={withdrawMessages}
-                onContinue={isSerialExecution && serialNode && canContinueNode(serialNodeState) ? () => continueNode(serialNode.name)
+                onContinue={isSerialExecution && serialNode && canContinueNode(serialNodeState) ? () => continueNode(serialNode.id)
                   : routeType === "graph" && !isMainViewWorking && (failedPlanning ?? state.planning)?.status === "failed" &&
                     (failedPlanning ?? state.planning)?.planType === "graph" && (failedPlanning ?? state.planning)?.runId === state.runId
                     ? onContinuePlanner : undefined}

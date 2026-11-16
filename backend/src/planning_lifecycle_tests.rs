@@ -23,7 +23,7 @@ fn planner_revision_context_uses_current_run_state_at_each_tool_start() {
         runtime.state.graph.nodes = ["completed", "running"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect();
@@ -31,7 +31,7 @@ fn planner_revision_context_uses_current_run_state_at_each_tool_start() {
             runtime
                 .state
                 .nodes
-                .insert(node.name.clone(), Default::default());
+                .insert(node.id.clone(), Default::default());
         }
         runtime.state.nodes.get_mut("completed").unwrap().status = "completed".into();
         runtime.state.nodes.get_mut("running").unwrap().status = "running".into();
@@ -79,7 +79,7 @@ fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attemp
                 Graph {
                     original_goal: "test".into(),
                     nodes: vec![Node {
-                        name: "task".into(),
+                        id: "task".into(),
                         task: "test".into(),
                     }],
                     edges: vec![],
@@ -259,7 +259,7 @@ fn restart_discards_a_foreground_planner_preview_before_serving_the_committed_gr
                 graph: Graph {
                     original_goal: "Original goal".into(),
                     nodes: vec![Node {
-                        name: "draft".into(),
+                        id: "draft".into(),
                         task: "draft".into(),
                     }],
                     edges: vec![],
@@ -267,7 +267,7 @@ fn restart_discards_a_foreground_planner_preview_before_serving_the_committed_gr
             })
             .unwrap();
         let live = snapshot_metadata(&runtime.state).unwrap();
-        assert_eq!(live["graph"]["nodes"][0]["name"], "draft");
+        assert_eq!(live["graph"]["nodes"][0]["id"], "draft");
         assert_eq!(live["phase"], "planning");
     }
     invalidate_service_cache(temp.path(), Some(&id));
@@ -313,7 +313,7 @@ fn failed_planning_survives_cache_eviction_and_keeps_a_stable_id_on_commit() {
                 Graph {
                     original_goal: "Goal".into(),
                     nodes: vec![Node {
-                        name: "work".into(),
+                        id: "work".into(),
                         task: "Do work".into(),
                     }],
                     edges: vec![],
@@ -420,7 +420,7 @@ fn committed_graph_wins_over_an_interrupted_summary_write() {
             Graph {
                 original_goal: "Goal".into(),
                 nodes: vec![Node {
-                    name: "work".into(),
+                    id: "work".into(),
                     task: "Do work".into(),
                 }],
                 edges: vec![],
@@ -492,7 +492,7 @@ fn interrupted_revision_does_not_replace_a_compiled_graph() {
             Graph {
                 original_goal: "Existing graph".into(),
                 nodes: vec![Node {
-                    name: "work".into(),
+                    id: "work".into(),
                     task: "Do work".into(),
                 }],
                 edges: vec![],
@@ -556,7 +556,7 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
     let child = service_for_run(&primary, &id, true).unwrap();
     let script = temp.path().join("planner.sh");
     fs::write(&script, concat!(
-        "printf '%s' '{\"originalGoal\":\"Goal\",\"nodes\":[{\"name\":\"work\",\"task\":\"Do work\"}],\"edges\":[]}' > \"$GRAPHER_GRAPH_PATH\"\n",
+        "printf '%s' '{\"originalGoal\":\"Goal\",\"nodes\":[{\"id\":\"work\",\"task\":\"Do work\"}],\"edges\":[]}' > \"$GRAPHER_GRAPH_PATH\"\n",
         "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"completed\"}],\"stopReason\":\"stop\"}}'\n",
     )).unwrap();
     let mut cfg = config(&repository);

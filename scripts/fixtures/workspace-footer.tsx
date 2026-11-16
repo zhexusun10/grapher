@@ -105,7 +105,7 @@ function WorkspaceFooterFixture() {
       ? (hasSessionData ? { ...emptyRunMetrics(), sessionUsage, sessionContext } : undefined)
       : runMetrics === null ? null : { ...runMetrics, sessionUsage, sessionContext },
     planType: graph ? "graph" : "serial",
-    graph: { originalGoal: "Initial task", nodes: hasNode ? [{ name: "task", task: "Initial task" }] : [], edges: [] },
+    graph: { originalGoal: "Initial task", nodes: hasNode ? [{ id: "task", task: "Initial task" }] : [], edges: [] },
     nodes: hasNode ? { task: { status, revision: 0, instruction: "", error: null } } : {},
     executions: merger ? [] : executions,
     mergers: [...mergers, ...publicationMergers],

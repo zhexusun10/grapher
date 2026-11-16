@@ -35,7 +35,7 @@ function Fixture() {
       selectedMergerId={selectedMergerId} setSelectedMergerId={setSelectedMergerId}
       effectiveMessages={[]} isPlanning={planning}
       plannerStream={{ runId: snapshot.runId, stage: planning ? "planning" : "completed", plannerText: "",
-        items: [{ id: "node-tool", type: "tool_call", toolName: "node", args: {}, status: "success" }] }}
+        items: [{ id: "graph-tool", type: "tool_call", toolName: "edit_graph", args: {}, status: "success" }] }}
       onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
       onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
       active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}

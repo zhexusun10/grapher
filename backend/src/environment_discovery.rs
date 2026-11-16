@@ -16,6 +16,10 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "environment_runtime_evidence.rs"]
+mod runtime_evidence;
+pub use runtime_evidence::RuntimeEvidence;
+
 /// Non-owning description of an external environment actually selected by a
 /// business Bash tool. It is evidence for the next Node, never an authorization.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +54,10 @@ pub struct Binding {
     /// external process-state root. Omitted only by pre-dual-root records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    /// Bounded native files observed with the ABI proof. Old L keeps None and
+    /// its original checksum; never synthesize missing historical evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_evidence: Option<RuntimeEvidence>,
 }
 impl Binding {
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -66,6 +74,9 @@ impl Binding {
             .is_some_and(|root| !matches!(root, "workspace" | "state"))
         {
             return Err("Invalid discovered native environment root".into());
+        }
+        if let Some(evidence) = &self.runtime_evidence {
+            evidence.validate()?;
         }
         Ok(())
     }
@@ -333,6 +344,40 @@ fn executable_prefix(program: &Path) -> Result<Option<PathBuf>, String> {
     };
     Ok(kind(prefix)?.map(|_| prefix.to_path_buf()))
 }
+/// Observe only the interpreter's entrypoint, never matching '-m' inside an
+/// application's argv. This does not rewrite/reject commands: unfamiliar
+/// interpreter options simply cannot supply module-based binding evidence.
+fn python_module(args: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        if argument == "--check-hash-based-pycs" {
+            args.get(index + 1)?;
+            index += 2;
+            continue;
+        }
+        let options = argument.strip_prefix('-')?;
+        if options.is_empty() || options.starts_with('-') { return None; }
+        for (offset, option) in options.char_indices() {
+            let rest = &options[offset + option.len_utf8()..];
+            match option {
+                'm' => return if rest.is_empty() {
+                    Some((args.get(index + 1)?.as_str(), &args[index + 2..]))
+                } else { Some((rest, &args[index + 1..])) },
+                'c' | 'h' | '?' | 'V' => return None,
+                'W' | 'X' => {
+                    if rest.is_empty() { args.get(index + 1)?; index += 1; }
+                    break; // The remaining characters are the option's value.
+                }
+                'b' | 'B' | 'd' | 'E' | 'i' | 'I' | 'O' | 'P' | 'q' | 'R'
+                | 's' | 'S' | 'u' | 'v' | 'x' => {}
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
 fn create_prefixes(
     tool: &str,
     args: &[String],
@@ -341,32 +386,29 @@ fn create_prefixes(
 ) -> Result<Vec<PathBuf>, String> {
     let roots = roots(workspace, state);
     let conda_root = state.unwrap_or(workspace);
-    let module = args
-        .windows(2)
-        .position(|pair| pair == ["-m", "venv"])
-        .filter(|_| matches!(tool, "python" | "python3"));
-    if let Some(module) = module {
+    let module = matches!(tool, "python" | "python3")
+        .then(|| python_module(args)).flatten().filter(|(module, _)| *module == "venv");
+    if let Some((_, arguments)) = module {
         let mut prefixes = Vec::new();
         let mut skip = false;
-        for arg in &args[module + 2..] {
+        let mut literal = false;
+        for arg in arguments {
             if skip {
                 skip = false;
                 continue;
             }
-            if arg == "--prompt" {
-                skip = true;
-                continue;
+            if !literal {
+                if matches!(arg.as_str(), "-h" | "--help") { return Ok(Vec::new()); }
+                if arg == "--" { literal = true; continue; }
+                if arg == "--prompt" { skip = true; continue; }
+                if arg.starts_with('-') { continue; }
             }
-            if arg.starts_with('-') {
-                continue;
-            }
-            let path = PathBuf::from(arg);
-            owned_any(&roots, &path)?;
-            prefixes.push(path);
+            prefixes.push(PathBuf::from(arg));
         }
         if prefixes.is_empty() {
             return Err("Native venv creation has no provable workspace prefix".into());
         }
+        for prefix in &prefixes { owned_any(&roots, prefix)?; }
         return Ok(prefixes);
     }
     if tool == "conda"
@@ -445,6 +487,7 @@ fn hint(
     args: &[String],
     workspace: &Path,
     state: Option<&Path>,
+    cwd: &Path,
     launch: &LaunchConfig,
 ) -> Option<AmbientEnvironmentHint> {
     let manager = match name {
@@ -461,7 +504,7 @@ fn hint(
         return None;
     }
     let selector = if name == "conda" {
-        conda_private_prefix(args, state.unwrap_or(workspace))
+        conda_private_prefix(args, cwd)
             .map(|path| text(&path))
             .or_else(|| conda_environment_name(args).map(|name| format!("name:{name}")))
             .or_else(|| std::env::var("CONDA_PREFIX").ok())
@@ -478,9 +521,34 @@ fn hint(
         executable: text(program),
     })
 }
+/// Conda run delegates the remaining argv to the child even without '--'.
+/// The child's --prefix/--name flags are not evidence of manager selection.
+fn conda_manager_args(args: &[String]) -> &[String] {
+    let end = args.iter().position(|argument| argument == "--").unwrap_or(args.len());
+    let mut options = &args[..end];
+    if let Some(command) = options.iter().position(|argument| !argument.starts_with('-')) {
+        if options[command] == "run" {
+            let mut index = command + 1;
+            while index < options.len() {
+                let argument = &options[index];
+                if !argument.starts_with('-') || argument == "-" {
+                    options = &options[..index];
+                    break;
+                }
+                index += if matches!(argument.as_str(), "-n" | "--name" | "-p" | "--prefix" | "--cwd") { 2 } else { 1 };
+            }
+        }
+    }
+    if options.iter().any(|argument| matches!(argument.as_str(), "-h" | "--help" | "-V" | "--version")) {
+        &args[..0]
+    } else { options }
+}
+
 fn conda_environment_name(args: &[String]) -> Option<&str> {
+    let args = conda_manager_args(args);
     let mut index = 0;
     while index < args.len() {
+        if args[index] == "--" { break; }
         if args[index] == "-n" || args[index] == "--name" {
             return args.get(index + 1).map(String::as_str);
         }
@@ -492,10 +560,12 @@ fn conda_environment_name(args: &[String]) -> Option<&str> {
     None
 }
 
-fn conda_private_prefix(args: &[String], root: &Path) -> Option<PathBuf> {
+fn conda_private_prefix(args: &[String], cwd: &Path) -> Option<PathBuf> {
+    let args = conda_manager_args(args);
     let mut index = 0;
     while index < args.len() {
         let argument = &args[index];
+        if argument == "--" { break; }
         let value = if argument == "-p" || argument == "--prefix" {
             index += 1;
             args.get(index).map(String::as_str)
@@ -503,14 +573,11 @@ fn conda_private_prefix(args: &[String], root: &Path) -> Option<PathBuf> {
             argument.strip_prefix("--prefix=")
         };
         if let Some(value) = value {
-            let prefix = PathBuf::from(value);
-            if prefix.is_absolute() || value.contains(['/', '\\']) {
-                return Some(if prefix.is_absolute() {
-                    prefix
-                } else {
-                    root.join(prefix)
-                });
-            }
+            if value.is_empty() { return None; }
+            // --prefix always names a filesystem path, including a bare leaf.
+            // Native relative arguments belong to this invocation's cwd, not
+            // the external state root used for legacy name-based provisioning.
+            return Some(cwd.join(value));
         }
         index += 1;
     }
@@ -522,11 +589,7 @@ fn conda_private_prefix(args: &[String], root: &Path) -> Option<PathBuf> {
         let value = args.get(2)?;
         if value.contains(['/', '\\']) {
             let prefix = PathBuf::from(value);
-            return Some(if prefix.is_absolute() {
-                prefix
-            } else {
-                root.join(prefix)
-            });
+            return Some(cwd.join(prefix));
         }
     }
     None
@@ -644,14 +707,8 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     ) {
         return Err("Unsupported environment observer tool".into());
     }
-    let requested = PathBuf::from(&args[2]);
-    let mut requested = if requested.is_absolute() {
-        requested
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(requested)
-    };
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut requested = cwd.join(&args[2]);
     // Git Bash resolves .exe while reporting an extensionless `type -P` path.
     // This is native executable resolution, not an environment/layout fallback.
     if cfg!(windows) && !requested.is_file() && requested.extension().is_none() {
@@ -727,10 +784,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     let pip_args = if matches!(name.as_str(), "pip" | "pip3") {
         Some(business.as_slice())
     } else if matches!(name.as_str(), "python" | "python3") {
-        business
-            .windows(2)
-            .position(|pair| pair == ["-m", "pip"])
-            .map(|index| &business[index + 2..])
+        python_module(&business).and_then(|(module, arguments)| (module == "pip").then_some(arguments))
     } else {
         None
     };
@@ -832,7 +886,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     // Keep the lexical executable path: resolving a Unix venv symlink and
     // launching its host target would silently lose sys.prefix/pyvenv.cfg.
     let mut command = Command::new(&requested);
-    command.args(&business);
+    command.current_dir(&cwd).args(&business);
     if !ctx.best_effort {
         for key in ["HOME", "USERPROFILE", "CONDA_ENVS_PATH", "CONDA_PKGS_DIRS"] {
             if let Some(value) = ctx.launch.variables.get(key) {
@@ -900,10 +954,11 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
         if ctx.best_effort {
             if let Some(hint) = hint(
                 name,
-                &program,
+                &requested,
                 &business,
                 &workspace,
                 state.as_deref(),
+                &cwd,
                 &ctx.launch,
             ) {
                 let receipt = AmbientReceipt {
@@ -929,7 +984,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
             candidates.push((prefix, false));
         }
         if ctx.best_effort && name == "conda" {
-            if let Some(prefix) = conda_private_prefix(&business, conda_root) {
+            if let Some(prefix) = conda_private_prefix(&business, &cwd) {
                 if owned_any(&roots, &prefix).is_ok() {
                     candidates.push((prefix, false));
                 }
@@ -1005,7 +1060,12 @@ fn verify(
     prefix: &str,
     expected_kind: &str,
     project_requirements: bool,
+    root_paths: &[(&str, &Path)],
+    runtime_schema: Option<u32>,
 ) -> Result<Binding, String> {
+    if !matches!(runtime_schema, None | Some(1 | 2 | 3)) {
+        return Err("Unsupported native runtime evidence schema".into());
+    }
     let path = root.join(prefix);
     let canonical_prefix = canonical(&path)?;
     owned(root, &canonical_prefix)?;
@@ -1050,7 +1110,16 @@ for spec in constraints:
    target=parts+(0,)*(3-len(parts)); ok={'==':version==target,'!=':version!=target,'>=':version>=target,'<=':version<=target,'>':version>target,'<':version<target}[op]
   if not ok: raise RuntimeError('Created native interpreter does not satisfy '+spec)
 import hashlib,_ssl,_hashlib
-files={str(pathlib.Path(f).resolve()) for f in [sys.executable,getattr(sys,'_base_executable',sys.executable),_ssl.__file__,_hashlib.__file__,getattr(zlib,'__file__',None)] if f}
+record_files=False
+record_selectors=False
+selector_schema=2
+files=set(); references={}
+def observe_file(filename):
+ path=pathlib.Path(filename); resolved=str(path.resolve())
+ files.add(resolved)
+ if record_selectors: references[str(path.absolute())]=resolved
+for filename in [sys.executable,getattr(sys,'_base_executable',sys.executable),_ssl.__file__,_hashlib.__file__,getattr(zlib,'__file__',None)]:
+ if filename: observe_file(filename)
 if sys.platform=='win32':
  import ctypes
  kernel=ctypes.WinDLL('kernel32',use_last_error=True); kernel.GetModuleHandleW.argtypes=[ctypes.c_wchar_p]; kernel.GetModuleHandleW.restype=ctypes.c_void_p; kernel.GetModuleFileNameW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_uint32]
@@ -1059,18 +1128,42 @@ if sys.platform=='win32':
   if handle:
    buffer=ctypes.create_unicode_buffer(32768)
    if not kernel.GetModuleFileNameW(handle,buffer,len(buffer)): raise OSError('Cannot resolve loaded native library '+name)
-   files.add(str(pathlib.Path(buffer.value).resolve()))
-digests={}
+   observe_file(buffer.value)
+digests={}; native_blobs={}
 for filename in sorted(files):
  digest=hashlib.sha256()
+ if record_files:
+  size=pathlib.Path(filename).stat().st_size; seen=0
+  blob=hashlib.sha1(usedforsecurity=False)
+  blob.update(('blob '+str(size)+'\0').encode('ascii'))
  with open(filename,'rb') as stream:
-  for chunk in iter(lambda:stream.read(1024*1024),b''): digest.update(chunk)
+  for chunk in iter(lambda:stream.read(1024*1024),b''):
+   digest.update(chunk)
+   if record_files: blob.update(chunk); seen+=len(chunk)
+ if record_files:
+  if seen!=size: raise RuntimeError('Native runtime file changed while observing bytes: '+filename)
+  native_blobs[filename]=blob.hexdigest()
  digests[filename]=digest.hexdigest()
+if record_files:
+ evidence={'schema':selector_schema,'files':native_blobs,'references':references} if record_selectors else native_blobs
+ sys.stdout.write('\0GRAPHER_NATIVE_FILES\0'+json.dumps(evidence,sort_keys=True)+'\0')
 print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),'platform':sysconfig.get_platform(),'machine':platform.machine(),'bits':struct.calcsize('P')*8,'openssl':ssl.OPENSSL_VERSION,'zlib':zlib.ZLIB_RUNTIME_VERSION,'nativeFiles':digests},sort_keys=True))
 "#;
+    // Keep the probe's argv/environment unchanged: ordinary .pth startup code
+    // can inspect sys.argv and its stdout is part of the recorded legacy ABI.
+    // Only backend-owned probe code switches the extra evidence output on.
+    let mut script = if runtime_schema.is_some() {
+        script.replacen("record_files=False", "record_files=True", 1)
+    } else { script.to_string() };
+    if matches!(runtime_schema, Some(2 | 3)) {
+        script = script.replacen("record_selectors=False", "record_selectors=True", 1);
+    }
+    if runtime_schema == Some(3) {
+        script = script.replacen("selector_schema=2", "selector_schema=3", 1);
+    }
     let mut command = Command::new(&python);
     command
-        .args(["-I", "-B", "-c", script])
+        .args(["-I", "-B", "-c", &script])
         .arg(native::host_path(root))
         .arg(&canonical_prefix)
         .arg(if project_requirements {
@@ -1096,7 +1189,14 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
     }
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     let output = environment::controlled_output(command)?;
-    let abi = git2::Oid::hash_object(git2::ObjectType::Blob, &output)
+    // Old L is checked by its original native ABI contract. Do not construct
+    // new recovery evidence (and apply its new admission rules) just to discard
+    // it afterwards. New discoveries always request full evidence below.
+    let (runtime_evidence, abi_output) = if runtime_schema.is_some() {
+        let (evidence, abi) = RuntimeEvidence::from_probe(&output, root_paths)?;
+        (Some(evidence), abi)
+    } else { (None, output) };
+    let abi = git2::Oid::hash_object(git2::ObjectType::Blob, &abi_output)
         .map_err(|e| e.to_string())?
         .to_string();
     Ok(Binding {
@@ -1104,6 +1204,7 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
         prefix: prefix.into(),
         abi,
         root: Some(root_label.into()),
+        runtime_evidence,
     })
 }
 
@@ -1126,14 +1227,27 @@ pub(crate) fn validate_launch_with_state(
         let roots = roots(workspace, state);
         let label = binding_root_label(launch, &roots).to_string();
         let root = root_for(&roots, &label)?;
-        if verify(
+        let mut actual = verify(
             root,
             &label,
             &expected.prefix,
             &expected.kind,
             project_requirements,
-        )? != *expected
-        {
+            &roots,
+            expected.runtime_evidence.as_ref().map(RuntimeEvidence::schema),
+        )?;
+        if let Some(recorded) = &expected.runtime_evidence {
+            if !actual.runtime_evidence.as_ref().is_some_and(|current| current.same_runtime_files(recorded)) {
+                return Err("Bound native interpreter runtime file evidence changed; refusing unsafe startup".into());
+            }
+            // Selector paths constrain historical recovery, not an otherwise
+            // identical real startup. Do not rewrite the stored L in either case.
+            actual.runtime_evidence = Some(recorded.clone());
+        }
+        // Validate legacy records by their recorded contract, without rewriting
+        // L/ABI or retrofitting newly observed files into historical evidence.
+        if expected.root.is_none() { actual.root = None; }
+        if actual != *expected {
             return Err(
                 "Bound native interpreter ABI/library bytes changed; refusing unsafe startup"
                     .into(),
@@ -1376,7 +1490,7 @@ pub(crate) fn resolve_for_policy_with_state(
     }
     if let Some(((root_label, prefix), kind)) = candidates.into_iter().next() {
         let root = root_for(&roots, &root_label)?;
-        let binding = match verify(root, &root_label, &prefix, &kind, project_requirements) {
+        let binding = match verify(root, &root_label, &prefix, &kind, project_requirements, &roots, Some(3)) {
             Ok(binding) => binding,
             Err(_) if best_effort => return unbound_launch(&next),
             Err(error) => return Err(error),
@@ -1443,6 +1557,8 @@ pub(crate) fn resolve_for_policy_with_state(
             &binding.prefix,
             &binding.kind,
             project_requirements,
+            &roots,
+            Some(3),
         ) {
             Ok(verified) => next.environment = Some(verified),
             Err(_) if best_effort => return unbound_launch(&next),
@@ -1768,12 +1884,30 @@ mod tests {
             assert_eq!(binding.root.as_deref(), Some(label));
             assert_eq!(binding.prefix, "same-env");
             validate_launch_with_state(&workspace, Some(&state), &launch, false).unwrap();
+            assert!(launch.ambient_hints.is_empty(), "a private interpreter symlink must not create a host-interpreter hint");
             assert_eq!(launch.owned_scopes.as_ref().unwrap().len(), 2);
             for (name, root) in [("workspace", &workspace), ("state", &state)] {
                 assert_eq!(fs::read_to_string(root.join("same-env/local-patch")).unwrap(), name,
                     "switching does not copy or reset either private environment");
             }
         }
+        // A receipt alone is not proof: losing native metadata before drain
+        // must still unbind rather than adopt the switched prefix.
+        let generation = Uuid::new_v4().to_string();
+        let session = temp.path().join(&generation);
+        let observer = context_with_state(&workspace, Some(&state), &generation,
+            &launch.expanded(&workspace), &session, true).unwrap();
+        assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&state.join("same-env"), "venv")),
+            "-I".into(), "-c".into(), "pass".into()]).unwrap(), 0);
+        let metadata = state.join("same-env/pyvenv.cfg");
+        let original = fs::read(&metadata).unwrap();
+        fs::remove_file(&metadata).unwrap();
+        let unverified = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
+            &session, &generation, false, true).unwrap();
+        assert!(unverified.environment.is_none());
+        assert_eq!(unverified.owned_scopes, launch.owned_scopes);
+        fs::write(&metadata, original).unwrap();
+
         for external in [false, true] {
             let generation = Uuid::new_v4().to_string();
             let session = temp.path().join(&generation);
@@ -1891,6 +2025,169 @@ mod tests {
             EnvironmentScope { root: "workspace".into(), path: "second".into() },
         ], "ambiguity must not release either observed environment into project Git");
     }
+    #[test]
+    fn python_application_arguments_do_not_create_environment_authority() {
+        let (temp, root, _, launch, _) = setup();
+        let bootstrap = python(&launch);
+        let inactive = root.join("inactive");
+        let mut create = Command::new(&bootstrap);
+        create.args(["-m", "venv", "--without-pip"]).arg(&inactive);
+        environment::controlled_output(create).unwrap();
+        let script = root.join("business.py");
+        fs::write(&script, "import sys; assert sys.argv[1:3] == ['-m', 'venv']\n").unwrap();
+        for mut args in [
+            vec!["-c".into(), "import sys; assert sys.argv[1:3] == ['-m', 'venv']".into()],
+            vec![text(&script)],
+            vec!["--".into(), text(&script)],
+        ] {
+            args.extend(["-m".into(), "venv".into(), text(&inactive)]);
+            let generation = Uuid::new_v4().to_string();
+            let session = temp.path().join(&generation);
+            let observer = context(&root, &generation, &launch, &session, true).unwrap();
+            let mut invocation = vec![text(&observer), "python".into(), bootstrap.clone()];
+            invocation.extend(args);
+            assert_eq!(tool(invocation).unwrap(), 0);
+            let next = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+            assert!(next.environment.is_none(), "application argv must not manufacture a venv creation receipt");
+            assert!(next.owned_scopes.as_ref().unwrap().iter().any(|scope| scope.root == "workspace" && scope.path == "inactive"));
+        }
+        // Real module invocation still records creation, including valued
+        // interpreter options and compact/grouped short-option spelling.
+        let generation = Uuid::new_v4().to_string();
+        let session = temp.path().join(&generation);
+        let observer = context(&root, &generation, &launch, &session, true).unwrap();
+        let created = root.join("created-with-options");
+        assert_eq!(tool(vec![text(&observer), "python".into(), bootstrap.clone(),
+            "-W".into(), "ignore".into(), "-X".into(), "utf8".into(),
+            "--check-hash-based-pycs".into(), "default".into(), "-IBmvenv".into(),
+            "--without-pip".into(), text(&created)]).unwrap(), 0);
+        let next = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+        assert_eq!(next.environment.unwrap().prefix, "created-with-options");
+
+        let generation = Uuid::new_v4().to_string();
+        let session = temp.path().join(&generation);
+        let observer = context(&root, &generation, &launch, &session, false).unwrap();
+        assert_eq!(tool(vec![text(&observer), "python".into(), bootstrap.clone(), "-c".into(),
+            "pass".into(), "-m".into(), "pip".into(), "install".into(), "business-argument".into()]).unwrap(), 0,
+            "application arguments must not trigger legacy pip policy checks");
+        let error = tool(vec![text(&observer), "python".into(), bootstrap, "-mpip".into(),
+            "install".into(), "--dry-run".into(), "--no-index".into(), "not-a-real-package".into()]).unwrap_err();
+        assert!(error.contains("host interpreter"), "compact module spelling must retain the legacy host-write guard: {error}");
+    }
+
+    #[test]
+    fn python_module_options_do_not_scan_option_values_or_application_argv() {
+        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        for values in [
+            vec!["-W", "-m", "venv", "target"],
+            vec!["-X", "-m", "venv", "target"],
+            vec!["-Icpass", "-m", "venv", "target"],
+            vec!["-", "-m", "venv", "target"],
+            vec!["--help", "-m", "venv", "target"],
+            vec!["--unknown-option", "-m", "venv", "target"],
+        ] {
+            assert!(python_module(&args(&values)).is_none(), "{values:?}");
+        }
+        let application = args(&["-m", "business_module", "-m", "venv", "target"]);
+        assert_eq!(python_module(&application), Some(("business_module", &application[2..])));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let help = vec!["-mvenv".into(), text(&temp.path().join("outside")), "--help".into()];
+        assert!(create_prefixes("python", &help, &root, None).unwrap().is_empty(),
+            "help does not create an environment or request a write destination");
+    }
+
+    #[test]
+    fn conda_run_application_options_are_not_manager_selectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path();
+        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        for invocation in [
+            args(&["run", "python", "business.py", "--prefix", "wrong", "--name", "wrong"]),
+            args(&["run", "--cwd", "child-cwd", "python", "--prefix=wrong", "--name=wrong"]),
+            args(&["--debug", "run", "--no-capture-output", "python", "--name", "wrong"]),
+            args(&["create", "--prefix", "existing", "--help"]),
+        ] {
+            assert!(conda_private_prefix(&invocation, cwd).is_none(), "child argv is not a prefix selector: {invocation:?}");
+            assert!(conda_environment_name(&invocation).is_none(), "child argv is not a name selector: {invocation:?}");
+        }
+        let selected = args(&["run", "--cwd", "child-cwd", "--prefix", "selected", "python", "--prefix", "wrong"]);
+        assert_eq!(conda_private_prefix(&selected, cwd), Some(cwd.join("selected")));
+        let named = args(&["run", "--name", "selected", "python", "--prefix", "wrong", "--name", "wrong"]);
+        assert_eq!(conda_environment_name(&named), Some("selected"));
+        assert!(conda_private_prefix(&named, cwd).is_none());
+    }
+
+    #[test]
+    fn conda_prefix_arguments_use_command_cwd_without_reinterpreting_environment_names() {
+        let (temp, workspace, _, launch, _) = setup();
+        let state = temp.path().join("state");
+        let cwd = workspace.join("subproject");
+        fs::create_dir(&state).unwrap();
+        fs::create_dir(&cwd).unwrap();
+        let arguments = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        for args in [
+            arguments(&["create", "--prefix", "env"]),
+            arguments(&["install", "-p", "./env", "package"]),
+            arguments(&["run", "--prefix=env", "--", "python"]),
+            arguments(&["shell.bash", "activate", "./env"]),
+        ] {
+            let prefix = conda_private_prefix(&args, &cwd).expect("explicit prefix is a path even without a slash");
+            assert!(crate::path_identity::same_path(&prefix, &cwd.join("env")), "{prefix:?}");
+            let value = hint("conda", Path::new(&python(&launch)), &args,
+                &workspace, Some(&state), &cwd, &launch).unwrap();
+            assert!(crate::path_identity::same_path(Path::new(&value.selector), &cwd.join("env")), "{}", value.selector);
+        }
+        for args in [arguments(&["create", "--name", "env"]), arguments(&["shell.bash", "activate", "env"])] {
+            assert!(conda_private_prefix(&args, &cwd).is_none(), "a Conda name is not a cwd-relative prefix");
+        }
+        let absolute = state.join("private-env");
+        assert_eq!(conda_private_prefix(&["list".into(), "--prefix".into(), text(&absolute)], &cwd), Some(absolute));
+        assert!(conda_private_prefix(&arguments(&["run", "--", "python", "--prefix", "not-conda"]), &cwd).is_none());
+        assert!(conda_environment_name(&arguments(&["run", "--", "python", "--name", "not-conda"])).is_none());
+    }
+
+    #[test]
+    fn conda_prefix_receipt_uses_actual_cwd_not_a_same_named_state_scope() {
+        const CHILD: &str = "GRAPHER_TEST_CONDA_PREFIX_OBSERVATION";
+        if let Ok(args) = std::env::var(CHILD) {
+            assert_eq!(tool(serde_json::from_str(&args).unwrap()).unwrap(), 0);
+            return;
+        }
+        let (temp, workspace, session, launch, _) = setup();
+        let state = temp.path().join("state");
+        let cwd = workspace.join("subproject");
+        fs::create_dir(&state).unwrap();
+        fs::create_dir(&cwd).unwrap();
+        let bootstrap = python(&launch);
+        for (root, marker) in [(&cwd, "business cwd"), (&state, "not the selected prefix")] {
+            let prefix = root.join("env");
+            let mut create = Command::new(&bootstrap);
+            create.args(["-m", "venv", "--without-pip"]).arg(&prefix);
+            environment::controlled_output(create).unwrap();
+            fs::write(prefix.join("marker"), marker).unwrap();
+        }
+        let generation = Uuid::new_v4().to_string();
+        let context = context_with_state(&workspace, Some(&state), &generation, &launch, &session, true).unwrap();
+        // A native Python command stands in for the package-manager invocation;
+        // this exercises argv/cwd/receipt plumbing, NOT native Conda acceptance.
+        // Both candidate prefixes are real, independently created Python venvs.
+        let args = vec![text(&context), "conda".into(), bootstrap, "-c".into(),
+            "import pathlib,sys; assert sys.argv[1]=='--prefix'; p=pathlib.Path(sys.argv[2]); assert (p/'marker').read_text()=='business cwd'".into(),
+            "--prefix".into(), "./env".into()];
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.current_dir(&cwd).env(CHILD, serde_json::to_string(&args).unwrap())
+            .args(["--exact", "environment_discovery::tests::conda_prefix_receipt_uses_actual_cwd_not_a_same_named_state_scope", "--nocapture"]);
+        environment::controlled_output(child).unwrap();
+        let selected = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
+            &session, &generation, false, true).unwrap();
+        let binding = selected.environment.unwrap();
+        assert_eq!(binding.root.as_deref(), Some("workspace"));
+        assert_eq!(binding.prefix, "subproject/env");
+        assert_eq!(fs::read_to_string(state.join("env/marker")).unwrap(), "not the selected prefix");
+    }
+
     #[test]
     fn native_conda_names_are_private_prefixes_and_never_host_base_or_a_name_search() {
         let (_temp, root, _session, _launch, _generation) = setup();

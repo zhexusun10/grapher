@@ -7,6 +7,8 @@ export interface NodeTaskCardProps {
   nodeName: string;
   taskText: string;
   badgeText?: string;
+  /** Reserve the task's space until history is ready; never hide it again on this mount. */
+  historyReady?: boolean;
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
@@ -37,6 +39,7 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   nodeName,
   taskText,
   badgeText,
+  historyReady = true,
   editing,
   draft,
   onDraftChange,
@@ -46,6 +49,10 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   disabled = false,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [revealed, setRevealed] = useState(historyReady);
+  useLayoutEffect(() => {
+    if (historyReady) setRevealed(true);
+  }, [historyReady]);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
@@ -96,7 +103,11 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   };
 
   return (
-    <div className={`node-task-card${!badgeText ? " inline-tools" : ""}${editing ? " editing" : ""}`}>
+    <div className={`node-task-card${!badgeText ? " inline-tools" : ""}${editing ? " editing" : ""}`}
+      style={revealed ? undefined : { visibility: "hidden" }}
+      aria-hidden={!revealed || undefined}
+      inert={!revealed}
+    >
       <div className="node-task-card-header">
         {badgeText && <strong className="node-task-title">{badgeText}</strong>}
 

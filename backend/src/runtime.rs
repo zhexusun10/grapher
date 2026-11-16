@@ -23,7 +23,7 @@ mod feedback_continuation;
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualNodeConfirmation {
-    pub name: String,
+    pub id: String,
     pub revision: usize,
     pub head: Option<String>,
 }
@@ -113,6 +113,15 @@ pub(crate) struct ResultJob {
     input: crate::environment::CompositeResult,
     args: Vec<String>,
     retry: bool,
+}
+
+#[cfg(all(test, feature = "fixture"))]
+impl ResultJob {
+    /// Fault injection into a copied worker input only; no durable descriptor or
+    /// installed host binary is modified by runtime-evidence regression tests.
+    pub(crate) fn fixture_environment_launch(&mut self, reference: String) {
+        self.descriptor.result.launch_ref = reference;
+    }
 }
 
 /// Test builds alone support actuator selection.
@@ -205,6 +214,13 @@ impl PlannerRevisionContext {
             .intersection(&self.completed_nodes)
             .cloned()
             .collect()
+    }
+
+    /// Partition affected completed nodes into updated-task and original-task reruns.
+    pub fn invalidated_completed_by_task(&self, graph: &Graph) -> (Vec<String>, Vec<String>) {
+        self.invalidated_completed(graph)
+            .into_iter()
+            .partition(|id| Runtime::node_revision_changes(&self.graph, graph, id).0)
     }
 }
 
@@ -1251,7 +1267,7 @@ impl Runtime {
         if self.state.phase != "awaiting_approval"
             || !matches!(plan_type, "serial" | "graph")
             || (plan_type == "serial"
-                && !(self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task"))
+                && !(self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].id == "task"))
         {
             return Err("Invalid execution route or routing phase".into());
         }
@@ -1267,7 +1283,7 @@ impl Runtime {
     pub(crate) fn is_serial(&self) -> bool {
         match self.state.plan_type.as_deref() {
             Some(mode) => mode == "serial",
-            None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task",
+            None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].id == "task",
         }
     }
 
@@ -1462,7 +1478,7 @@ impl Runtime {
         if !workspace::has_private_git(&actual) {
             return Err("The retained Planner workspace is not a private Git repository".into());
         }
-        self.validate_planner_workspace(owner, &repository)?;
+        self.recover_planner_workspace_readiness(owner, &repository)?;
         Ok(Some(owner.clone()))
     }
 
@@ -1475,6 +1491,11 @@ impl Runtime {
         if Self::same_workspace_path(path, repository) {
             return Ok(());
         }
+        self.require_planner_workspace_prepared(execution)?;
+        crate::workspace_view::validate_ready(path, repository)
+    }
+
+    fn require_planner_workspace_prepared(&self, execution: &Execution) -> Result<(), String> {
         // A reused slot can still have the previous occupant's ready marker
         // while its next execution is checking out. Only the current owner's
         // Prepared event proves that marker belongs to this attempt.
@@ -1483,7 +1504,33 @@ impl Runtime {
         )) {
             return Err("workspace preparation has not completed for this execution".into());
         }
-        crate::workspace_view::validate_ready(path, repository)
+        Ok(())
+    }
+
+    fn recover_planner_workspace_readiness(
+        &self,
+        execution: &Execution,
+        repository: &Path,
+    ) -> Result<(), String> {
+        match self.validate_planner_workspace(execution, repository) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Only explicit continuation/capture may repair a stopped
+                // snapshot. Optional slot discovery remains strictly read-only.
+                self.require_planner_workspace_prepared(execution)?;
+                let path = Path::new(&execution.worktree);
+                if self.path_is_running(path) {
+                    return Err(error);
+                }
+                workspace::recover_snapshot_readiness(
+                    path,
+                    repository,
+                    execution.after.as_deref().unwrap_or(&execution.before),
+                    &self.exclusions()?,
+                )
+                .map_err(|recovery| format!("{error}; snapshot recovery refused: {recovery}"))
+            }
+        }
     }
 
     fn planner_workspace_candidate(&self) -> Result<Option<Execution>, String> {
@@ -1818,16 +1865,16 @@ impl Runtime {
         )?;
         let mut checked = std::collections::BTreeMap::<String, Result<(), String>>::new();
         for node in &self.state.graph.nodes {
-            if current_node == Some(node.name.as_str()) {
+            if current_node == Some(node.id.as_str()) {
                 continue;
             }
-            let resolution = match self.planner_workspace_for_node_candidate(&node.name) {
+            let resolution = match self.planner_workspace_for_node_candidate(&node.id) {
                 Ok(Some(resolution)) => resolution,
                 Ok(None) => continue,
                 Err(error) => {
                     eprintln!(
                         "[Grapher] Planner workspace for '{}' is unavailable: {error}",
-                        node.name
+                        node.id
                     );
                     continue;
                 }
@@ -1863,9 +1910,9 @@ impl Runtime {
                 None
             };
             targets.insert(
-                node.name.clone(),
+                node.id.clone(),
                 serde_json::json!({
-                    "requestedNode": node.name,
+                    "requestedNode": node.id,
                     "actualNode": resolution.execution.node,
                     "executionId": resolution.execution.id,
                     "workspace": resolution.execution.worktree,
@@ -1905,7 +1952,7 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
-        self.validate_planner_workspace(&execution, &repository)
+        self.recover_planner_workspace_readiness(&execution, &repository)
             .map_err(|error| format!("Cannot capture an unready Planner workspace: {error}"))?;
         let expected = execution.after.as_deref().unwrap_or(&execution.before);
         workspace::verify_prepared_ancestor(path, expected)?;
@@ -2135,7 +2182,7 @@ impl Runtime {
             .graph
             .nodes
             .iter()
-            .find(|item| item.name == node)
+            .find(|item| item.id == node)
             .ok_or("Node no longer exists")?;
         if current.task != old_task {
             return Err("Node task changed; reload and try again".into());
@@ -2159,7 +2206,7 @@ impl Runtime {
         graph
             .nodes
             .iter_mut()
-            .find(|item| item.name == node)
+            .find(|item| item.id == node)
             .unwrap()
             .task = task.into();
         compile(&graph, true)
@@ -2217,7 +2264,7 @@ impl Runtime {
         if request.feedback && !feedback_enabled {
             return Err("Enable Feedback in Settings before adding a feedback edge".into());
         }
-        request.node.name = request.node.name.trim().to_string();
+        request.node.id = request.node.id.trim().to_string();
         if request.feedback && request.to.as_deref().unwrap_or("").is_empty() {
             return Err("A feedback edge requires a target node".into());
         }
@@ -2234,13 +2281,13 @@ impl Runtime {
         if let Some(from) = &request.from {
             graph.edges.push(Edge {
                 from: from.clone(),
-                to: request.node.name.clone(),
+                to: request.node.id.clone(),
                 feedback: false,
             });
         }
         if let Some(to) = &request.to {
             graph.edges.push(Edge {
-                from: request.node.name.clone(),
+                from: request.node.id.clone(),
                 to: to.clone(),
                 feedback: request.feedback,
             });
@@ -2271,7 +2318,7 @@ impl Runtime {
                 .filter(|node| node.status == "completed")
             {
                 if !request.confirmed_completed.iter().any(|confirmed| {
-                    confirmed.name == *name
+                    confirmed.id == *name
                         && confirmed.revision == node.revision
                         && confirmed.head == node.head
                 }) {
@@ -2300,7 +2347,7 @@ impl Runtime {
         }
         let invalidated = affected
             .into_iter()
-            .filter(|name| graph.nodes.iter().any(|node| node.name == *name))
+            .filter(|name| graph.nodes.iter().any(|node| node.id == *name))
             .collect();
         // As with Planner revisions, include source edits made since approval
         // or publication. A reclaimed plain-directory shadow remains lazy.
@@ -2349,43 +2396,50 @@ impl Runtime {
     }
 
     fn revision_affected_between(previous: &Graph, graph: &Graph) -> BTreeSet<String> {
-        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
         let mut affected: BTreeSet<String> = previous
             .nodes
             .iter()
-            .filter(|node| !names.contains(node.name.as_str()))
-            .map(|node| node.name.clone())
+            .filter(|node| !names.contains(node.id.as_str()))
+            .map(|node| node.id.clone())
             .collect();
         for node in &graph.nodes {
-            let Some(old) = previous.nodes.iter().find(|old| old.name == node.name) else {
-                continue;
-            };
-            let inputs = |g: &Graph| {
-                g.edges
-                    .iter()
-                    .filter(|edge| edge.to == node.name && !edge.feedback)
-                    .map(|edge| edge.from.clone())
-                    .collect::<BTreeSet<_>>()
-            };
-            let reviews = |g: &Graph| {
-                g.edges
-                    .iter()
-                    .filter(|edge| edge.from == node.name && edge.feedback)
-                    .map(|edge| edge.to.clone())
-                    .collect::<BTreeSet<_>>()
-            };
-            if old.task != node.task
-                || inputs(previous) != inputs(graph)
-                || reviews(previous) != reviews(graph)
-            {
-                affected.extend(downstream(graph, &node.name));
+            if Self::node_revision_changes(previous, graph, &node.id) != (false, false, false) {
+                affected.extend(downstream(graph, &node.id));
             }
         }
         affected
     }
 
+    // Share the exact change predicates between invalidation and its explanation.
+    fn node_revision_changes(previous: &Graph, graph: &Graph, id: &str) -> (bool, bool, bool) {
+        let (Some(old), Some(node)) = (
+            previous.nodes.iter().find(|node| node.id == id),
+            graph.nodes.iter().find(|node| node.id == id),
+        ) else {
+            return (false, false, false);
+        };
+        let inputs = |g: &Graph| {
+            g.edges.iter()
+                .filter(|edge| edge.to == id && !edge.feedback)
+                .map(|edge| edge.from.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        let reviews = |g: &Graph| {
+            g.edges.iter()
+                .filter(|edge| edge.from == id && edge.feedback)
+                .map(|edge| edge.to.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        (
+            old.task != node.task,
+            inputs(previous) != inputs(graph),
+            reviews(previous) != reviews(graph),
+        )
+    }
+
     fn retained_revision_affected(graph: &Graph, affected: BTreeSet<String>) -> BTreeSet<String> {
-        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
         affected
             .into_iter()
             .filter(|name| names.contains(name.as_str()))
@@ -2419,11 +2473,11 @@ impl Runtime {
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         let previous = &self.state.graph;
-        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
         if self.state.published_head.is_some()
             && previous.nodes.iter().any(|node| {
-                !names.contains(node.name.as_str())
-                    && self.state.nodes[&node.name].status == "completed"
+                !names.contains(node.id.as_str())
+                    && self.state.nodes[&node.id].status == "completed"
             })
         {
             return Err("Cannot remove already published nodes from this run".into());
@@ -3757,18 +3811,18 @@ impl Runtime {
                 .nodes
                 .iter()
                 .filter(|node| {
-                    !busy_feedback.contains(&node.name)
+                    !busy_feedback.contains(&node.id)
                         && matches!(
-                            self.state.nodes[&node.name].status.as_str(),
+                            self.state.nodes[&node.id].status.as_str(),
                             "waiting" | "dirty"
                         )
-                        && dependencies.get(&node.name).is_some_and(|parents| {
+                        && dependencies.get(&node.id).is_some_and(|parents| {
                             parents.iter().any(|parent| matches!(
                                 self.state.nodes[parent].status.as_str(), "failed" | "blocked"
                             ))
                         })
                 })
-                .map(|node| node.name.clone())
+                .map(|node| node.id.clone())
                 .collect();
             if blocked.is_empty() {
                 break;
@@ -3790,51 +3844,51 @@ impl Runtime {
             .nodes
             .iter()
             .filter(|node| {
-                !busy_feedback.contains(&node.name)
+                !busy_feedback.contains(&node.id)
                     && matches!(
-                        self.state.nodes[&node.name].status.as_str(),
+                        self.state.nodes[&node.id].status.as_str(),
                         "waiting" | "dirty"
                     )
-                    && !running_nodes.contains(node.name.as_str())
-                    && dependencies.get(&node.name).is_none_or(|parents| {
+                    && !running_nodes.contains(node.id.as_str())
+                    && dependencies.get(&node.id).is_none_or(|parents| {
                         parents.iter().all(|parent| self.state.nodes[parent].status == "completed")
                     })
             })
             .cloned()
             .collect();
         if publishing {
-            ready.retain(|node| self.private_continuation_during_publication(&node.name));
+            ready.retain(|node| self.private_continuation_during_publication(&node.id));
         }
         // Unfinished private members retry before delivery or new dispatch.
         // Select retries before the slot cap so newly ready nodes cannot
         // displace a failed or paused member of the retained batch.
-        if ready.iter().any(|node| self.retained_private_continuation(&node.name).is_some()) {
-            ready.retain(|node| self.retained_private_continuation(&node.name).is_some());
+        if ready.iter().any(|node| self.retained_private_continuation(&node.id).is_some()) {
+            ready.retain(|node| self.retained_private_continuation(&node.id).is_some());
         }
         // Shared mode keeps dependency-driven refill. Private mode binds a
         // whole visible topology batch before applying the worker cap.
         if let Some(plan) = &self.state.plan {
             ready.sort_by_key(|node| plan.execution_batches.iter()
-                .position(|layer| layer.contains(&node.name)).unwrap_or(usize::MAX));
+                .position(|layer| layer.contains(&node.id)).unwrap_or(usize::MAX));
         }
         if !publishing && batch_workspaces {
             if !self.state.private_batch.is_empty() {
-                ready.retain(|node| self.state.private_batch.contains(&node.name)
-                    || self.retained_private_continuation(&node.name).is_some());
+                ready.retain(|node| self.state.private_batch.contains(&node.id)
+                    || self.retained_private_continuation(&node.id).is_some());
                 // A held batch may need an earlier source-native parent to
                 // recover. Never mix its source dispatch with private peers.
-                if ready.iter().any(|node| self.source_batch_recovery(&node.name)) {
-                    ready.retain(|node| self.source_batch_recovery(&node.name));
+                if ready.iter().any(|node| self.source_batch_recovery(&node.id)) {
+                    ready.retain(|node| self.source_batch_recovery(&node.id));
                 }
             } else if self.starts_private_batch(ready.len().min(available))
-                && !ready.iter().any(|node| self.retained_private_continuation(&node.name).is_some())
+                && !ready.iter().any(|node| self.retained_private_continuation(&node.id).is_some())
             {
-                let batch = self.topology_batch(&[ready[0].name.clone()]);
-                let count = ready.iter().filter(|node| batch.contains(&node.name)).count().min(available);
+                let batch = self.topology_batch(&[ready[0].id.clone()]);
+                let count = ready.iter().filter(|node| batch.contains(&node.id)).count().min(available);
                 // Do not turn a mixed ready group into a smaller shared group
                 // by applying a private-only restriction before mode selection.
                 if self.starts_private_batch(count) {
-                    ready.retain(|node| batch.contains(&node.name));
+                    ready.retain(|node| batch.contains(&node.id));
                 }
             }
         }
@@ -3870,8 +3924,8 @@ impl Runtime {
             && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
             let source_direct_run = source_direct_run
-                || (!batch_workspaces && self.state.nodes[&node.name].continuation
-                    && self.state.nodes[&node.name].source_direct_recovery);
+                || (!batch_workspaces && self.state.nodes[&node.id].continuation
+                    && self.state.nodes[&node.id].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
             let mut source_head = if self.is_serial() || shared_source {
@@ -3879,7 +3933,7 @@ impl Runtime {
             } else {
                 self.latest_source_head().to_owned()
             };
-            let parent_names = dependencies.get(&node.name).cloned().unwrap_or_default();
+            let parent_names = dependencies.get(&node.id).cloned().unwrap_or_default();
             let mut parent_heads = parent_names
                 .iter()
                 .map(|parent| {
@@ -3895,26 +3949,26 @@ impl Runtime {
             let mut before = if self.is_serial() || source_direct_run {
                 String::new()
             } else {
-                self.state.nodes[&node.name]
+                self.state.nodes[&node.id]
                     .head
                     .clone()
                     .filter(|head| !head.is_empty() && (!batch_workspaces
-                        || self.state.nodes[&node.name].edit_execution_id.is_some()
+                        || self.state.nodes[&node.id].edit_execution_id.is_some()
                         || !self.state.published_heads.contains(head)))
                     .unwrap_or_else(|| source_head.clone())
             };
-            let feedback_undelivered = undelivered_feedback_turns.contains(&node.name);
-            let mut queued_messages = self.state.nodes[&node.name].pending_messages.clone();
+            let feedback_undelivered = undelivered_feedback_turns.contains(&node.id);
+            let mut queued_messages = self.state.nodes[&node.id].pending_messages.clone();
             let message_sequences = queued_messages.iter()
                 .map(|message| message.sequence)
                 .collect::<Vec<_>>();
-            let resolved_private = self.retained_private_continuation(&node.name)
+            let resolved_private = self.retained_private_continuation(&node.id)
                 .is_some_and(|previous| previous.status == "resolved");
-            let feedback_rebase = self.state.nodes[&node.name].feedback_continuation
+            let feedback_rebase = self.state.nodes[&node.id].feedback_continuation
                 .as_ref().is_some_and(|input| !input.dispatched);
-            let pending_followup = self.state.node_has_pending_followup(&node.name);
+            let pending_followup = self.state.node_has_pending_followup(&node.id);
             let continuation = !feedback_rebase
-                && (self.state.nodes[&node.name].continuation || resolved_private)
+                && (self.state.nodes[&node.id].continuation || resolved_private)
                 && !pending_followup;
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
@@ -3922,36 +3976,36 @@ impl Runtime {
             // directory empty, so there is no conversation to resume.
             let session_missing = |previous: &Execution| self.node_session_missing(previous);
             let resume = if feedback_rebase {
-                let anchor = &self.state.nodes[&node.name].feedback_continuation
+                let anchor = &self.state.nodes[&node.id].feedback_continuation
                     .as_ref().expect("feedback continuation").anchor_execution_id;
                 Some(self.state.executions.iter().find(|execution| {
-                    execution.id == *anchor && execution.node == node.name
+                    execution.id == *anchor && execution.node == node.id
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                 }).ok_or("Feedback continuation history is unavailable")?)
             } else if continuation {
                 self.state.executions.iter().rev().find(|execution| {
-                    execution.node == node.name
+                    execution.node == node.id
                         && (execution.status == "failed" || (resolved_private && execution.status == "resolved"))
                         && execution.completed_at.is_some()
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                 })
-            } else if self.state.nodes[&node.name].human_instruction {
-                let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
+            } else if self.state.nodes[&node.id].human_instruction {
+                let anchor = self.state.nodes[&node.id].edit_execution_id.as_deref();
                 let previous = self
                     .state
                     .executions
                     .iter()
                     .rev()
                     .find(|execution| {
-                        execution.node == node.name
+                        execution.node == node.id
                             && execution.completed_at.is_some()
                             && anchor.is_none_or(|id| execution.id == id)
                     })
                     .ok_or("No previous node session to continue")?;
                 if session_missing(previous)
-                    && self.state.nodes[&node.name].feedback_workspace.is_some()
+                    && self.state.nodes[&node.id].feedback_workspace.is_some()
                 {
-                    let input = self.state.nodes[&node.name]
+                    let input = self.state.nodes[&node.id]
                         .feedback_workspace
                         .as_ref()
                         .ok_or("Missing feedback input")?;
@@ -3989,13 +4043,13 @@ impl Runtime {
             let stopped_recovery = continuation
                 && resume.is_some_and(|previous| {
                     if !self.state.execution_stop_requests.contains(&previous.id)
-                        || self.state.nodes[&node.name].human_instruction
-                        || self.state.nodes[&node.name]
+                        || self.state.nodes[&node.id].human_instruction
+                        || self.state.nodes[&node.id]
                             .feedback_workspace
                             .as_ref()
                             .is_some_and(|input| !input.additional_sources.is_empty())
                         || self.state.executions.iter().any(|execution| {
-                            execution.node == node.name
+                            execution.node == node.id
                                 && (execution.pid.is_some()
                                     || execution.output_bytes > 0
                                     || execution.status == "completed")
@@ -4033,7 +4087,7 @@ impl Runtime {
                     execution.node == previous.node
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                         && (execution.status == "completed"
-                            || self.state.nodes[&node.name].feedback_continuation.as_ref()
+                            || self.state.nodes[&node.id].feedback_continuation.as_ref()
                                 .is_some_and(|input| input.anchor_execution_id == execution.id
                                     && (execution.pid.is_some() || execution.output_bytes > 0
                                         || !session_missing(execution))))
@@ -4046,10 +4100,10 @@ impl Runtime {
                 && resume.is_some_and(|previous| {
                     session_missing(previous) && no_session_activity(previous)
                 }) {
-                let node_state = &self.state.nodes[&node.name];
+                let node_state = &self.state.nodes[&node.id];
                 let anchor = if let Some(input) = &node_state.feedback_continuation {
                     self.state.executions.iter().find(|execution| {
-                        execution.id == input.anchor_execution_id && execution.node == node.name
+                        execution.id == input.anchor_execution_id && execution.node == node.id
                     })
                 } else if let Some(input) = &node_state.feedback_workspace {
                     self.state
@@ -4058,7 +4112,7 @@ impl Runtime {
                         .find(|execution| execution.id == input.target_execution_id)
                 } else if source_direct_run || node_state.human_instruction {
                     self.state.executions.iter().rev().find(|execution| {
-                        execution.node == node.name
+                        execution.node == node.id
                             && execution.status == "completed"
                             && !self.state.superseded_execution_ids.contains(&execution.id)
                     })
@@ -4080,8 +4134,8 @@ impl Runtime {
             // Feedback descendants keep their stricter delivery-boundary check.
             let unstarted_bound_input = (continuation || pending_followup)
                 && !feedback_rebase
-                && self.state.nodes[&node.name].feedback_continuation.is_none()
-                && self.state.nodes[&node.name].edit_execution_id.is_none()
+                && self.state.nodes[&node.id].feedback_continuation.is_none()
+                && self.state.nodes[&node.id].edit_execution_id.is_none()
                 && resume.is_some_and(|previous| {
                     !session_missing(previous)
                         && previous.pid.is_none()
@@ -4096,18 +4150,18 @@ impl Runtime {
                 });
             // Legacy turns without a binding retain their conservative checks.
             let unstarted_followup = feedback_undelivered || unstarted_bound_input || (continuation
-                && self.state.nodes[&node.name].feedback_continuation.as_ref()
+                && self.state.nodes[&node.id].feedback_continuation.as_ref()
                     .is_none_or(|input| input.delivery_id.is_none())
-                && self.state.nodes[&node.name].human_instruction
-                && !self.state.nodes[&node.name].instruction.is_empty()
+                && self.state.nodes[&node.id].human_instruction
+                && !self.state.nodes[&node.id].instruction.is_empty()
                 && resume.is_some_and(|previous| {
                     !session_missing(previous)
                         && self.state.execution_is_preparation_only(previous)
                         && no_unfinished_activity(previous)
                         && (has_completed_history(previous)
-                            || self.state.nodes[&node.name].feedback_continuation.is_some())
+                            || self.state.nodes[&node.id].feedback_continuation.is_some())
                 }));
-            let failed_before_session = self.state.nodes[&node.name].human_instruction
+            let failed_before_session = self.state.nodes[&node.id].human_instruction
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
                         && session_missing(previous)
@@ -4162,10 +4216,10 @@ impl Runtime {
             // target instructions, edits and every already-claimed user input.
             let recover_input = (initial_recovery || fallback_anchor.is_some() || unstarted_followup)
                 && !feedback_rebase
-                && self.state.nodes[&node.name].feedback_continuation.is_none()
-                && self.state.nodes[&node.name].edit_execution_id.is_none();
+                && self.state.nodes[&node.id].feedback_continuation.is_none()
+                && self.state.nodes[&node.id].edit_execution_id.is_none();
             let input_previous = recover_input.then(|| self.state.executions.iter().rev().find(|execution| {
-                execution.node == node.name && !self.state.superseded_execution_ids.contains(&execution.id)
+                execution.node == node.id && !self.state.superseded_execution_ids.contains(&execution.id)
             })).flatten().filter(|execution| matches!(execution.status.as_str(), "failed" | "resolved"));
             let retry_input = input_previous.and_then(|previous| self.bound_node_input(previous));
             if retry_input.is_none() {
@@ -4187,8 +4241,8 @@ impl Runtime {
                         && !source_direct_run
                         && !self.batch_recovery_was_delivered(previous)
                         && !Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository)
-                        && self.state.nodes[&node.name].edit_execution_id.is_none()
-                        && self.state.nodes[&node.name].feedback_workspace.as_ref()
+                        && self.state.nodes[&node.id].edit_execution_id.is_none()
+                        && self.state.nodes[&node.id].feedback_workspace.as_ref()
                             .is_none_or(|input| !input.additional_sources.is_empty())
                 })
                 .and_then(|previous| {
@@ -4224,7 +4278,7 @@ impl Runtime {
             let mut materialize_source = materialize_source;
             if let Some(previous) = &preserved_workspace {
                 before = previous.before.clone();
-                if self.retained_private_continuation(&node.name).is_some() {
+                if self.retained_private_continuation(&node.id).is_some() {
                     // An already-started handoff (including older schedulers'
                     // sibling delivery) can advance the Run baseline. This
                     // writer still owns its prepared inputs, including across retries before Prepared.
@@ -4241,18 +4295,18 @@ impl Runtime {
             let feedback_workspace = if batch_workspaces {
                 None // prior private results are already in the batch's source baseline
             } else {
-                self.state.nodes[&node.name].feedback_workspace.clone()
+                self.state.nodes[&node.id].feedback_workspace.clone()
             };
             let fresh_path = || {
                 workspace::normalize_workspace_display_path(
                     &self
                         .run_workspace_root()
-                        .join(format!("{}-{id}", crate::compiler::node_id(&node.name))),
+                        .join(format!("{}-{id}", crate::compiler::node_id(&node.id))),
                 )
             };
-            let busy = |path: &Path| self.allocation_workspace_reserved(path, Some(&node.name));
-            let shared_terminal = (!feedback_rebase && self.state.nodes[&node.name].shared_workspace)
-                .then(|| self.terminal_workspace_for(&node.name))
+            let busy = |path: &Path| self.allocation_workspace_reserved(path, Some(&node.id));
+            let shared_terminal = (!feedback_rebase && self.state.nodes[&node.id].shared_workspace)
+                .then(|| self.terminal_workspace_for(&node.id))
                 .flatten()
                 .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository));
             let mut inherit_workspace = false;
@@ -4310,7 +4364,7 @@ impl Runtime {
             } else if let Some(previous) = workspace_resume {
                 let path = Path::new(&previous.worktree);
                 workspace_lineage.extend(previous.workspace_lineage.iter().cloned());
-                if self.retained_private_continuation(&node.name).is_some() {
+                if self.retained_private_continuation(&node.id).is_some() {
                     // Missing or damaged retained work must fail in preparation,
                     // not silently adopt an idle sibling's directory. This also
                     // keeps repeated failed preparations on the original slot.
@@ -4362,7 +4416,7 @@ impl Runtime {
                     // A one-to-one edge is a physical handoff. Fan-in folds all
                     // dependency lineages into the selected parent's live slot.
                     if parent_executions.len() > 1 {
-                        workspace_lineage.extend(self.dependency_ancestors(&node.name));
+                        workspace_lineage.extend(self.dependency_ancestors(&node.id));
                     } else {
                         workspace_lineage.extend(parent.workspace_lineage.iter().cloned());
                         workspace_lineage.insert(parent.node.clone());
@@ -4390,7 +4444,7 @@ impl Runtime {
                     selected_path
                 } else {
                     if parent_executions.len() > 1 {
-                        workspace_lineage.extend(self.dependency_ancestors(&node.name));
+                        workspace_lineage.extend(self.dependency_ancestors(&node.id));
                     } else if let Some(parent) = parent_executions.first() {
                         if self.has_single_consumer(&parent.node) {
                             workspace_lineage.extend(parent.workspace_lineage.iter().cloned());
@@ -4430,7 +4484,7 @@ impl Runtime {
             } else {
                 None
             };
-            workspace_lineage.insert(node.name.clone());
+            workspace_lineage.insert(node.id.clone());
             if !shared_source && self.state.executions.iter().any(|execution| {
                 execution.status == "running"
                     && Self::same_workspace_path(
@@ -4462,7 +4516,7 @@ impl Runtime {
                         .executions
                         .iter()
                         .find(|execution| {
-                            execution.node == node.name
+                            execution.node == node.id
                                 && execution.session_id == previous.session_id
                         })
                         .map(|execution| execution.id.clone())
@@ -4474,20 +4528,20 @@ impl Runtime {
                     .executions
                     .iter()
                     .find(|execution| {
-                        execution.node == node.name && execution.session_id == previous.session_id
+                        execution.node == node.id && execution.session_id == previous.session_id
                     })
                     .map(|execution| execution.id.clone())
                     .unwrap_or_else(|| previous.id.clone())
             });
             let mut execution = Execution {
                 id: id.clone(),
-                node: node.name.clone(),
-                revision: self.state.nodes[&node.name].revision,
+                node: node.id.clone(),
+                revision: self.state.nodes[&node.id].revision,
                 attempt: continued_attempt.unwrap_or_else(|| {
                     self.state
                         .executions
                         .iter()
-                        .filter(|execution| execution.node == node.name)
+                        .filter(|execution| execution.node == node.id)
                         .map(|execution| execution.attempt)
                         .max()
                         .unwrap_or(0)
@@ -4517,7 +4571,7 @@ impl Runtime {
             // Explicit per-node selections survive conversation profile saves.
             // Legacy synchronized overrides are only a fallback when no Run
             // selection exists. Dispatched jobs keep immutable config/metrics.
-            let node_state = &self.state.nodes[&node.name];
+            let node_state = &self.state.nodes[&node.id];
             let node_settings = node_state.model_config.as_ref()
                 .filter(|_| node_state.model_override)
                 .cloned()
@@ -4531,7 +4585,7 @@ impl Runtime {
                     ..Default::default()
                 });
             }
-            let state = &self.state.nodes[&node.name];
+            let state = &self.state.nodes[&node.id];
             // Editing the opening user turn replaces the node task itself; a
             // follow-up edit on a never-started attempt still needs the node
             // task sent first.
@@ -4552,7 +4606,7 @@ impl Runtime {
                     })
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let (instruction_queued, instruction_dispatched) = self.instruction_delivery(&node.name, &queued_messages);
+            let (instruction_queued, instruction_dispatched) = self.instruction_delivery(&node.id, &queued_messages);
             let include_instruction = !instruction_queued && (!instruction_dispatched || recover_input);
             let delivered_feedback = state.feedback_continuation.as_ref()
                 .is_some_and(|input| input.delivery_id.is_some()) && !feedback_undelivered && !feedback_rebase;
@@ -4643,7 +4697,7 @@ impl Runtime {
                 let input_session = resume
                     .map(|previous| previous.session_id.as_str())
                     .unwrap_or(&execution.session_id);
-                self.recovery_attachment_instructions(&node.name, input_session, &task)
+                self.recovery_attachment_instructions(&node.id, input_session, &task)
             } else {
                 task.clone()
             };
@@ -4655,7 +4709,7 @@ impl Runtime {
                 .graph
                 .edges
                 .iter()
-                .any(|edge| edge.feedback && edge.from == node.name);
+                .any(|edge| edge.feedback && edge.from == node.id);
             let history_edit = state.edit_execution_id.is_some();
             // No environment binding can consume historical layout evidence in
             // source mode. Do not walk/re-resolve private E/L history there.
@@ -4783,7 +4837,7 @@ impl Runtime {
                             .as_ref()
                             .ok_or("Environment baseline is missing")?;
                         match store.select_for_workspace(
-                            &node.name,
+                            &node.id,
                             &inputs,
                             &execution.worktree,
                             baseline,
@@ -4828,8 +4882,8 @@ impl Runtime {
                     {
                         environment_sources.push(selected.clone());
                         selected = store.select_for_workspace(
-                            &node.name,
-                            &[(node.name.clone(), selected)],
+                            &node.id,
+                            &[(node.id.clone(), selected)],
                             &execution.worktree,
                             self.state
                                 .environment_baseline
@@ -4856,7 +4910,7 @@ impl Runtime {
                     }
                     Err(error) => {
                         self.emit(EventKind::Blocked {
-                            node: node.name.clone(),
+                            node: node.id.clone(),
                             error,
                         })?;
                         continue;
@@ -4895,7 +4949,7 @@ impl Runtime {
                 });
             }
             if feedback_delivery_id.is_some() {
-                let mut input = self.state.nodes[&node.name].feedback_continuation.clone()
+                let mut input = self.state.nodes[&node.id].feedback_continuation.clone()
                     .expect("feedback continuation");
                 // Bind the entire accepted text/image turn and its delivery
                 // identity atomically with Started. A failed fork retries that
@@ -4904,7 +4958,7 @@ impl Runtime {
                 input.images = images.clone();
                 input.delivery_id = feedback_delivery_id.clone();
                 started.push(EventKind::FeedbackContinuationQueued {
-                    node: node.name.clone(), continuation: input,
+                    node: node.id.clone(), continuation: input,
                 });
             }
             started.push(EventKind::Started {
@@ -4967,7 +5021,7 @@ impl Runtime {
                 feedback_repair_retry: feedback_workspace.as_ref().is_some_and(|input| {
                     input.additional_sources.is_empty()
                         && self.state.executions.iter().any(|previous| {
-                            previous.node == node.name
+                            previous.node == node.id
                                 && previous.status == "failed"
                                 && Self::same_workspace_path(
                                     Path::new(&previous.worktree),
@@ -5021,7 +5075,7 @@ impl Runtime {
                             .graph
                             .nodes
                             .iter()
-                            .map(|node| node.name.clone())
+                            .map(|node| node.id.clone())
                             .collect()
                     }
                 } else {
@@ -5037,15 +5091,15 @@ impl Runtime {
                         .graph
                         .nodes
                         .iter()
-                        .filter(|node| !dependencies.iter().any(|edge| edge.from == node.name))
-                        .map(|node| node.name.clone())
+                        .filter(|node| !dependencies.iter().any(|edge| edge.from == node.id))
+                        .map(|node| node.id.clone())
                         .collect();
                     if terms.is_empty() {
                         self.state
                             .graph
                             .nodes
                             .iter()
-                            .map(|node| node.name.clone())
+                            .map(|node| node.id.clone())
                             .collect()
                     } else {
                         terms
@@ -5182,10 +5236,10 @@ impl Runtime {
                 .graph
                 .edges
                 .iter()
-                .any(|edge| !edge.feedback && edge.from == candidate.name)
+                .any(|edge| !edge.feedback && edge.from == candidate.id)
         });
         let executions: Vec<_> = terminal_nodes
-            .filter_map(|candidate| self.latest_node_execution(&candidate.name))
+            .filter_map(|candidate| self.latest_node_execution(&candidate.id))
             .filter(|execution| execution.workspace_lineage.iter().any(|name| name == node))
             .collect();
         if executions.is_empty() {
@@ -5305,15 +5359,15 @@ impl Runtime {
         if best_effort
             && !shared_handoff
             && self.state.graph.nodes.iter().any(|node| {
-                Some(node.name.as_str()) != owner
-                    && self.state.nodes[&node.name].status == "completed"
+                Some(node.id.as_str()) != owner
+                    && self.state.nodes[&node.id].status == "completed"
                     && !self
                         .state
                         .graph
                         .edges
                         .iter()
-                        .any(|edge| !edge.feedback && edge.from == node.name)
-                    && self.state.nodes[&node.name]
+                        .any(|edge| !edge.feedback && edge.from == node.id)
+                    && self.state.nodes[&node.id]
                         .result
                         .as_ref()
                         .is_some_and(|result| {
@@ -6325,19 +6379,19 @@ impl Runtime {
             .iter()
             // Completed shared-source terminals are already delivered and have
             // no native environment/result descriptor to publish after promotion.
-            .filter(|node| self.state.nodes[&node.name].head.as_deref() != Some(""))
+            .filter(|node| self.state.nodes[&node.id].head.as_deref() != Some(""))
             .filter(|node| {
                 !self
                     .state
                     .graph
                     .edges
                     .iter()
-                    .any(|edge| !edge.feedback && edge.from == node.name)
+                    .any(|edge| !edge.feedback && edge.from == node.id)
             })
             .map(|node| {
                 Ok((
-                    node.name.clone(),
-                    self.state.nodes[&node.name]
+                    node.id.clone(),
+                    self.state.nodes[&node.id]
                         .result
                         .clone()
                         .ok_or("Terminal composite result is missing")?,
@@ -6388,9 +6442,12 @@ impl PublicationJob {
             let exclusions = self.store.exclusions(&selected.launch_ref)?;
             let present = path.is_dir();
             if !present {
-                // The existing E recovery check must precede code reconstruction,
-                // not discover unsupported legacy coverage after creating W.
+                // Both existing recovery checks must precede code reconstruction,
+                // not discover unsupported coverage or bad native inputs after
+                // creating W. This reorders the same check already in prepare.
                 self.store.validate_history_result(selected, &selected.launch_ref)?;
+                self.store.preflight_runtime_evidence(path, selected)?;
+                self.store.preflight_project_runtime_evidence(&self.repository, head, selected)?;
             }
             if present {
                 // Other entries still hold the previous publication after one
@@ -6468,8 +6525,14 @@ impl PublicationJob {
             let mut equivalent = true;
             for entry in &entries {
                 if entry.result.launch_ref != first.result.launch_ref {
-                    equivalent = false;
-                    continue; // Independent roots remain named entries, not a failed comparison.
+                    let other = self.store.load_launch(&entry.result.launch_ref)?;
+                    if !launch.same_business_launch(&other) {
+                        equivalent = false;
+                        continue; // Independent business bindings remain named entries.
+                    }
+                    // Runtime-file/root evidence was validated per entry above;
+                    // its location alone must not introduce a new default-entry
+                    // compatibility condition or publication gate.
                 }
                 if let Some(binding) = &launch.environment {
                     equivalent &= self.store.same_business_prefix_contents(
@@ -6573,6 +6636,8 @@ pub(crate) fn perform_result(
                 )?;
                 if !present {
                     store.validate_history_result(&job.descriptor.result, &job.descriptor.result.launch_ref)?;
+                    store.preflight_runtime_evidence(path, &job.descriptor.result)?;
+                    store.preflight_project_runtime_evidence(&repository, &job.descriptor.result.code_ref, &job.descriptor.result)?;
                     workspace::prepare_with_merger_expected_for_run_scoped(
                         &repository,
                         path,
@@ -6881,6 +6946,7 @@ fn perform_with_merger_inner(
             &job.previous_environment_launch,
         ) {
             let store = crate::environment::Environments::new(root, &job.run_id, policy)?;
+            store.preflight_project_runtime_evidence(&repository, &job.execution.before, input)?;
             store.preflight_history_result(path, input, previous)?;
         }
     }

@@ -27,7 +27,7 @@ const vite = await createServer({
 });
 const noop = () => {};
 const taskNodeCanvas = (component, data) => React.createElement(ReactFlow, {
-  nodes: [{ id: data.name, type: "work", position: { x: 0, y: 0 }, width: 236, height: 180, data }],
+  nodes: [{ id: data.id, type: "work", position: { x: 0, y: 0 }, width: 236, height: 180, data }],
   nodeTypes: { work: component }, width: 300, height: 240,
   proOptions: { hideAttribution: true },
 });
@@ -50,7 +50,7 @@ try {
   const mergerState = {
     ...state,
     approved: true,
-    graph: { originalGoal: "merge", nodes: [{ name: "join", task: "Join results" }], edges: [] },
+    graph: { originalGoal: "merge", nodes: [{ id: "join", task: "Join results" }], edges: [] },
     nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
     mergers: [{ id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
       worktree: "/worktrees/join", before: "base", after: null, status: "completed", output: "", startedAt: 1, completedAt: 2 }],
@@ -79,7 +79,7 @@ try {
     ["ThinkingCard", "ThinkingCard", { content: "", isStreaming: true }],
     ["ThinkingCard", "ThinkingCard", { content: "Inspect:\n\n```sh\necho hello\n```", isStreaming: false }],
     ["views/NodeTaskCard", "NodeTaskCard", { nodeName: "worker", taskText: "Inspect:\n\n```sh\necho hello\n```", editing: false, draft: "", onDraftChange: noop, onEdit: noop, onCancel: noop, onSave: noop }],
-    ["graph/TaskNode", "TaskNode", { data: { name: "review", task: "Review result", status: "completed", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
+    ["graph/TaskNode", "TaskNode", { data: { id: "review", task: "Review result", status: "completed", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],
     ["PublicationCompletedDetails", "PublicationCompletedDetails", { state: { ...state, phase: "completed" } }],
     ["views/GraphWorkbench", "GraphWorkbench", { state, activity: [{ kind: "workspace_prepare", nodes: ["foundation_contract"] }], routeType: "graph", selected: "", setSelected: noop, selectedMergerId: "", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],

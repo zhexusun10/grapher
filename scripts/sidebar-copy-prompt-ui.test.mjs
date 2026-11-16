@@ -570,7 +570,7 @@ test("/name renames sidebar conversation cards in main Graph and Serial dialogs,
     planType: runId === "a" ? "graph" : "serial",
     graph: {
       originalGoal: goal,
-      nodes: [{ name: runId === "a" ? "worker" : "task", task: "Do work" }],
+      nodes: [{ id: runId === "a" ? "worker" : "task", task: "Do work" }],
       edges: [],
     },
     plan: { executionBatches: [[runId === "a" ? "worker" : "task"]], rootNodes: [runId === "a" ? "worker" : "task"], terminals: [runId === "a" ? "worker" : "task"], warnings: [] },

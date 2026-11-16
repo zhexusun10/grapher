@@ -28,27 +28,29 @@ const model = createServer(async (request, response) => {
     const label = [...cases.keys()].find(label => text.includes(label));
     assert.ok(label, 'provider request must belong to this acceptance');
     const scenario = cases.get(label);
-    const planner = body.tools?.some(t => t.function.name === 'node');
+    const planner = body.tools?.some(t => t.function.name === 'edit_graph');
     const merger = !planner && text.includes('<workspace_objective>');
     const lastUser = messages.findLastIndex(m => m.role === 'user');
     const results = messages.slice(lastUser + 1).filter(m => m.role === 'tool');
     assert.ok(results.every(result => !JSON.stringify(result.content).includes('exited with code')), JSON.stringify(results));
-    let tool;
+    let tools = [];
     if (planner) {
-      if (!results.length) tool = { name: 'bash', arguments: { command: 'printf planned > planner.txt' } };
-      if (results.length === 1) tool = { name: 'node', arguments: { nodes: [
-        { name: 'alpha', task: `${label} WRITE_ALPHA` }, { name: 'beta', task: `${label} WRITE_BETA` },
-        { name: 'gamma', task: `${label} WRITE_GAMMA` },
-        { name: 'join', task: `${label} JOIN_BRANCHES` }, { name: 'tail', task: `${label} WRITE_TAIL` },
-      ] } };
-      if (results.length === 2) tool = { name: 'edge', arguments: { edges: [{ from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' }, { from: 'gamma', to: 'join' }] } };
+      if (!results.length) tools = [{ name: 'bash', arguments: { command: 'printf planned > planner.txt' } }];
+      if (results.length === 1) tools = [
+        { id: 'alpha', task: `${label} WRITE_ALPHA` }, { id: 'beta', task: `${label} WRITE_BETA` },
+        { id: 'gamma', task: `${label} WRITE_GAMMA` },
+        { id: 'join', task: `${label} JOIN_BRANCHES` }, { id: 'tail', task: `${label} WRITE_TAIL` },
+      ].map(arguments_ => ({ name: 'edit_graph', arguments: { nodes: [arguments_] } }));
+      if (results.length === 6) tools = [
+        { from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' }, { from: 'gamma', to: 'join' },
+      ].map(arguments_ => ({ name: 'edit_graph', arguments: { edges: [arguments_] } }));
     } else if (merger) {
       // Refuse every automatic repair turn until the harness explicitly
       // enables repair after restart. One refused turn now triggers feedback,
       // not publication_failed.
       if (!scenario.allowRepair) scenario.failed = true;
-      else if (!results.length) tool = { name: 'bash', arguments: { command:
-        'test -n "$(git diff --name-only --diff-filter=U)" && printf "left\\nright\\n" > shared.txt && git add -f shared.txt' } };
+      else if (!results.length) tools = [{ name: 'bash', arguments: { command:
+        'test -n "$(git diff --name-only --diff-filter=U)" && printf "left\\nright\\n" > shared.txt && git add -f shared.txt' } }];
     } else if (!results.length) {
       const projectView = 'test -d .git && test -z "$(git for-each-ref --format="%(refname)" refs/grapher/)" && test "$(git branch --show-current)" != grapher-node && ';
       const command = text.includes('WRITE_ALPHA') ? 'printf alpha > alpha.txt'
@@ -62,15 +64,17 @@ const model = createServer(async (request, response) => {
         : text.includes('VERIFY_MERGED') ? 'test "$(wc -l < shared.txt)" -eq 2 && printf verified > verified.txt'
         : undefined;
       assert.ok(command, `unknown task: ${text}`);
-      tool = { name: 'bash', arguments: { command: projectView + command } };
+      tools = [{ name: 'bash', arguments: { command: projectView + command } }];
     }
-    calls.push({ label, role: planner ? 'planner' : merger ? 'merger' : 'node', tool: tool?.name || null });
-    const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${calls.length}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] }
+    calls.push({ label, role: planner ? 'planner' : merger ? 'merger' : 'node', tool: tools[0]?.name || null });
+    const delta = tools.length ? { role: 'assistant', tool_calls: tools.map((tool, index) => ({ index,
+      id: `call-${calls.length}-${index}`, type: 'function',
+      function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } })) }
       : { role: 'assistant', content: 'Acceptance task completed.' };
     const chunk = (delta, finish_reason) => ({ id: 'acceptance', object: 'chat.completion.chunk', created: 1,
       model: 'native', choices: [{ index: 0, delta, finish_reason }] });
     response.writeHead(200, { 'content-type': 'text/event-stream' });
-    response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tool ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
+    response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tools.length ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
   } catch (error) { errors.push(String(error)); response.writeHead(500); response.end(String(error)); }
 });
 const api = async (command, body = {}) => {
@@ -172,8 +176,8 @@ try {
       assert.equal(git(repository, 'rev-parse', 'HEAD'), original, 'Planner snapshots must not advance source HEAD');
       assert.equal(git(repository, 'show', ':user.txt'), 'staged', 'snapshot must preserve the real source index');
     } else {
-      const nodes = [{ name: 'left', task: `${label} WRITE_LEFT` }, { name: 'right', task: `${label} WRITE_RIGHT` }];
-      if (label === 'NODE_FANIN') nodes.push({ name: 'join', task: `${label} VERIFY_MERGED` });
+      const nodes = [{ id: 'left', task: `${label} WRITE_LEFT` }, { id: 'right', task: `${label} WRITE_RIGHT` }];
+      if (label === 'NODE_FANIN') nodes.push({ id: 'join', task: `${label} VERIFY_MERGED` });
       // Pin these cases to the retained private contract: a two-node adaptive
       // batch may run in source and therefore never require a publication Merger.
       initial = await legacyGraph(api, env.GRAPHER_DATA_DIR, { config: config(repository), graph: { originalGoal: label, nodes,

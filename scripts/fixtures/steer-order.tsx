@@ -40,7 +40,7 @@ function Fixture() {
   audit.consume = (text: string) => setOutput(previous => previous + line({ type: "message_start", message: { role: "user", content: [{ type: "text", text }] } }) + assistant("OUTPUT AFTER STEER"));
   audit.settle = () => setRunning(false);
   const state = { ...emptySnapshot, runId: "steer-run", config, phase: running ? "running" : "completed", approved: true,
-    planType: graph ? "graph" : "serial", events, graph: { originalGoal: "Original task", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+    planType: graph ? "graph" : "serial", events, graph: { originalGoal: "Original task", nodes: [{ id: "task", task: "Original task" }], edges: [] },
     nodes: { task: { status: running ? "running" : "completed", revision: 0, instruction: "", error: null } },
     executions: [{ id: "exec", node: "task", status: running ? "running" : "completed", revision: 0, attempt: 1,
       output, ...(paged ? { outputBytes: 100 } : {}), startedAt: 1, completedAt: running ? null : 2, sessionId: "session", worktree: "/mock", before: "", after: "" }] } as Snapshot;

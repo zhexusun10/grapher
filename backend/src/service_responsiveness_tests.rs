@@ -348,7 +348,7 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
             graph: Graph {
                 original_goal: "test sse".into(),
                 nodes: vec![Node {
-                    name: "node-1".into(),
+                    id: "node-1".into(),
                     task: "work".into(),
                 }],
                 edges: vec![],
@@ -489,7 +489,7 @@ fn a_usage_bearing_output_chunk_refreshes_snapshot_watchers() {
             graph: Graph {
                 original_goal: "live usage".into(),
                 nodes: vec![Node {
-                    name: "node-1".into(),
+                    id: "node-1".into(),
                     task: "work".into(),
                 }],
                 edges: vec![],

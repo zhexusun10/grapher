@@ -10,10 +10,10 @@ Graph shape and validation belong to [Graph compilation](overview.md#graph-compi
 ## Planning graph projection
 
 During foreground planning, the graph pane opens on an accepted (successful)
-`node`/`edge` tool result, not on a pending or failed call.
-Successful tool results update the Planner's draft preview before the Planner's
-text stream ends, including the single-edit and JSON-string argument shapes the
-tools tolerate and a revision of an approved graph that is not executing. Each
+`edit_graph` tool result, not on a pending or failed call. Retired `node`/`edge`
+events do not change the preview.
+Successful batches update both node and edge previews before the Planner's
+text stream ends, including the JSON-string argument shapes the tool tolerates and a revision of an approved graph that is not executing. Each
 accepted result also records the whole draft topology as a display-only durable
 event, so a reload (or another client) replays the same preview instead of
 waiting for the turn to commit. An actively executing graph keeps showing the
@@ -32,14 +32,14 @@ approved revisions still commit atomically in Rust. Backend evidence:
 browser regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
 
-For an approved graph revision, each `node`/`edge` tool call receives a
+For an approved graph revision, each `edit_graph` call receives a
 Run-owned snapshot of the committed graph and completed nodes at tool start.
 The existing tool `warnings` report completed nodes that the entire candidate
 would invalidate, using the same Runtime calculation as commit. This is an
 advisory preview, not approval or a scheduling guarantee: active nodes can
-finish later, and commit re-evaluates the current state. If the snapshot or
-compiler support is unavailable, no impact warning is returned; absence of a
-warning does not prove there is no impact. Unapproved drafts do not run revision
+finish later, and commit re-evaluates the current state. An unavailable runtime
+snapshot fails the call without changing the graph. Older compilers may omit
+impact warnings; absence of a warning does not prove there is no impact. Unapproved drafts do not run revision
 invalidation. Focused evidence:
 [Runtime revision](../../backend/src/runtime_tests.rs) and
 [Planner extension](../../scripts/check-pi-extension.ts).

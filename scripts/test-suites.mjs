@@ -133,8 +133,13 @@ export const suites = {
     steps: [productionBuild, ['scripts/check-project-binding.mjs'], sourceTests('execution-route.test.mjs')],
   },
   extensions: {
-    description: 'Production backend build and Pi role/tool contracts.',
-    steps: [productionBuild, ['scripts/node-ts.mjs', 'scripts/check-pi-extension.ts']],
+    description: 'Planner TypeScript checking, production backend build and Pi role/tool contracts.',
+    steps: [
+      ['node_modules/typescript/bin/tsc', '--noEmit', '--strict', '--skipLibCheck',
+        '--moduleResolution', 'bundler', '--module', 'esnext', '--target', 'es2022',
+        '--types', 'node', 'backend/resources/planner.ts'],
+      productionBuild, ['scripts/node-ts.mjs', 'scripts/check-pi-extension.ts'],
+    ],
   },
   hardening: {
     description: 'Production backend build and HTTP/filesystem hardening acceptance.',

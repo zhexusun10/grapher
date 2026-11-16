@@ -36,7 +36,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
         model: value.model, choices: [{ index: 0, delta, finish_reason }] });
       const createGraph = value.model === 'planner' && !value.messages.some(message => message.role === 'tool');
       const delta = createGraph ? { role: 'assistant', tool_calls: [{ index: 0, id: 'create-node', type: 'function',
-        function: { name: 'node', arguments: JSON.stringify({ nodes: [{ name: 'A', task: 'Return completed' }] }) } }] }
+        function: { name: 'edit_graph', arguments: JSON.stringify({ nodes: [{ id: 'A', task: 'Return completed' }] }) } }] }
         : { role: 'assistant', content: value.model.startsWith('router') ? 'serial' : 'Completed' };
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, createGraph ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
@@ -178,7 +178,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     if (process.platform === 'win32') {
       const graphState = await api('plan_goal', { goal: 'Create one node A without approving execution', config: nextConfig, mode: 'graph' });
       await assertReused(graphState, 'planner');
-      assert.equal(graphState.graph.nodes[0].name, 'A');
+      assert.equal(graphState.graph.nodes[0].id, 'A');
       assert.equal(graphState.approved, false);
     }
     assert.equal(await readFile(join(source, 'base.txt'), 'utf8'), 'keep');

@@ -30,6 +30,11 @@ fn main() {
             .expect("Cannot read graph");
         let result = serde_json::from_str::<serde_json::Value>(&input).and_then(|value| {
             let graph = serde_json::from_value(value["graph"].clone())?;
+            let previous: Option<grapher::model::Graph> = value
+                .get("previousGraph")
+                .filter(|graph| !graph.is_null())
+                .map(|graph| serde_json::from_value(graph.clone()))
+                .transpose()?;
             let revision: Option<grapher::runtime::PlannerRevisionContext> = value
                 .get("revisionContext")
                 .filter(|context| !context.is_null())
@@ -55,17 +60,49 @@ fn main() {
                         let diagnostics =
                             grapher::compiler::unremovable_node_diagnostics(&graph, &unremovable);
                         if diagnostics.is_empty() {
+                            let mut mutation_warnings = previous.as_ref()
+                                .map(|before| grapher::compiler::changed_advisories(before, &graph));
+                            let mut revision_impact = None;
                             if let Some(revision) = revision {
-                                let affected = revision.invalidated_completed(&graph);
-                                if !affected.is_empty() {
-                                    let noun = if affected.len() == 1 { "node" } else { "nodes" };
-                                    plan.warnings.push(format!(
-                                        "W304: Current changes will invalidate and rerun {} completed {noun}: {}.",
-                                        affected.len(), affected.join(", ")
-                                    ));
+                                let (updated_tasks, original_tasks) = revision.invalidated_completed_by_task(&graph);
+                                let count = updated_tasks.len() + original_tasks.len();
+                                if count > 0 {
+                                    revision_impact = Some(serde_json::json!({ "rerunCount": count }));
+                                    let noun = if count == 1 { "node" } else { "nodes" };
+                                    let groups = [
+                                        ("Tasks changed; rerun these nodes with their updated tasks", updated_tasks),
+                                        ("Graph changes affect these nodes; after their dependencies complete, they will rerun their original tasks using the latest workspace, incorporating workspaces passed down by their dependencies", original_tasks),
+                                    ]
+                                    .into_iter()
+                                    .filter(|(_, nodes)| !nodes.is_empty())
+                                    .map(|(reason, nodes)| {
+                                        let nodes = nodes.iter()
+                                            .map(|id| format!("{id:?}"))
+                                            .collect::<Vec<_>>().join("\n- ");
+                                        format!("{reason}:\n- {nodes}")
+                                    })
+                                    .collect::<Vec<_>>().join("\n\n");
+                                    let message = format!(
+                                        "Current draft will invalidate and rerun {count} completed {noun} since:\n{groups}"
+                                    );
+                                    plan.warnings.push(format!("W304: {message}"));
+                                    if let Some(warnings) = &mut mutation_warnings {
+                                        warnings.insert(0, grapher::compiler::Diagnostic {
+                                            code: "W304".into(),
+                                            message,
+                                            dependency_path: None,
+                                        });
+                                    }
                                 }
                             }
-                            serde_json::json!({ "plan": plan, "diagnostics": [] })
+                            let mut output = serde_json::json!({ "plan": plan, "diagnostics": [] });
+                            if let Some(warnings) = mutation_warnings {
+                                output["mutationWarnings"] = serde_json::json!(warnings);
+                            }
+                            if let Some(impact) = revision_impact {
+                                output["revisionImpact"] = impact;
+                            }
+                            output
                         } else {
                             serde_json::json!({ "diagnostics": diagnostics })
                         }

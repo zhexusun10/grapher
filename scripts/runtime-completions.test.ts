@@ -241,17 +241,17 @@ test("only explicit missing-Run responses make deletion idempotent and invalidat
   }
 });
 
-test("legacy Plan roots normalize across snapshot and compile APIs without mutating the wire payload", async () => {
+test("Plan rootNodes pass through snapshot and compile APIs without translation", async () => {
   const original = globalThis.fetch;
-  const legacyPlan = Object.freeze({
-    executionBatches: [["root"]], roots: ["root"], terminals: ["leaf"], warnings: [],
+  const plan = Object.freeze({
+    executionBatches: [["root"]], rootNodes: ["root"], terminals: ["leaf"], warnings: [],
   });
   const expectedPlan = { executionBatches: [["root"]], rootNodes: ["root"], terminals: ["leaf"], warnings: [] };
-  const wire = Object.freeze({ ...emptySnapshot, runId: "legacy-plan", plan: legacyPlan });
+  const wire = Object.freeze({ ...emptySnapshot, runId: "current-plan", plan });
   try {
     globalThis.fetch = async url => {
       const command = String(url).split("/").at(-1);
-      const value = command === "compile_graph" ? legacyPlan
+      const value = command === "compile_graph" ? plan
         : command === "bootstrap" ? { config: defaultConfig, snapshot: wire, runs: [], dataPath: "/mock" }
         : command === "snapshot_if_changed" ? { version: "old", snapshot: wire } : wire;
       const result = response(null);
@@ -262,16 +262,8 @@ test("legacy Plan roots normalize across snapshot and compile APIs without mutat
     assert.deepEqual((await runtimeService.bootstrap()).snapshot.plan, expectedPlan);
     assert.deepEqual((await runtimeService.snapshotIfChanged(null)).snapshot?.plan, expectedPlan);
     assert.deepEqual(await runtimeService.compileGraph(emptySnapshot.graph), expectedPlan);
-    assert.deepEqual(legacyPlan.roots, ["root"], "normalization must not rewrite the old payload");
-    assert.equal(Object.hasOwn(legacyPlan, "rootNodes"), false);
-
-    const current = { ...expectedPlan, rootNodes: ["new"], roots: ["old"] };
-    globalThis.fetch = async () => response(current);
-    assert.deepEqual((await runtimeService.compileGraph(emptySnapshot.graph)).rootNodes, ["new"],
-      "the canonical field wins if both spellings are present");
-    globalThis.fetch = async () => response({ executionBatches: [], terminals: [], warnings: [] });
-    assert.equal((await runtimeService.compileGraph(emptySnapshot.graph)).rootNodes, undefined,
-      "a missing list is not invented");
+    assert.deepEqual(plan.rootNodes, ["root"]);
+    assert.equal(Object.hasOwn(plan, "roots"), false);
   } finally { globalThis.fetch = original; }
 });
 
@@ -279,7 +271,7 @@ test("legacy completion is normalized across snapshot APIs without changing othe
   const original = globalThis.fetch;
   const statuses = ["done", "completed", "waiting", "running", "paused", "blocked", "failed", "dirty"];
   const wire = { ...emptySnapshot, runId: "legacy-label", phase: "publication_failed",
-    graph: { originalGoal: "Keep done in user content", nodes: statuses.map(name => ({ name, task: name })), edges: [] },
+    graph: { originalGoal: "Keep done in user content", nodes: statuses.map(name => ({ id: name, task: name })), edges: [] },
     nodes: Object.fromEntries(statuses.map(status => [status, { status, revision: 1, head: "retained", instruction: "done is literal user text", error: null }])),
     extra: { evidence: "untouched" } };
   const expected = structuredClone(wire);
@@ -339,10 +331,10 @@ test("current snapshots retain their identities and normalization never mutates 
   } finally { globalThis.fetch = original; }
 });
 
-test("Planner completion streams normalize legacy node status and Plan roots before notifying the UI", async () => {
+test("Planner completion streams retain rootNodes while normalizing node status", async () => {
   const original = globalThis.fetch;
   const wire = { ...emptySnapshot, runId: "stream-label", phase: "needs_attention",
-    plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
+    plan: { executionBatches: [["task"]], rootNodes: ["task"], terminals: ["task"], warnings: [] },
     nodes: { task: { status: "done", revision: 1, head: "head", instruction: "", error: null } } };
   try {
     for (const wrapped of [false, true]) {

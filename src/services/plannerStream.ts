@@ -301,11 +301,11 @@ export function applyPlannerNodeEditsToState(prev: Snapshot, edits: readonly Pla
   let nextNodes = [...prev.graph.nodes];
   let nextEdges = [...prev.graph.edges];
   for (const edit of edits) {
-    nextNodes = nextNodes.filter(item => item.name !== edit.name);
+    nextNodes = nextNodes.filter(item => item.id !== edit.id);
     if (edit.delete) {
-      nextEdges = nextEdges.filter(e => e.from !== edit.name && e.to !== edit.name);
+      nextEdges = nextEdges.filter(e => e.from !== edit.id && e.to !== edit.id);
     } else {
-      nextNodes.push({ name: edit.name, task: edit.task });
+      nextNodes.push({ id: edit.id, task: edit.task });
     }
   }
   return {

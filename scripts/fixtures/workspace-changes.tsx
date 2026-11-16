@@ -80,7 +80,7 @@ function Fixture() {
   const state: Snapshot = {
     ...emptySnapshot, runId: "changes-run", config, planType: mode === "serial" ? "serial" : "graph",
     approved: true, phase: running ? livePhase : "completed",
-    graph: { originalGoal: "Review the file changes in this conversation.", nodes: [{ name: "worker", task: "Implement the preview component." }], edges: [] },
+    graph: { originalGoal: "Review the file changes in this conversation.", nodes: [{ id: "worker", task: "Implement the preview component." }], edges: [] },
     nodes: { worker: { status: mode === "waiting" ? "waiting" : running && livePhase !== "completed" ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
     executions: mode === "planner" || mode === "merger" || mode === "waiting" ? [] : attempts,
     mergers: mode === "merger" ? [{ ...execution, id: "merger-execution", node: "merger" }] : [],

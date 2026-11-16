@@ -1,14 +1,14 @@
 use super::*;
 
 #[test]
-fn planner_workspace_result_accepts_current_and_historical_identifiers() {
+fn planner_workspace_result_requires_requested_id() {
     assert_eq!(
         planner_workspace_requested_id(&serde_json::json!({"requestedId":"current"})),
         Some("current")
     );
     assert_eq!(
         planner_workspace_requested_id(&serde_json::json!({"requestedNode":"legacy"})),
-        Some("legacy")
+        None
     );
     assert_eq!(
         planner_workspace_requested_id(&serde_json::json!({"requestedId":"current", "requestedNode":"legacy"})),
@@ -89,7 +89,7 @@ let input = ''; for await (const chunk of process.stdin) input += chunk;
       if (!input.includes('retained workspace from a superseded or removed execution'))
         throw Error('Planner must know this is a historical workspace');
       const graph = JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH, 'utf8'));
-      graph.nodes = graph.nodes.filter(node => node.name !== 'right');
+      graph.nodes = graph.nodes.filter(node => node.id !== 'right');
       graph.edges = graph.edges.filter(edge => edge.from !== 'right' && edge.to !== 'right');
       fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
     }
@@ -125,7 +125,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
                 nodes: ["root", "left", "right", "join"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),
@@ -625,7 +625,7 @@ fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
     // Make the two parallel children terminal, so only Planner (not a pending
     // dependent) can retain their slots after both node writers finish.
     let mut graph = runtime.state.graph.clone();
-    graph.nodes.retain(|node| node.name != "join");
+    graph.nodes.retain(|node| node.id != "join");
     graph.edges.retain(|edge| edge.to != "join");
     runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
     let root = runtime.jobs().unwrap().remove(0);
@@ -652,7 +652,7 @@ fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
     runtime.emit(EventKind::PlannerTurnAborted { planning:settled }).unwrap();
     // Settled Planner turns must not pin obsolete directories indefinitely.
     let mut graph = runtime.state.graph.clone();
-    graph.nodes.push(Node { name:"later".into(), task:"later".into() });
+    graph.nodes.push(Node { id:"later".into(), task:"later".into() });
     runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
     let later = runtime.jobs().unwrap().remove(0);
     complete(&mut runtime, later);
@@ -1091,7 +1091,7 @@ fn planner_keeps_a_superseded_physical_owner_without_attributing_it_to_an_older_
             // physical owner, as in the reported follow-up failure.
             let mut graph = runtime.state.graph.clone();
             graph.nodes.push(Node {
-                name: "pre".into(),
+                id: "pre".into(),
                 task: "pre".into(),
             });
             graph
@@ -1158,7 +1158,7 @@ fn planner_keeps_a_superseded_physical_owner_without_attributing_it_to_an_older_
             outcome.unwrap()
         };
         assert_eq!(
-            snapshot.graph.nodes.iter().any(|node| node.name == "right"),
+            snapshot.graph.nodes.iter().any(|node| node.id == "right"),
             fail,
             "a successful deletion commits; a failed turn retains the prior graph"
         );
@@ -1241,7 +1241,7 @@ fn planner_keeps_a_superseded_physical_owner_without_attributing_it_to_an_older_
                 .graph
                 .nodes
                 .iter()
-                .any(|node| node.name == "right"),
+                .any(|node| node.id == "right"),
             fail
         );
         assert_eq!(recovered.state.events.iter().filter(|event| matches!(&event.kind,
@@ -1268,7 +1268,7 @@ fn check_interrupted_detached_recovery(sealed_before_event: bool) {
     graph
         .nodes
         .iter_mut()
-        .find(|node| node.name == "root")
+        .find(|node| node.id == "root")
         .unwrap()
         .task = "reworked".into();
     runtime
@@ -1504,7 +1504,7 @@ fn planner_workspace_returns_to_source_after_publication_reclaims_its_previous_c
     let mut runtime = service.runtime.lock().unwrap();
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node {
-        name: "later".into(),
+        id: "later".into(),
         task: "later".into(),
     });
     graph.edges.push(Edge {
@@ -1676,6 +1676,137 @@ fn interrupted_planner_workspace_is_snapshotted_once_before_recovery() {
     );
 }
 
+// Stop after the graph commit but before its view/gate is published. Unlike
+// deleting a record, this models an interrupted snapshot without changing any
+// immutable evidence that had already completed.
+fn interrupt_planner_snapshot(execution: &Execution, repository: &Path) -> String {
+    let path = Path::new(&execution.worktree);
+    fs::write(path.join("interrupted.txt"), "keep me").unwrap();
+    let identity = crate::workspace_view::stage_node_snapshot(path, repository, &[])
+        .unwrap()
+        .unwrap();
+    crate::workspace::git(
+        path,
+        &["commit", "-m", &format!("snapshot\n\nworkspace-view:{identity}")],
+    )
+    .unwrap();
+    crate::workspace::git(path, &["rev-parse", "HEAD"]).unwrap()
+}
+
+#[test]
+fn interrupted_planner_snapshot_readiness_recovers_after_restart_once() {
+    for recorded in [false, true] {
+        let (temp, repo, service, _) = setup(false);
+        let mut runtime = service.runtime.lock().unwrap();
+        let job = runtime.jobs().unwrap().remove(0);
+        let execution = complete(&mut runtime, job);
+        let path = Path::new(&execution.worktree);
+        let marker = crate::workspace_state::root(path).unwrap().join("project-ready");
+        let previous_gate = fs::read(&marker).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let attempt = temp.path().join("runtime/planning").join(&id);
+        fs::create_dir_all(&attempt).unwrap();
+        let summary = PlanningSummary {
+            planning_id: id.clone(),
+            status: Some("running".into()),
+            plan_type: Some("graph".into()),
+            worktree: Some(execution.worktree.clone()),
+            workspace_execution_id: Some(execution.id.clone()),
+            ..Default::default()
+        };
+        write_planning_summary(&attempt, &summary).unwrap();
+        fs::write(
+            attempt.join("request.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "revisionRunId": runtime.state.run_id, "runId": runtime.state.run_id,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        runtime.emit(EventKind::PlannerWorkspaceSelected { planning: summary }).unwrap();
+        let head = interrupt_planner_snapshot(&execution, &repo);
+        if recorded {
+            crate::workspace_view::capture_node_scoped(path, &repo, &head, &[], None).unwrap();
+            // The view was published, but the local gate update was lost.
+            fs::write(&marker, &previous_gate).unwrap();
+        }
+        assert!(crate::workspace_view::validate_ready(path, &repo).is_err());
+        let root = runtime.root.clone();
+        drop(runtime);
+        drop(service);
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&root).unwrap()),
+            driving: AtomicBool::new(true),
+            drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        recover_plannings(&service).unwrap();
+        recover_plannings(&service).unwrap();
+        let saved: PlanningSummary = serde_json::from_slice(
+            &fs::read(attempt.join("summary.json")).unwrap(),
+        ).unwrap();
+        assert_eq!(saved.error.as_deref(), Some(BACKEND_STOPPED_PLANNING_ERROR), "recorded={recorded}");
+        crate::workspace_view::validate_ready(path, &repo).unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), head);
+        assert_eq!(fs::read_to_string(path.join("interrupted.txt")).unwrap(), "keep me");
+        assert!(!repo.join("interrupted.txt").exists());
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.executions.iter().find(|e| e.id == execution.id).unwrap().after.as_deref(), Some(head.as_str()));
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(
+            event.kind, EventKind::PlannerWorkspaceSnapshotted { .. }
+        )).count(), 1);
+        assert_eq!(runtime.planner_continuation_workspace(path, Some(&execution.id)).unwrap().unwrap().id, execution.id);
+    }
+}
+
+#[test]
+fn planner_continuation_snapshot_readiness_requires_an_idle_prepared_owner() {
+    let (_temp, repo, service, _) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let execution = &job.execution;
+    let path = Path::new(&execution.worktree);
+    let prepared = crate::workspace::prepare(&repo, path, &execution.before, &[]).unwrap();
+    let marker = crate::workspace_state::root(path).unwrap().join("project-ready");
+    let gate = fs::read(&marker).unwrap();
+    let head = interrupt_planner_snapshot(execution, &repo);
+    // A matching old gate cannot stand in for this owner's Prepared event.
+    assert!(runtime.planner_continuation_workspace(path, Some(&execution.id)).is_err());
+    assert_eq!(fs::read(&marker).unwrap(), gate);
+    runtime.emit(EventKind::Prepared { execution_id: execution.id.clone(), head: prepared }).unwrap();
+    // Even with preparation evidence, recovery cannot snapshot a live writer.
+    assert!(runtime.planner_continuation_workspace(path, Some(&execution.id)).is_err());
+    assert_eq!(fs::read(&marker).unwrap(), gate);
+    runtime.emit(EventKind::Failed {
+        node: execution.node.clone(), execution_id: Some(execution.id.clone()),
+        error: "interrupted".into(), output_bytes: 0, metrics: None,
+    }).unwrap();
+    // A node retry may already have adopted the live HEAD as its Prepared
+    // input before failing the stale gate. The retained Planner selection must
+    // recover through that current owner, not revive the previous attempt.
+    let mut retry = execution.clone();
+    retry.id = Uuid::new_v4().to_string();
+    retry.before = head.clone();
+    runtime.emit(EventKind::Started {
+        execution: retry.clone(), message_sequences: None, fresh_restart: false,
+    }).unwrap();
+    runtime.emit(EventKind::Prepared {
+        execution_id: retry.id.clone(), head: head.clone(),
+    }).unwrap();
+    runtime.emit(EventKind::Failed {
+        node: retry.node.clone(), execution_id: Some(retry.id.clone()),
+        error: "stale gate".into(), output_bytes: 0, metrics: None,
+    }).unwrap();
+    let selected = runtime.planner_continuation_workspace(path, Some(&execution.id)).unwrap().unwrap();
+    assert_eq!(selected.id, retry.id);
+    assert_eq!(selected.session_id, execution.session_id);
+    assert_eq!(fs::read_to_string(&marker).unwrap(), head);
+    runtime.capture_planner_workspace(&retry.id).unwrap();
+    assert_eq!(runtime.state.executions.iter().find(|e| e.id == retry.id).unwrap().before, head);
+    assert!(runtime.state.executions.iter().find(|e| e.id == execution.id).unwrap().after.is_none());
+}
+
 #[test]
 fn planner_conversation_stop_undoes_a_revision_drain_pause_and_keeps_scheduling() {
     let temp = tempfile::tempdir().unwrap();
@@ -1693,7 +1824,7 @@ import fs from 'node:fs';
 for await (const _ of process.stdin) {}
 fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
   originalGoal: 'frontier',
-  nodes: [{ name: 'root', task: 'root revised' }, { name: 'join', task: 'join' }],
+  nodes: [{ id: 'root', task: 'root revised' }, { id: 'join', task: 'join' }],
   edges: [{ from: 'root', to: 'join', feedback: false }],
 }));
 console.log(JSON.stringify({ type: 'message_end', message: {
@@ -1715,7 +1846,7 @@ console.log(JSON.stringify({ type: 'message_end', message: {
                 nodes: ["root", "join"]
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),

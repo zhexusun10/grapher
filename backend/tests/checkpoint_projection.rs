@@ -40,7 +40,7 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         .emit(EventKind::Created {
             graph: Graph {
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 ..Default::default()
@@ -194,7 +194,7 @@ fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
         .emit(EventKind::Created {
             graph: Graph {
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 ..Default::default()

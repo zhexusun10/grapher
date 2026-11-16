@@ -125,14 +125,6 @@ export default function (pi: ExtensionAPI) {
         id: str({ description: 'Id of the node whose latest workspace state you want to inspect or modify' }),
       }),
       promptSnippet: 'Switch Planner workspace',
-      // Old Planner conversations can still produce the historical argument.
-      // Normalize it before Pi validates the id-only model-facing schema.
-      prepareArguments(raw: unknown) {
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Object.hasOwn(raw, 'node')) return raw;
-        const { node, ...rest } = raw as Record<string, unknown>;
-        if (Object.hasOwn(rest, 'id')) throw new Error('Supply id, not both id and legacy node.');
-        return { ...rest, id: node };
-      },
       async execute(_id: string, params: { id: string }) {
         const target = switchPlannerWorkspace(params.id);
         return { content: [{ type: 'text', text: JSON.stringify({
@@ -205,7 +197,7 @@ export default function (pi: ExtensionAPI) {
   }
   // Partitioner has no tools. Planner shares the execution path adapter but
   // retains its read/bash surface; write/edit are mounted only when enabled by
-  // settings, and node/edge belong to the Planner extension.
+  // settings, and edit_graph/read_graph belong to the Planner extension.
   if (partition) return;
   if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
   if (paths && project) {

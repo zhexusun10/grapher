@@ -366,7 +366,7 @@ test("execution graph overview defaults off, sits between UI sections, and commi
     planType: "graph",
     graph: {
       originalGoal: "Graph overview test",
-      nodes: [{ name: "step_one", task: "Do step one" }],
+      nodes: [{ id: "step_one", task: "Do step one" }],
       edges: [],
     },
     nodes: { step_one: { status: "completed", revision: 1, instruction: "", error: null } },

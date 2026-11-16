@@ -72,6 +72,31 @@ fn record(store: &Environments, path: &Path, input: &CompositeResult) -> Composi
 }
 
 #[test]
+fn rooted_sealing_unchanged_preparation_and_completion_do_not_grow_dependency_storage() {
+    let (_temp, store, path, input) = fixture();
+    let result = record(&store, &path, &input);
+    let stored = || ["blobs", "versions"].into_iter().flat_map(|name| {
+        fs::read_dir(store.directory.join("files").join(name)).unwrap().map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        }).collect::<Vec<_>>()
+    }).collect::<BTreeMap<_, _>>();
+    let before = stored();
+    for _ in 0..3 {
+        let generation = Uuid::new_v4().to_string();
+        let prepared = store.prepare(&path, &result, &generation, &result.code_ref, vec![], false, false).unwrap();
+        let sealed = store.seal(&path, &prepared, &prepared.code_ref, vec![]).unwrap();
+        assert_eq!(prepared.environment_ref, result.environment_ref);
+        assert_eq!(sealed.environment_ref, result.environment_ref);
+        // Execution evidence still appends even though E bytes are unchanged.
+        assert_eq!(store.load_record_metadata(&generation, "before").unwrap().environment_ref, result.environment_ref);
+        assert_eq!(store.load_record_metadata(&generation, "after").unwrap().environment_ref, result.environment_ref);
+    }
+    assert_eq!(stored(), before);
+}
+
+#[test]
 fn rooted_history_restores_w_s_inactive_scopes_and_recorded_absence_not_live_names() {
     let (_temp, store, path, input) = fixture();
     let result = record(&store, &path, &input);
@@ -199,6 +224,35 @@ fn rooted_history_missing_w_blob_refuses_before_code_or_s_is_reset_and_does_not_
     );
     assert!(!blob.exists());
     assert_eq!(fs::read(&version_path).unwrap(), manifest);
+}
+
+#[test]
+fn rooted_history_skipped_destination_link_preserves_code_state_and_immutable_evidence() {
+    let (temp, store, path, input) = fixture();
+    let result = record(&store, &path, &input);
+    let state = store.state_root(&path).unwrap();
+    let manifest_path = store.directory.join("files/versions")
+        .join(format!("{}.json", result.environment_ref));
+    let manifest = fs::read(&manifest_path).unwrap();
+    write(&path, "business.txt", "partial code");
+    write(&state, "shared-env/value", "partial S");
+    write(&state, ".agent-home/config", "partial HOME config");
+    let destination = path.join("shared-env/value");
+    fs::remove_file(&destination).unwrap();
+    let unavailable = temp.path().join("unavailable-target");
+    fs::create_dir(&unavailable).unwrap();
+    crate::path_safety::directory_link(&unavailable, &destination);
+    fs::remove_dir(&unavailable).unwrap();
+    let error = store.preflight_history_result(&path, &result, &result.launch_ref).unwrap_err();
+    assert!(error.contains("untouched") && error.contains("shared-env/value"), "{error}");
+    assert!(store.prepare(&path, &result, &Uuid::new_v4().to_string(),
+        &result.code_ref, vec![], false, true).is_err());
+    assert_eq!(fs::read_to_string(path.join("business.txt")).unwrap(), "partial code");
+    assert_eq!(fs::read_to_string(state.join("shared-env/value")).unwrap(), "partial S");
+    assert_eq!(fs::read_to_string(state.join(".agent-home/config")).unwrap(), "partial HOME config");
+    assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+    store.validate_result(&result).unwrap();
 }
 
 #[test]

@@ -42,7 +42,7 @@ Optional environment variables:
 | --- | --- |
 | Node | Offline npm installation of a local package, independent installed bytes, ignored `node_modules`, local patch without a dependency declaration/installed package manifest, a Git-tracked dependency, real build script and ignored `.next` output, native Node execution. No dependency regeneration from today's source. |
 | Python | Real `venv --copies`, offline PEP-517 backend/pip installation, patched installed package, actual interpreter/prefix/base-prefix/ABI evidence, source-less `.pyc` import. With uv installed, real `uv run --offline --no-sync --python …` must report the same interpreter/prefix/value. `--no-sync` deliberately does not erase a local package patch. |
-| Cargo | Offline Cargo project with a local path dependency; successful source-default Rustup selection, an actual private-HOME default query (including host/system fallback when present), and successful explicit installed Cargo/Rustc/Rustdoc invocation with private Cargo state/target. No download, `rustup default <toolchain>` mutation, host modification or automatic runtime fallback. |
+| Cargo | Offline Cargo project with a local path dependency; successful source-default Rustup selection, an actual private-HOME default query (including host/system fallback when present), and explicit installed Cargo/Rustc/Rustdoc execution with private HOME/CARGO_HOME/RUSTUP_HOME/target. This explicit-path fixture is NOT zero-configuration Runtime discovery. No download, `rustup default <toolchain>` mutation, host modification or automatic runtime fallback. |
 
 Each profile captures the source, changes its live dependency, prepares a node
 from the earlier record, edits the node dependency, seals it, forks/seals two
@@ -52,8 +52,17 @@ recorded bytes. Source Git HEAD/index remain unchanged. The Python profile also
 measures root-qualified managed W `.venv` plus S private-config capture, full
 byte validation and all-root byte materialization separately, and checks
 source/restored mutations cannot alter stored evidence. Cache carve-outs stay
-untouched. The report identifies `rooted.schema = 1` coverage explicitly.
+untouched. Three unchanged managed seals must retain the same E reference with
+zero store growth; a real installed-package/private-config edit must append a
+distinct E and both old and patched records must restore their recorded bytes.
+Process-only CPU/peak-RSS counters bracket these real-venv unchanged seals and
+three unbatched reference seals of the same quiescent venv/config in a separate
+disposable store. Reference setup/import is outside the timed comparison; that
+reference store is reported separately and never created in production.
+The report identifies `rooted.schema = 1` coverage explicitly.
 This does not establish that copied console scripts or editable installs relocate.
+The Python fresh-prefix reconstruction below is a disposable baseline experiment,
+not support for moving or rebuilding an existing fixed-layout private workspace.
 
 Python additionally executes an **explicit** project reconstruction in a fresh
 prefix under the composed workspace's S: installed bootstrap `venv --copies
@@ -66,7 +75,9 @@ The rebuilt package deliberately lacks the captured installed local patch. The
 report therefore records **not byte-equivalent / no automatic adoption**, despite
 successful installation and matching ABI. It neither binds the environment nor
 replaces the original snapshot; this is business-workflow evidence, not a generic
-rebuild service or proof that manifests reproduce installed dependencies.
+rebuild service or proof that manifests reproduce installed dependencies. It is
+not Runtime migration of an existing private workspace to a different W/S physical
+layout; that lifecycle is intentionally unsupported.
 
 ## Read measurements correctly
 
@@ -126,14 +137,23 @@ Keep these concerns separate:
 | Rebuildable cache | An explicitly populated, private cache is different from the immutable installed dependency snapshot. An empty cache cannot replace offline preinstalled or locally patched dependencies. Missing cache/package evidence must fail rather than download implicitly. |
 | Configuration and sensitive values | Existing explicitly authorized business variables (including proxy/certificate settings and credential helpers) remain transient. A project may explicitly name a necessary config file under existing permissions. Do not copy a whole HOME/config tree, persist a credential inventory, or grant source access. Files deliberately written into managed scopes are not automatically secret-scrubbed. |
 
-The general extension point should be **explicit project business workflows**,
-not a language-name admission table: identify read-only installed tool/config
-inputs separately from per-slot writable state and cache; name credential helpers
-rather than snapshotting secret values; record real interpreter/prefix/ABI/byte
-proof after execution. Declarations alone cannot authorize compatibility or
-select an environment. There is currently no generic host-config import or
-transparent cross-layout rebuilding API. Business Node options remain excluded
-from engine Node/Git, hook capture and extension/MCP factories.
+The explicit commands above are **baseline fixture setup**, not requirements for
+an unchanged project that already works in its source workspace. The rejected
+query interface and its `build-inputs.json` fixture were withdrawn: requiring such
+setup did not implement [zero-configuration inheritance](../architecture/native-environments.md#zero-configuration-source-home-discovery).
+The report labels explicit installed-path execution separately from this gap.
+Test-runner `CARGO_TARGET_DIR` cannot redirect the source fixture's owned output.
+
+A future Runtime implementation must separate necessary read-only discovery inputs,
+private writable state, rebuildable caches and transient credential helpers,
+without another parent/environment selector, a language-name admission table,
+or project-specific Grapher setup. The original business commands must remain
+unchanged. Neither declarations nor byte queries prove compatibility. Generic
+source-HOME discovery is not implemented. Cross-layout rebuilding of an existing
+fixed-layout private environment is an explicit non-goal, not a remaining Runtime
+deliverable. The baseline's separately scripted fresh-prefix experiment above does
+not change workspace ownership or this lifecycle boundary. Business Node options
+remain excluded from engine Node/Git, hook capture and extension/MCP factories.
 
 ## Managed dirty-view recovery cost (opt-in)
 
@@ -160,7 +180,87 @@ exclusions, root ownership and the existing project delivery path are unchanged.
 This removes discarded-byte retention, not the cost of retaining **recorded**
 dependencies or the need to prove a compatible business environment.
 
+## Immutable dependency sealing optimization
+
+Runtime's existing managed E capture now compares the fully collected candidate
+against its immutable parent **before** publishing a manifest. Unchanged entries,
+modes, link metadata and root-qualified scope/cache coverage retain the parent E
+without creating an orphan version. Preparation/completion records still append
+for each writer generation; deduplicating E does not manufacture an execution or
+change event history. Changed installed bytes or ownership coverage append a new
+record. The initial capture still retains all actual dependency bytes.
+
+Every live file is hashed on every capture/verification. Within **one operation
+on one immutable store**, a checked set avoids re-reading the same stored blob
+for duplicate file references, including references across W/S. The first use
+validates the real blob path and its full bytes (or copies, fully hashes and
+syncs a newly captured blob); no size/mtime shortcut is used. This set is bounded
+by the number of distinct referenced blobs and is discarded at return. It is
+never persisted, kept on a Files instance, or shared between independent
+operations/branch writers. W/S collectors in the same operation use the same
+store-local proof.
+Materialization still validates historical bytes before application and hashes
+every copied destination independently. This relies on the existing immutable,
+Runtime-owned store, not on writable links or an untrusted mutable cache.
+
+Reusable captures validate the parent's complete byte evidence **before saving
+any live bytes**. Missing/damaged history fails without reconstruction from the
+current directory. Old loose blobs, single-root/root-qualified JSON, checksums
+and historical execution references are unchanged; old manifests are not rewritten
+or garbage-collected. No-op detection still scans all live bytes. Large initial
+imports, unrelated/fully rewritten dependencies, filesystem copying and native
+ABI validation are not eliminated and need not become faster.
+
+The content-addressed store is not a package resolver: offline preinstalled and
+manifest-less dependencies are retained from bytes, local patches/explicit edits
+use ordinary E capture and existing project inheritance, and native Git-tracked
+project content keeps its existing index/metadata/publication path. There is no
+second source delivery channel, relocation assertion, new environment binding or
+publication check. Rebuilds still require real business/runtime evidence.
+
+### Reproduce the component comparison
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_dependency_sealing_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The focused probe](../../backend/src/workspace_files/seal_tests.rs) compares a
+test-only per-file validation/write-then-compare reference with the production
+path. The reference omits checked-set lookup/insertion and checks each existing
+blob's safe path and bytes once per live file, as the old capture did; it must not
+add repeated path traversal that inflates the apparent gain. Reports identify
+the reference strategy; changes to it require remeasuring both paths, not reusing
+timings from another implementation. It runs three fresh samples in alternating
+strategy order for globally unique small files (including across roots), repeated
+small dependencies, and
+repeated large dependency payloads in both W and S. Each sample measures three
+no-op seals, an explicit local edit, a full dependency-payload rewrite, byte
+materialization and retained-store files/logical bytes. The rewrite case includes
+the cost of validating parent blobs no longer present in the live candidate;
+it is not assumed to improve. The repeated-small
+case also measures two concurrent independent writers. All output bytes/references
+are checked; modifying a source/branch cannot authorize a different historical
+view. These synthetic storage distributions are not actual environment reuse or
+native sandbox acceptance. The real Python profile above supplies independent
+venv/package/bytecode/rebuild evidence.
+
+`GRAPHER_ENV_SEAL_PROBE_REPORT` optionally names a **new** JSON report (existing
+paths are refused). Reports contain the individual samples, not a timing pass
+threshold. The comparison uses warm caches and Cargo's test profile; it does not
+measure allocated/unique physical blocks, child-process/host-wide resources or
+end-to-end Run latency. Materialization timings use the same production path for
+both strategies and are not an old-vs-new materialization speedup. More retention
+saving on repeated seals is not evidence that all retained dependency storage is
+cheap. Scheduled/manual CI retains this comparison separately from real native
+boundary checks; configured jobs are not passing platform evidence.
+
 ## Storage/rebuild directions (not implemented)
+
+These are measurement/correctness constraints for separately reviewed storage
+experiments, **not a backlog item to migrate existing fixed-layout workspaces**.
+Same-location recovery remains the Runtime contract; source-checkout movement is
+owned externally and its records may be deleted. No physical-layout migration or
+cross-layout environment reconstruction is implied.
 
 The current correctness baseline retains installed bytes. Any proposed controlled
 cache or immutable dependency layer must first preserve these properties:
@@ -183,11 +283,13 @@ cache or immutable dependency layer must first preserve these properties:
    retrofit missing other-root evidence into old records. Further storage layers
    must retain those root/scope/cache identities and complete immutable bytes;
    missing history cannot be repaired from today's live directories.
-6. Explicit offline reconstruction needs both declared inputs and real runtime
-   evidence; it must report when its installed result differs from captured local
-   patches, remain unbound if equivalence cannot be proved, and never borrow a
-   sibling's mutable prefix/cache. Arbitrary launcher/editable/binary rewriting
-   and arbitrary Conda migration remain out of scope.
+6. Any separately proposed fresh-environment construction needs declared inputs
+   and real runtime evidence; it is not migration/reconstruction of an existing
+   private workspace at another path. It must report when its installed result
+   differs from captured local patches, remain unbound if equivalence cannot be
+   proved, and never borrow a sibling's mutable prefix/cache. Arbitrary
+   launcher/editable/binary rewriting and arbitrary Conda migration remain out
+   of scope.
 
 Before adopting a storage optimization, measure the affected capture, validation,
 materialization and concurrent phases on retained dependency distributions.

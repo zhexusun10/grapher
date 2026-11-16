@@ -27,8 +27,8 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     ...Array.from({ length: 7 }, (_, index) => ({ id: `${repository}-${index}`, path: `${repository}-${index}`, name: `Project ${index}`, lastOpened: 1 })),
   ];
   const graph = { originalGoal: "Responsive layout test", nodes: [
-    { name: "first", task: "Inspect the first task" },
-    { name: "second", task: "Inspect the second task" },
+    { id: "first", task: "Inspect the first task" },
+    { id: "second", task: "Inspect the second task" },
   ], edges: [{ from: "first", to: "second", feedback: false }] };
   const snapshot = {
     runId: "responsive-run", config, planType: "graph", phase: "completed", approved: true, paused: false,

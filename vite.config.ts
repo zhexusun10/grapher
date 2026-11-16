@@ -33,6 +33,9 @@ export default defineConfig({
     open: true,
     strictPort: true,
     watch: {
+      // Editors may truncate before rewriting. Do not cache that temporary
+      // empty module or publish an HMR update until the save has settled.
+      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 20 },
       ignored: [
         "**/backend/**",
         "**/target/**",

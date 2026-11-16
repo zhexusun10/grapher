@@ -365,7 +365,7 @@ fn planner_live_log_append_wakes_reconnected_views_before_tool_finishes() {
 while [ ! -f '{}' ]; do sleep 0.02; done
 printf '%s\n' '{{"type":"tool_execution_start","toolCallId":"live","toolName":"bash"}}'
 while [ ! -f '{}' ]; do sleep 0.02; done
-printf '%s' '{{"originalGoal":"goal","nodes":[{{"name":"worker","task":"work"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{{"originalGoal":"goal","nodes":[{{"id":"worker","task":"work"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}'
 "#, start.display(), finish.display())).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({

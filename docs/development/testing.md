@@ -73,7 +73,12 @@ node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-feat
 
 The first two cover old checksum/JSON compatibility, all-root preflight, missing
 blobs, root/coverage mismatch, unbound ownership, recorded absence and preserved
-partial retries. The terminal check uses actual native venvs and interpreter/
+partial retries. They also cover a skipped/unresolvable link at a recorded leaf,
+retained cache/link descendants blocking a file replacement before either root
+changes, and successful sibling recovery without deleting those live entries.
+Legacy predecessor cleanup cannot delete/traverse skipped links. These are
+recovery regressions, not evidence that omitted link targets are restorable.
+The terminal check uses actual native venvs and interpreter/
 prefix/ABI validation for W and S restoration, with named result descriptors;
 the result check reconstructs a missing W, restores S and checks unchanged
 historical execution results. Neither validates host/source compatibility or
@@ -81,6 +86,121 @@ native sandbox permissions. Existing `environment::tests::history_` checks
 retain legacy refusal coverage.
 The [contract](../architecture/native-environments.md#current-state-historical-evidence-and-ownership)
 distinguishes old single-root ownership from new root-qualified byte evidence.
+
+### Native runtime recovery evidence
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime_evidence -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime_project_code_proof -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib streaming_git_blob -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment::best_effort_tests::rooted_ -- --test-threads=1
+```
+
+Choose the changed boundary rather than running all groups by default. The first checks protocol/old
+ABI byte preservation, old binding JSON, root-qualified E versus ownership/cache
+proof, full-byte external changes at the same size/mtime, missing roots, redirected
+root/file paths and sibling-slot refusal through both physical W and trusted W
+aliases, including aliased enclosing workspace buckets. A real native-module
+fixture also distinguishes legacy ABI-only startup from new-evidence admission
+without weakening the old ABI comparison. Selector cases cover schema-1 byte/JSON
+compatibility, schema-2 original references, equivalent intermediate aliases,
+equal-byte retargets, missing W/S with owned-link continuations, bounded metadata
+and targets redirected during observation. Schema-3 cases additionally project
+external return paths through immutable E, preserve both old formats, distinguish
+staged project paths from live caches, retain early external checks despite code
+deferral, and exercise normalized internal links, cycles and platform-native
+parent traversal. Relative interpreter-link/POSIX-parent cases are Unix-only;
+the Win32 dot-segment case is Windows-only. These use disposable inputs, never edit installed host tools and do
+not exercise an OS sandbox.
+
+`streaming_git_blob` verifies fixed-size read requests, native identity agreement
+at chunk/hash boundaries, malformed/short/extra responses, read errors, stderr
+backpressure and nonzero child exits after valid output. Cancellation tests cover
+a blocked reader, isolation from another owner, and direct exit with inherited
+pipe holders. A known SHA-mbles vector checks incremental collision rejection
+(the raw vector tests the hash finalizer, not a crafted Git-blob collision).
+A real 32 MiB file is
+verified from loose and packed objects in SHA-1/SHA-256 repositories, after its
+working file is removed, without changing refs or the index. This proves bounded
+backend buffering, not a measured bound on Git's pack/delta or process-tree RSS.
+
+`runtime_project_code_proof` reads existing graph Git objects: raw binary/ignored
+native dependencies in SHA-1 and SHA-256 repositories, later source edits,
+missing/corrupt object rejection without live-file repair, file/link/directory
+classification and Windows ordinal case aliases (including distinct `K`/`K`,
+exact-name precedence and ambiguous fallback refusal). It asserts unchanged source HEAD/index,
+refs and immutable view records. A macOS-only case checks that nonexact spelling
+is deferred without reading live files or claiming early byte verification;
+prepared-file checks still decide those paths. `rooted_runtime_code_tests` injects a new stale
+L only into copied history/result/descriptor worker inputs and also checks a
+changed composed codeRef; known byte mismatches must preserve partial W/S or keep
+missing W absent. Old evidence formats retain their previous checks.
+
+The `rooted_` group includes real native venvs: remove their captured interpreter bin
+folders, preflight without running those broken prefixes, restore W/S and verify
+actual executable/prefix/ABI; check old L with omitted evidence/root fields;
+exercise a W↔S switch and missing-W result reconstruction. The nested
+`rooted_runtime_selector_tests` creates a real venv through a disposable external
+Python alias; retargeting it must fail before either result-worker or descriptor
+code reconstruction, while an unchanged alias still permits restoring a missing
+interpreter. `rooted_runtime_return_native_tests` loads a real `_hashlib` module
+through an external alias back into W and S in turn: equal-byte retargets must
+fail before descriptor/result reconstruction, while valid dangling aliases permit
+missing-W/prefix recovery followed by an actual native import. It uses the normal
+publication/result lifecycle, not a reset of failed-run state. No installed Python
+bytes are modified. A real `_hashlib` native
+extension installed as a tracked project dependency through explicit fixture
+business configuration is delivered/restored only through codeRef, never E;
+its S venv interpreter and W are removed before a genuine import/result launch.
+The fixture copies one named extension, not HOME or a complete host toolchain,
+and Runtime does not rewrite its binary or `.pth` paths. Error injection creates
+a **new** stale L and changes only a copied fixture worker input, not historical
+records or installed libraries. Known bad native inputs must leave code, both
+roots and historical results intact, including before missing-W reconstruction
+in both result execution and publication-descriptor preparation.
+These are recovery checks, not provider or Linux/macOS/Windows sandbox acceptance.
+Production builds contain neither the worker fault-injection helper nor fixture
+actuators. [The contract](../architecture/native-environments.md#native-runtime-inputs-during-recovery)
+defines the bounded coverage and legacy limitations. Windows push CI explicitly
+runs the runtime-evidence units beside `rooted_`; other event/platform paths use
+the existing library suites. Configured CI is not a claim of a passing platform.
+
+## Zero-configuration source HOME discovery (not implemented)
+
+The functional acceptance target is explicitly opt-in and currently **fails**:
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib zero_configuration_home_source_and_parent_without_setup -- --ignored --nocapture --test-threads=1
+```
+
+It runs one unchanged ordinary HOME-reading/writing workload in source, then the
+first private execution and two independent children. It checks latest-parent
+config precedence, independent state, unchanged source and no bulk persistence
+of an unrequested sensitive-file canary. The source HOME is an owned temporary
+fixture passed through the ordinary process environment; no real host HOME is
+modified, no tool-path config/query API is supplied, and no model chooses an E/L.
+A subprocess keeps the fixture's environment out of other parallel tests. Passing
+component or explicit-path Cargo checks cannot substitute for this target.
+See the [required contract and native blocker](../architecture/native-environments.md#zero-configuration-source-home-discovery).
+
+## Private HOME branch inheritance
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib unbound_home_fork -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib home_fork_metadata -- --test-threads=1
+```
+
+These cover new-slot immutable HOME inheritance, two successive fan-outs,
+per-branch native Node reads, cache exclusions, partial retry preservation,
+append-only replay, common-descendant versus divergent fan-in, the frozen
+descendant rule, internal link rebasing and retained-prefix/legacy non-adoption.
+They also cover occupied-target runnable preservation (independent of diagnostic
+reason strings), explicit restoration despite old fork provenance, ineligible
+ancestors of an eligible newer frame, and missing parent bytes with matching
+live target data that must not repair history. Existing bound-environment fan-out tests remain authoritative
+for the no-venv-relocation boundary. This is a Runtime component check, not native
+sandbox acceptance or a claim that paths embedded in copied configuration relocate.
+The ordinary environment library suite includes these tests.
 
 ## Offline project environment baseline (opt-in)
 
@@ -108,6 +228,22 @@ Its synthetic distributions and measurement limits are documented in
 [the baseline procedure](environment-baselines.md#managed-dirty-view-recovery-cost-opt-in).
 Use `--lib workspace_files::tests` for regressions covering read-only successful
 and refused preflight, same-size/mtime blob corruption and legacy restoration.
+
+## Immutable dependency sealing comparison (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_dependency_sealing_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[Procedure and limits](environment-baselines.md#immutable-dependency-sealing-optimization)
+cover no-op/changed E capture, duplicate dependencies, concurrent writers and
+store growth versus a test-only unbatched reference. `GRAPHER_ENV_SEAL_PROBE_REPORT`
+can retain a new JSON report. There are no timing thresholds or native sandbox
+claims. Use the existing `--lib workspace_files::tests` and
+`--lib environment::snapshot_tests` checks for full-byte, scope/mode, legacy,
+corruption/missing-history and append-only generation-record regressions. The
+real Python baseline separately asserts three no-op seals have zero store growth
+and restores both captured and explicitly patched installed dependencies.
 
 ## Workspace staging microbenchmark (opt-in)
 
@@ -266,7 +402,7 @@ are no timing assertions.
 | `test:ui` | Mocked-API browser flows. Needs Chromium or `GRAPHER_BROWSER_CHANNEL` (Edge on Windows). No production build. |
 | `test:bundle` | Separate temporary production build and deferred-loading browser checks; same browser requirement. |
 | `test:ui-polish` | Separate bilingual home/settings viewport sweep; same browser requirement. `GRAPHER_UI_SCREENSHOTS` optionally saves screenshots. |
-| `test:pi`, `test:extensions` | Pi transport and [role/tool contracts](pi-integration.md#role-loading-policy). |
+| `test:pi`, `test:extensions` | Pi transport and [role/tool contracts](pi-integration.md#role-loading-policy). `test:extensions` also typechecks the Planner extension, which is outside the frontend `npm run check` scope. |
 | `test:native`, `test:native:scripts`, `test:planner-bash` | Native paths, launchers, Planner workspace rebinding and Bash semantics. `test:native:scripts` omits Rust tests; it still needs pinned Pi and Git/Bash. |
 | `test:filesystem` | Native ACLs, path identity, links and versioned snapshot integrity; Rust/Git, no browser or model calls. |
 | `test:prewarm` | Separate prewarm tests, production build and HTTP/native acceptance. |

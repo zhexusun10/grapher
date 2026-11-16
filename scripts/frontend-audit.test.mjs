@@ -831,6 +831,9 @@ test("polling graph metadata cannot overwrite an open editor draft", { timeout: 
   const { context, page, errors } = await fixture("editor");
   try {
     const editor = page.getByRole("textbox", { name: "Graph JSON" });
+    const initial = JSON.parse(await editor.inputValue());
+    assert.deepEqual(initial.nodes, [{ id: "worker", task: "Keep name as ordinary task text" }]);
+    assert.equal(Object.hasOwn(initial.nodes[0], "name"), false);
     await editor.fill('{"originalGoal":"Unsaved draft"}');
     await page.evaluate(() => window.audit.updateGraph());
     assert.equal(await editor.inputValue(), '{"originalGoal":"Unsaved draft"}');
@@ -2982,9 +2985,9 @@ test("a live transcript with accumulated reasoning shows it without replaying th
 test("Planner and Node Agent tool history both render cards in headless browser", { timeout: 30_000 }, async () => {
   const line = event => JSON.stringify(event) + "\n";
   const toolEvents = [
-    line({ type: "tool_execution_start", toolCallId: "planner-tool", toolName: "node", args: { name: "worker" } }),
-    line({ type: "tool_execution_end", toolCallId: "planner-tool", toolName: "node", isError: false,
-      result: { content: [{ type: "text", text: "PLAN_TOOL_RESULT" }] } }),
+    line({ type: "tool_execution_start", toolCallId: "planner-tool", toolName: "edit_graph", args: { nodes: [{ id: "worker", task: "Work" }] } }),
+    line({ type: "tool_execution_end", toolCallId: "planner-tool", toolName: "edit_graph", isError: false,
+      result: { content: [{ type: "text", text: "PLAN_TOOL_RESULT" }], details: {} } }),
   ].join("");
   const { context, page, errors } = await fixture("plannerTranscript", async (route, command, body) => {
     if (command !== "get_planning_output") return false;
@@ -2997,7 +3000,7 @@ test("Planner and Node Agent tool history both render cards in headless browser"
   try {
     await page.locator(".tool-call-card").waitFor();
     assert.equal(await page.locator(".tool-call-card").count(), 1, "Planner tool output is a card, not raw JSON");
-    assert.match(await page.locator(".tool-call-card").innerText(), /node/);
+    assert.match(await page.locator(".tool-call-card").innerText(), /edit_graph/);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -4230,7 +4233,7 @@ for (const approved of [false, true]) {
   test(`planner revision ${approved ? "preserves a paused runtime" : "hides approval without claiming execution"}`, { timeout: 30_000 }, async () => {
     const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
     const draft = { runId: "draft-run", config, planType: "graph",
-      graph: { originalGoal: "Draft goal", nodes: [{ name: "task", task: "Draft task" }], edges: [] },
+      graph: { originalGoal: "Draft goal", nodes: [{ id: "task", task: "Draft task" }], edges: [] },
       nodes: { task: { status: "waiting", revision: 0, attempts: 0, instruction: "", error: null } },
       plan: null, executions: [], events: [], approved, paused: approved,
       phase: approved ? "paused" : "awaiting_approval", base: "", feedbackCounts: {} };
@@ -4326,7 +4329,7 @@ for (const wireStatus of ["completed", "done"]) {
     const merger = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
       worktree: config.repository, before: "", after: null, output: "", startedAt: 1, completedAt: 2 });
     const snapshot = { ...empty, runId: `status-${wireStatus}`, config, planType: "graph", approved: true, phase: "needs_attention",
-      graph: { originalGoal: "Show authoritative node statuses", nodes: names.map(name => ({ name, task: `Task ${name}` })), edges: [] },
+      graph: { originalGoal: "Show authoritative node statuses", nodes: names.map(name => ({ id: name, task: `Task ${name}` })), edges: [] },
       nodes: Object.fromEntries(names.map(name => [name, {
         status: name === "task" ? wireStatus : name, revision: 1, head: null, instruction: "", error: name === "failed" ? "Mock failure" : null,
       }])),
@@ -4358,7 +4361,7 @@ for (const wireStatus of ["completed", "done"]) {
     try {
       await page.goto(origin, { waitUntil: "networkidle" });
       await page.locator(`[data-run-id="${snapshot.runId}"]`).click();
-      const card = page.locator('.graph-canvas .task-node[data-node-name="task"]');
+      const card = page.locator('.graph-canvas .task-node[data-node-id="task"]');
       await card.waitFor();
       const label = card.locator(".node-footer .status");
       assert.equal(await label.innerText(), "Completed", "backend completion must render a capitalized card label");
@@ -4366,7 +4369,7 @@ for (const wireStatus of ["completed", "done"]) {
       // canvas. Wait for the whole ancestor chain, not just the label's own
       // opacity (which is already 1 while the canvas is still hidden).
       await page.waitForFunction(() => {
-        const status = document.querySelector('.graph-canvas .task-node[data-node-name="task"] .node-footer .status');
+        const status = document.querySelector('.graph-canvas .task-node[data-node-id="task"] .node-footer .status');
         return status?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
       });
       assert.equal(await label.evaluate(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })), true);
@@ -4374,10 +4377,10 @@ for (const wireStatus of ["completed", "done"]) {
       assert.ok(bounds && cardBounds && bounds.width > 0 && bounds.height > 0 && bounds.x >= cardBounds.x &&
         bounds.x + bounds.width <= cardBounds.x + cardBounds.width, "the full status label fits inside the visible card");
       for (const [status, expected] of Object.entries(statuses)) {
-        assert.equal(await page.locator(`.task-node[data-node-name="${status}"] .status`).innerText(), expected);
+        assert.equal(await page.locator(`.task-node[data-node-id="${status}"] .status`).innerText(), expected);
       }
-      assert.equal(await page.locator('.task-node[data-node-name="merger · blocked"] .status').innerText(), "Failed");
-      assert.equal(await page.locator('.task-node[data-node-name="publication merger"] .status').innerText(), "Completed");
+      assert.equal(await page.locator('.task-node[data-node-kind="merger"]').filter({ hasText: "merger · blocked" }).locator(".status").innerText(), "Failed");
+      assert.equal(await page.locator('.task-node[data-node-kind="merger"]').filter({ hasText: "publication merger" }).locator(".status").innerText(), "Completed");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
@@ -4444,7 +4447,7 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
   const execution = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
     worktree: "/work", before: "", after: null, output: "", startedAt: 1000, completedAt: status === "running" ? null : 2000 });
   let current = { runId: "pause-run", config, planType: "graph", approved: true, paused: false, phase: "running",
-    graph: { originalGoal: "Pause graph", nodes: [{ name: "task", task: "Work" }, { name: "broken", task: "Failed independently" }], edges: [] },
+    graph: { originalGoal: "Pause graph", nodes: [{ id: "task", task: "Work" }, { id: "broken", task: "Failed independently" }], edges: [] },
     nodes: { task: { status: "running", revision: 1, instruction: "", error: null }, broken: { status: "failed", revision: 1, instruction: "", error: "Provider failed" } },
     executions: [execution("first", "task", "running"), execution("broken-first", "broken", "failed")],
     plan: null, events: [], base: "", feedbackCounts: {} };
@@ -4509,7 +4512,7 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
       await page.waitForFunction(() => !document.querySelector(".graph-execution-control")?.disabled);
     };
     await checkPlanningControl("Pause", "pause-planner");
-    await page.locator('[data-node-name="task"]').click();
+    await page.locator('[data-node-id="task"]').click();
     await bottom.getByRole("button", { name: "Pause", exact: true }).click();
     await bottom.getByRole("button", { name: "Pausing", exact: true }).waitFor();
     assert.equal(await bottom.getByRole("button", { name: "Pausing", exact: true }).isDisabled(), true);
@@ -4517,20 +4520,20 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
       nodes: { ...current.nodes, task: { ...current.nodes.task, status: "paused", error: "Execution paused by the user" } },
       executions: current.executions.map(item => item.id === "first" ? { ...item, status: "paused", completedAt: 2000 } : item) };
     await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
-    await page.locator('[data-node-name="task"] .status', { hasText: "Paused" }).waitFor();
-    await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
+    await page.locator('[data-node-id="task"] .status', { hasText: "Paused" }).waitFor();
+    await page.locator('[data-node-id="broken"] .status', { hasText: "Failed" }).waitFor();
     await bottom.getByText("Continue first resumes paused tasks; retry other failed nodes afterward.").waitFor();
     await page.locator(".back-to-query-btn").click();
     await checkPlanningControl("Resume", "resume-planner");
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
-    await page.locator('[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
-    await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
+    await page.locator('[data-node-id="task"] .status', { hasText: "Running" }).waitFor();
+    await page.locator('[data-node-id="broken"] .status', { hasText: "Failed" }).waitFor();
     current = { ...current, canResume: true, phase: "needs_attention",
       nodes: { ...current.nodes, task: { ...current.nodes.task, status: "completed" } },
       executions: current.executions.map(item => item.id === "second" ? { ...item, status: "completed", completedAt: 3000 } : item) };
     await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
-    await page.locator('[data-node-name="broken"] .status', { hasText: "Running" }).waitFor();
+    await page.locator('[data-node-id="broken"] .status', { hasText: "Running" }).waitFor();
     // A paused Run can still project a completed phase after a restart. The
     // explicit pause state must keep Continue usable instead of latching the
     // terminal-phase disable rule.
@@ -4704,7 +4707,7 @@ test("node follow-ups keep records expanded and completed nodes continue instead
     sessionId: "same-session", worktree: "/a", before: "", after: "", startedAt: attempt * 1000, completedAt: attempt * 1000 + 1,
     output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Agent response ${attempt}` }] } }) + "\n" });
   let current = { runId: "record-run", config, planType: "graph", approved: true, paused: false, phase: "completed",
-    graph: { originalGoal: "Continue the node", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+    graph: { originalGoal: "Continue the node", nodes: [{ id: "task", task: "Original task" }], edges: [] },
     nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [execution(1)], plan: null, events: [], base: "", feedbackCounts: {} };
   const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
@@ -4749,7 +4752,7 @@ test("node follow-ups keep records expanded and completed nodes continue instead
   const expansion = () => headers.evaluateAll(items => items.map(item => item.getAttribute("aria-expanded")));
   const openNode = async () => {
     await page.locator('[data-run-id="record-run"]').click();
-    await page.locator('[data-node-name="task"]').click();
+    await page.locator('[data-node-id="task"]').click();
     await page.getByText("Agent response 1", { exact: true }).waitFor();
   };
   try {
@@ -4805,7 +4808,7 @@ for (const [planType, publicationPhase] of [["graph", null], ["serial", null], [
     const first = { id: "queue-first", node: "task", status: publicationPhase ? "paused" : "completed", revision: 1, attempt: 1, sessionId: "same-session", worktree: publicationPhase ? "/private/task" : "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: output("Initial queue result") };
     let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: publicationPhase ?? "completed",
       ...(publicationPhase ? { publication: { repository: "/a", heads: ["other-node-head"], status: publicationPhase, startedAt: 3 } } : {}),
-      graph: { originalGoal: "Queue goal", nodes: [{ name: "task", task: "Queue task" }], edges: [] },
+      graph: { originalGoal: "Queue goal", nodes: [{ id: "task", task: "Queue task" }], edges: [] },
       nodes: { task: { status: first.status, revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
       executions: [first], plan: null,
       events: [{ type: "started", sequence: 1, timestamp: 1, execution: first, message_sequences: [] }],
@@ -4850,7 +4853,7 @@ for (const [planType, publicationPhase] of [["graph", null], ["serial", null], [
     page.on("pageerror", error => errors.push(String(error)));
     const openNode = async () => {
       await page.locator('[data-run-id="queue-run"]').click();
-      if (planType === "graph") await page.locator('[data-node-name="task"]').click();
+      if (planType === "graph") await page.locator('[data-node-id="task"]').click();
       await page.getByText("Initial queue result", { exact: true }).waitFor();
     };
     try {
@@ -4975,13 +4978,70 @@ test("node objective editing preserves the card size and action positions while 
   } finally { await context.close(); }
 });
 
+for (const nodeId of ["merger", "merge:join", "merger:publication"]) {
+  test(`objective edits for literal task ID ${nodeId} never target a Merger`, { timeout: 30_000 }, async () => {
+    const config = { repository: "/a", model: "test/old", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+    const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "TASK_REPLY" }] } }) + "\n";
+    const execution = { id: "literal-execution", node: nodeId, status: "completed", revision: 1, attempt: 1,
+      sessionId: "literal-session", worktree: "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: "", outputBytes: Buffer.byteLength(output) };
+    let current = { runId: "literal-task-edit", config, planType: "graph", phase: "completed", approved: true, paused: false,
+      graph: { originalGoal: "Goal", nodes: [{ id: nodeId, task: "ORIGINAL_TASK" }], edges: [] },
+      nodes: { [nodeId]: { status: "completed", revision: 1, head: "", instruction: "", error: null } },
+      executions: [execution], mergers: [], events: [{ type: "started", sequence: 1, timestamp: 1, execution, message_sequences: [] }],
+      plan: null, base: "", feedbackCounts: {} };
+    const empty = { ...current, runId: "", config: null, phase: "draft", approved: false,
+      graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [], events: [] };
+    const errors = [], edits = [];
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      if (command === "bootstrap") result = { config, snapshot: empty, runs: [current.runId],
+        repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" };
+      else if (command === "history" || command === "snapshot") result = current;
+      else if (command === "snapshot_if_changed") result = { version: JSON.stringify(current), snapshot: current };
+      else if (command === "repository_status") result = { repository: "/a", valid: true, error: null };
+      else if (command === "list_plannings") result = [];
+      else if (command === "list_files") result = { files: [] };
+      else if (command === "list_skills") result = { skills: [] };
+      else if (command === "provider_auth") result = catalog;
+      else if (command === "pi_extensions") result = { globalDirectory: "mock", extensions: [] };
+      else if (command === "get_execution_output") result = { runId: current.runId, executionId: execution.id,
+        content: output, startOffset: 0, nextOffset: Buffer.byteLength(output), totalBytes: Buffer.byteLength(output), complete: true, status: "completed" };
+      else if (command === "edit_node") {
+        edits.push(body);
+        current = { ...current, graph: { ...current.graph, nodes: [{ id: nodeId, task: body.instruction }] } };
+        result = current;
+      } else { errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } }); }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await page.locator('[data-run-id="literal-task-edit"]').click();
+      await page.locator(`[data-node-id="${nodeId}"]`).click();
+      await page.getByText("TASK_REPLY", { exact: true }).waitFor();
+      await page.locator(".node-task-tool-btn.edit").click();
+      await page.locator(".node-task-edit-textarea").fill("UPDATED_TASK");
+      await page.locator(".node-task-tool-btn.save").click();
+      await page.locator(".node-task-content").getByText("UPDATED_TASK", { exact: true }).waitFor();
+      assert.equal(edits.length, 1);
+      assert.equal(edits[0].node, nodeId);
+      assert.equal(edits[0].executionId, execution.id);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("editing a node objective replaces the opening turn without creating a chat message", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
   const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const execution = (id, attempt, text) => ({ id, node: "task", status: "completed", revision: attempt, attempt, sessionId: "s", worktree: "/a", before: "", after: "", startedAt: attempt * 10, completedAt: attempt * 10 + 1, output: output(text) });
   const first = execution("first", 1, "First response"), second = execution("second", 2, "Second response");
   let current = { runId: "objective-run", config, planType: "graph", approved: true, paused: false, phase: "completed",
-    graph: { originalGoal: "Goal", nodes: [{ name: "task", task: "Original objective" }], edges: [] },
+    graph: { originalGoal: "Goal", nodes: [{ id: "task", task: "Original objective" }], edges: [] },
     nodes: { task: { status: "completed", revision: 1, head: "", instruction: "", error: null } },
     executions: [first, second], events: [
       { type: "started", sequence: 1, timestamp: 10, execution: first, message_sequences: [] },
@@ -5024,7 +5084,7 @@ test("editing a node objective replaces the opening turn without creating a chat
         edits.push(body);
         if (edits.length === 1) return route.fulfill({ status: 400, json: { error: "Objective edit rejected" } });
         const replacement = execution("replacement", 3, "Replacement response");
-        current = { ...current, graph: { ...current.graph, nodes: [{ name: "task", task: body.instruction }] }, supersededExecutionIds: ["first", "second"],
+        current = { ...current, graph: { ...current.graph, nodes: [{ id: "task", task: body.instruction }] }, supersededExecutionIds: ["first", "second"],
           executions: [...current.executions, replacement], events: [...current.events,
             { type: "conversation_edited", sequence: 4, timestamp: 25, target: "task", nodes: ["task"], first_turn: true, instruction: body.instruction, old_instruction: body.oldText, from_execution_id: "first", from_event_sequence: 1 },
             { type: "started", sequence: 5, timestamp: 30, execution: replacement, message_sequences: [] }] };
@@ -5036,7 +5096,7 @@ test("editing a node objective replaces the opening turn without creating a chat
   });
   const page = await context.newPage(); page.setDefaultTimeout(10_000);
   page.on("pageerror", error => errors.push(String(error)));
-  const open = async () => { await page.locator('[data-run-id="objective-run"]').click(); await page.locator('[data-node-name="task"]').click(); };
+  const open = async () => { await page.locator('[data-run-id="objective-run"]').click(); await page.locator('[data-node-id="task"]').click(); };
   try {
     await page.goto(origin, { waitUntil: "networkidle" }); await open();
     await page.getByText("Second response", { exact: true }).waitFor();
@@ -5089,7 +5149,7 @@ for (const planType of ["graph", "serial"]) {
         JSON.stringify({ type: "tool_execution_start", toolCallId: "retained-tool", toolName: "bash", args: { command: "echo retained" } }) + "\n" +
         JSON.stringify({ type: "tool_execution_end", toolCallId: "retained-tool", toolName: "bash", result: { content: [{ type: "text", text: "Retained tool output" }] } }) + "\n" };
     let current = { runId: "edit-steer-run", config, planType, approved: true, paused: false, phase: "running",
-      graph: { originalGoal: "Original goal", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+      graph: { originalGoal: "Original goal", nodes: [{ id: "task", task: "Original task" }], edges: [] },
       nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
       executions: [live], plan: null, events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] },
         { type: "steered", sequence: 2, timestamp: 2, node: "task", execution_id: live.id, instruction: "Consumed steer" }],
@@ -5152,7 +5212,7 @@ for (const planType of ["graph", "serial"]) {
     page.on("pageerror", error => errors.push(String(error)));
     const open = async () => {
       await page.locator('[data-run-id="edit-steer-run"]').click();
-      if (planType === "graph") await page.locator('[data-node-name="task"]').click();
+      if (planType === "graph") await page.locator('[data-node-id="task"]').click();
       await page.getByText("Original agent response", { exact: true }).waitFor();
     };
     try {
@@ -5228,7 +5288,7 @@ test("pausing a node returns an unread steer to the composer and removes its car
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
   const live = { id: "live-exec", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null, output: "" };
   let current = { runId: "pause-steer-run", config, planType: "graph", approved: true, paused: false, phase: "running",
-    graph: { originalGoal: "Pause steer goal", nodes: [{ name: "task", task: "Pause steer task" }], edges: [] },
+    graph: { originalGoal: "Pause steer goal", nodes: [{ id: "task", task: "Pause steer task" }], edges: [] },
     nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
     executions: [live], plan: null,
     events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] }],
@@ -5276,7 +5336,7 @@ test("pausing a node returns an unread steer to the composer and removes its car
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator('[data-run-id="pause-steer-run"]').click();
-    await page.locator('[data-node-name="task"]').click();
+    await page.locator('[data-node-id="task"]').click();
     const composer = page.locator(".pane-bottom-chat textarea");
     await composer.fill("Unread steer instruction");
     await composer.press("Enter");
@@ -5313,7 +5373,7 @@ test("a partially loaded transcript never rolls back a repeated consumed steer",
   const bytes = Buffer.from(output);
   const live = { id: "live-exec", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null, output: "", outputBytes: bytes.length };
   let current = { runId: "tail-steer-run", config, planType: "graph", approved: true, paused: false, phase: "running",
-    graph: { originalGoal: "Tail steer goal", nodes: [{ name: "task", task: "Tail steer task" }], edges: [] },
+    graph: { originalGoal: "Tail steer goal", nodes: [{ id: "task", task: "Tail steer task" }], edges: [] },
     nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
     executions: [live], plan: null, base: "", feedbackCounts: {},
     events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] },
@@ -5363,7 +5423,7 @@ test("a partially loaded transcript never rolls back a repeated consumed steer",
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator('[data-run-id="tail-steer-run"]').click();
-    await page.locator('[data-node-name="task"]').click();
+    await page.locator('[data-node-id="task"]').click();
     await page.getByText("Tail visible reply", { exact: true }).waitFor();
     await page.waitForTimeout(200);
     assert.equal(await page.locator('[data-execution-id="live-exec"] .chat-message-row.user', { hasText: "again" }).count(), 1,
@@ -5383,7 +5443,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const base = { plan: null, events: [], approved: true, paused: false, phase: "completed", base: "", feedbackCounts: {} };
   const snapshots = {
-    a: { ...base, runId: "a", config, planType: "serial", graph: { originalGoal: "Alpha original", nodes: [{ name: "task", task: "Alpha original" }], edges: [] },
+    a: { ...base, runId: "a", config, planType: "serial", graph: { originalGoal: "Alpha original", nodes: [{ id: "task", task: "Alpha original" }], edges: [] },
       nodes: { task: { status: "completed", revision: 0, head: null, instruction: "", error: null } },
       executions: [{ id: "exec-a", node: "task", status: "completed", revision: 0, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: "", output: "", startedAt: 1, completedAt: 2 }] },
     b: { ...base, runId: "b", config: { ...config, repository: "/b" }, planType: "graph", graph: { originalGoal: "Beta original", nodes: [], edges: [] }, nodes: {}, executions: [] },
@@ -5657,7 +5717,7 @@ for (const kind of ["publication", "node"]) {
     const config = { repository: "/a", model: "mock/model", thinkingLevel: "low", maxParallel: 2, maxFeedback: 3, autoApprove: true };
     const output = text => `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
     const mergerNode = kind === "publication" ? "merger" : "merge:task";
-    const cardSelector = kind === "publication" ? '[data-node-name="publication merger"]' : '[data-node-name="merger · task"]';
+    const cardSelector = kind === "publication" ? '.task-node[data-card-id="merger:publication"]' : '.task-node[data-card-id="merger:task"]';
     const initialStatus = kind === "publication" ? "completed" : "failed";
     const first = {
       id: `${kind}-merger-1`, node: mergerNode, revision: 1, attempt: 1, sessionId: `${kind}-session`,
@@ -5676,12 +5736,12 @@ for (const kind of ["publication", "node"]) {
       runId: `${kind}-merger-order-run`, config, planType: "graph",
       phase: kind === "publication" ? "completed" : "needs_attention",
       approved: true, paused: false, base: "base",
-      graph: { originalGoal: "Resolve conflicts", nodes: [{ name: "task", task: "Do task" }], edges: [] },
+      graph: { originalGoal: "Resolve conflicts", nodes: [{ id: "task", task: "Do task" }], edges: [] },
       nodes: { task: { status: kind === "publication" ? "completed" : "blocked", revision: 1, instruction: "", error: null } },
       executions: [taskExec],
       mergers: [first],
       events: [
-        { type: "created", sequence: 1, timestamp: 1, graph: { originalGoal: "Resolve conflicts", nodes: [{ name: "task", task: "Do task" }], edges: [] }, config },
+        { type: "created", sequence: 1, timestamp: 1, graph: { originalGoal: "Resolve conflicts", nodes: [{ id: "task", task: "Do task" }], edges: [] }, config },
         { type: "approved", sequence: 2, timestamp: 1, base: "base" },
         { type: "merger_started", sequence: 3, timestamp: 1, execution: first },
         initialStatus === "completed"
@@ -5759,10 +5819,19 @@ for (const kind of ["publication", "node"]) {
     });
     const page = await context.newPage(); page.setDefaultTimeout(10_000);
     page.on("pageerror", error => errors.push(String(error)));
+    const showInitialOutput = async () => {
+      // A failed predecessor defaults to collapsed after a continuation starts.
+      // This test inspects ordering, so explicitly open that retained history.
+      if (kind === "node" && current.mergers.length > 1) {
+        const expand = page.locator('.session-label-toggle[aria-expanded="false"]').filter({ hasText: "#1" });
+        if (await expand.count()) await expand.click();
+      }
+      await page.getByText("Initial merger output", { exact: true }).waitFor();
+    };
     const openMerger = async () => {
       await page.locator(`[data-run-id="${current.runId}"]`).click();
       await page.locator(cardSelector).click();
-      await page.getByText("Initial merger output", { exact: true }).waitFor();
+      await showInitialOutput();
     };
     const assertOrder = async (texts, message) => {
       const ordered = await page.evaluate(texts => {
@@ -5790,6 +5859,7 @@ for (const kind of ["publication", "node"]) {
 
       continueGate.resolve();
       await page.getByText("Continuation merger output", { exact: true }).waitFor();
+      await showInitialOutput();
       await assertOrder(
         ["Initial merger output", "Follow-up merger instruction", "Continuation merger output"],
         "continuation merger output renders below the appended follow-up message",

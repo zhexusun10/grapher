@@ -24,7 +24,7 @@ fn setup_with_command(
             graph: Graph {
                 original_goal: "merger continuation".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],

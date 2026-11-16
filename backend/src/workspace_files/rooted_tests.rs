@@ -1,6 +1,6 @@
 use super::*;
 
-fn fixture() -> (
+pub(super) fn fixture() -> (
     TempDir,
     Files,
     BTreeMap<String, PathBuf>,
@@ -172,6 +172,92 @@ fn rooted_second_target_failure_preflights_before_first_root_write() {
         fs::read_to_string(outside.join("value")).unwrap(),
         "outside"
     );
+}
+
+#[test]
+fn rooted_skipped_link_destination_refuses_before_either_root_changes() {
+    let (temp, files, paths, layouts) = fixture();
+    let version = Uuid::new_v4().to_string();
+    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    fs::write(paths["state"].join("env/value"), "partial S").unwrap();
+    // This is a leaf destination, so checking only its parent misses it.
+    fs::remove_file(paths["workspace"].join("env/value")).unwrap();
+    let target = temp.path().join("unavailable-target");
+    fs::create_dir(&target).unwrap();
+    crate::path_safety::directory_link(&target, &paths["workspace"].join("env/value"));
+    fs::remove_dir(&target).unwrap();
+    let stored = stored_files(&files);
+    let error = files.preflight_roots(&paths, &version).unwrap_err();
+    assert!(error.contains("untouched") && error.contains("env/value"), "{error}");
+    assert!(files.materialize_roots(&paths, &version).is_err());
+    assert_eq!(fs::read_to_string(paths["state"].join("env/value")).unwrap(), "partial S");
+    assert!(fs::symlink_metadata(paths["workspace"].join("env/value")).unwrap().file_type().is_symlink());
+    assert_eq!(stored_files(&files), stored);
+
+    // Removing the obstruction explicitly permits ordinary byte restoration;
+    // the immutable record is not changed or repaired from today's live tree.
+    crate::path_safety::remove_directory_link(&paths["workspace"].join("env/value"));
+    files.materialize_roots(&paths, &version).unwrap();
+    files.verify_roots(&paths, &version).unwrap();
+    assert_eq!(stored_files(&files), stored);
+}
+
+#[test]
+fn rooted_retained_cache_or_skipped_link_cannot_be_replaced_by_a_recorded_file() {
+    for cache in [false, true] {
+        let (temp, files, paths, mut layouts) = fixture();
+        if cache {
+            layouts.get_mut("workspace").unwrap().caches.push("env/value/retained".into());
+        }
+        let version = Uuid::new_v4().to_string();
+        files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+        fs::write(paths["state"].join("env/value"), "partial S").unwrap();
+        fs::remove_file(paths["workspace"].join("env/value")).unwrap();
+        fs::create_dir(paths["workspace"].join("env/value")).unwrap();
+        let retained = paths["workspace"].join("env/value/retained");
+        if cache {
+            fs::create_dir(&retained).unwrap();
+            fs::write(retained.join("cache-byte"), "keep cache").unwrap();
+        } else {
+            let target = temp.path().join("unavailable-target");
+            fs::create_dir(&target).unwrap();
+            crate::path_safety::directory_link(&target, &retained);
+            fs::remove_dir(&target).unwrap();
+        }
+        let stored = stored_files(&files);
+        let error = files.preflight_roots(&paths, &version).unwrap_err();
+        assert!(error.contains("untouched") && error.contains("env/value"), "{error}");
+        assert!(files.materialize_roots(&paths, &version).is_err());
+        assert_eq!(fs::read_to_string(paths["state"].join("env/value")).unwrap(), "partial S");
+        assert!(fs::symlink_metadata(&retained).is_ok());
+        if cache {
+            assert_eq!(fs::read_to_string(retained.join("cache-byte")).unwrap(), "keep cache");
+        }
+        assert_eq!(stored_files(&files), stored);
+    }
+}
+
+#[test]
+fn rooted_unrelated_skipped_links_and_cache_do_not_prevent_valid_recovery() {
+    let (temp, files, paths, layouts) = fixture();
+    let version = Uuid::new_v4().to_string();
+    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    let target = temp.path().join("unavailable-target");
+    fs::create_dir(&target).unwrap();
+    let link = paths["workspace"].join("env/skipped");
+    crate::path_safety::directory_link(&target, &link);
+    fs::remove_dir(&target).unwrap();
+    for path in paths.values() {
+        fs::write(path.join("env/value"), "partial").unwrap();
+    }
+    fs::write(paths["state"].join(".agent-home/cache/value"), "keep newer cache").unwrap();
+    let stored = stored_files(&files);
+    files.preflight_roots(&paths, &version).unwrap();
+    files.materialize_roots(&paths, &version).unwrap();
+    files.verify_roots(&paths, &version).unwrap();
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(paths["state"].join(".agent-home/cache/value")).unwrap(), "keep newer cache");
+    assert_eq!(stored_files(&files), stored);
 }
 
 #[test]

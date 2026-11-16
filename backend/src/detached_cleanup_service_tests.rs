@@ -11,7 +11,7 @@ fn fixture(retire: bool) -> (tempfile::TempDir, PathBuf, PathBuf, Arc<Service>) 
     })).unwrap();
     runtime.create(Graph {
         original_goal: "cleanup fixture".into(),
-        nodes: vec![crate::model::Node { name: "task".into(), task: "task".into() }],
+        nodes: vec![crate::model::Node { id: "task".into(), task: "task".into() }],
         edges: vec![],
     }, config).unwrap();
     let workspace = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);

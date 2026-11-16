@@ -100,17 +100,54 @@ test('Windows PATH keeps a semicolon directory as one entry through validation a
     const entry = join(bin, 'business-node.exe');
     copyFileSync(process.execPath, entry);
     writeFileSync(join(bin, 'path-choice'), "#!/bin/sh\nprintf 'semicolon-directory\\n'\n", { mode: 0o755 });
-    const launch = { ...base(), entry, path: [bin, dirname(shell)] };
-    const result = run(launch, `
+    for (const hook of [null, 'export HOOK_VALUE=ready']) {
+      const launch = { ...base(), entry, path: [bin, dirname(shell)], hook };
+      const result = run(launch, `
 const env=managedBashOptions({env:{...process.env}}).env;
 const shell=execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('path-choice')],{env,encoding:'utf8'}).trim();
 const entry=execFileSync(${JSON.stringify(entry)},['-p','6*7'],{env:managedBusinessEnvironment(),encoding:'utf8'}).trim();
 console.log(JSON.stringify({shell,entry,path:env.PATH}));`);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.shell, 'semicolon-directory');
+      assert.equal(output.entry, '42');
+      assert.equal(output.path, `"${bin}";${dirname(shell)}`);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Windows hook capture preserves changed PATH order, relative entries and new quoted directories', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-hook-search-'));
+  try {
+    const workspace = join(directory, 'workspace');
+    const added = join(directory, 'hook;bin');
+    const script = (bin, name, value) => {
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s\\n' '${value}'\n`, { mode: 0o755 });
+    };
+    script(join(workspace, 'relative-hook'), 'hook-choice', 'root');
+    script(join(workspace, 'sub/relative-hook'), 'hook-choice', 'nested');
+    script(join(directory, 'shared-tools'), 'parent-choice', 'outer-parent');
+    script(join(workspace, 'shared-tools'), 'parent-choice', 'inner-parent');
+    script(added, 'added-choice', 'added');
+    const quote = value => `'${value.replaceAll('\\', '/').replaceAll("'", "'\\''")}'`;
+    const path = [dirname(process.execPath), '../shared-tools', dirname(shell)];
+    const launch = { ...base(), path, unboundPath: path,
+      hook: `__extra=$(/usr/bin/cygpath -u -- ${quote(added)}) || exit $?\nexport PATH="$PATH:$__extra:relative-hook::"\nunset __extra` };
+    const result = run(launch, `
+const env=managedBashOptions({env:{...process.env}}).env;
+const shell=execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('hook-choice; parent-choice; added-choice; cd sub; hash -r; hook-choice; parent-choice; added-choice',process.cwd())],{cwd:process.cwd(),env,encoding:'utf8'}).trim();
+const direct=execFileSync(process.execPath,['-p','process.env.PATH'],{env:managedBusinessEnvironment(),encoding:'utf8'}).trim();
+console.log(JSON.stringify({shell,path:env.PATH,direct}));`, {}, workspace);
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout);
-    assert.equal(output.shell, 'semicolon-directory');
-    assert.equal(output.entry, '42');
-    assert.equal(output.path, `"${bin}";${dirname(shell)}`);
+    assert.equal(output.shell.replaceAll('\r', ''), 'root\nouter-parent\nadded\nnested\ninner-parent\nadded');
+    assert.equal(output.path, `${path.join(';')};"${added}";relative-hook;;`);
+    assert.equal(output.direct, output.path);
+    // Capturing a hook must not re-add old PATH entries that it removed.
+    const removed = run({ ...launch, hook: 'export PATH="${PATH%%:*}"' }, 'console.log(process.env.PATH)', {}, workspace);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(removed.stdout.trim(), path[0]);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -145,6 +182,50 @@ test('activation hooks restore the workspace after inherited Bash startup change
     const result = run(launch, "console.log(JSON.stringify({context:process.env.HOOK_CONTEXT,startup:process.env.STARTUP_VALUE}))", { BASH_ENV: startup }, workspace);
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), { context: 'workspace', startup: 'retained' });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('workspace cwd binding does not overwrite OLDPWD when Bash is already in the workspace', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-cwd-oldpwd-'));
+  try {
+    const workspace = join(directory, 'workspace');
+    const previous = join(directory, 'previous');
+    mkdirSync(workspace);
+    mkdirSync(previous);
+    const startup = join(directory, 'startup.sh');
+    const quote = value => `'${value.replaceAll('\\', '/').replaceAll("'", "'\\''")}'`;
+    writeFileSync(startup, `export OLDPWD=${quote(previous)}\n`);
+    const command = 'cd - >/dev/null && pwd -P';
+    const unmanaged = managedBashCommand(command, workspace);
+    const result = run(base(), `
+const execute=command=>execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',command],{cwd:process.cwd(),env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'}).trim();
+console.log(JSON.stringify({native:execute(${JSON.stringify(command)}),unmanaged:execute(${JSON.stringify(unmanaged)}),managed:execute(managedBashCommand(${JSON.stringify(command)},process.cwd()))}));`, { BASH_ENV: startup }, workspace);
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.match(output.native.replaceAll('\\', '/'), /\/previous$/);
+    assert.equal(output.unmanaged, output.native, 'cwd preamble changed the ordinary cd - command');
+    assert.equal(output.managed, output.native, 'managed PATH binding changed the ordinary cd - command');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('cwd aliases and activation capture preserve unset or readonly OLDPWD', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-cwd-alias-'));
+  try {
+    const workspace = join(directory, 'workspace');
+    const alias = join(directory, 'workspace-alias');
+    mkdirSync(workspace);
+    symlinkSync(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const startup = join(directory, 'startup.sh');
+    const command = 'printf "%s" "${OLDPWD-unset}"';
+    for (const [setup, expected] of [['unset OLDPWD', 'unset'], ['export OLDPWD=business-previous; readonly OLDPWD', 'business-previous']]) {
+      writeFileSync(startup, `${setup}\n`);
+      const launch = { ...base(), hook: 'export HOOK_OLDPWD="${OLDPWD-unset}"' };
+      const result = run(launch, `
+const child=execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand(${JSON.stringify(command)},${JSON.stringify(alias)})],{cwd:process.cwd(),env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'});
+console.log(JSON.stringify({hook:process.env.HOOK_OLDPWD,child}));`, { BASH_ENV: startup }, workspace);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), { hook: expected, child: expected });
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -258,6 +339,12 @@ test('workspace cwd restoration works in Bash and Pi fallback POSIX sh', { skip:
         encoding: 'utf8',
       }).trim();
       assert.equal(resolve(result), resolve(workspace), executable);
+      const previous = execFileSync(executable, ['-c', managedBashCommand('cd - >/dev/null && pwd -P', workspace)], {
+        cwd: workspace,
+        env: { ...process.env, BASH_ENV: '', OLDPWD: startupCwd },
+        encoding: 'utf8',
+      }).trim();
+      assert.equal(resolve(previous), resolve(startupCwd), `${executable} must preserve cd -`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

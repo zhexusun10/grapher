@@ -70,7 +70,7 @@ function FrameFixture() {
 }
 
 const initial: Snapshot = { ...emptySnapshot, runId: "projection", phase: "running",
-  graph: { originalGoal: "projection", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }], edges: [{ from: "a", to: "b", feedback: false }] },
+  graph: { originalGoal: "projection", nodes: [{ id: "a", task: "a" }, { id: "b", task: "b" }], edges: [{ from: "a", to: "b", feedback: false }] },
   nodes: { a: { status: "running", revision: 0, head: null, instruction: "", error: null } },
   executions: [{ id: "execution", node: "a", status: "running", output: "", outputBytes: 0, worktree: "/mock" } as Execution] };
 function ProjectionFixture() {

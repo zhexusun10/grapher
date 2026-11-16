@@ -10,7 +10,7 @@ fn node_message_delivery_waiting_input_only_queues_even_during_planning() {
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
     runtime.emit(EventKind::Created {
-        graph: Graph { original_goal: "original".into(), nodes: vec![Node { name: "task".into(), task: "original".into() }], edges: vec![] },
+        graph: Graph { original_goal: "original".into(), nodes: vec![Node { id: "task".into(), task: "original".into() }], edges: vec![] },
         config, planning_id: None, planning: None,
     }).unwrap();
     runtime.approve().unwrap();
@@ -82,7 +82,7 @@ fn node_message_delivery_followup_retries_keep_identity_before_and_after_dispatc
         runtime.state.run_id = Uuid::new_v4().to_string();
         runtime.emit(EventKind::Created {
             graph: Graph { original_goal: "original".into(), nodes: vec![Node {
-                name: "task".into(), task: "original".into(),
+                id: "task".into(), task: "original".into(),
             }], edges: vec![] },
             config, planning_id: None, planning: None,
         }).unwrap();
@@ -175,7 +175,7 @@ sys.stdin.read()
             graph: Graph {
                 original_goal: "original".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "original".into(),
                 }],
                 edges: vec![],

@@ -6,7 +6,7 @@ fn prepared_worker(standard_git: bool) -> (TempDir, PathBuf, Runtime, Job) {
         nodes: ["parent", "worker"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -665,7 +665,7 @@ fn interrupted_fan_in_merger_handoff_continues_and_resolves_after_restart() {
         nodes: ["left", "right", "join", "after"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -833,7 +833,7 @@ fn interrupted_mid_view_handoff_before_prepared_recovers_on_continue_after_resta
         nodes: ["parent", "worker"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -919,7 +919,7 @@ fn interrupted_followup_before_session_fork_recovers_after_restart() {
         nodes: ["first", "second"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),

@@ -39,8 +39,8 @@ async function plannerTools(source: string, workspace = source, writeTools = tru
       on(name: string, hook: any) { hooks.set(name, [...(hooks.get(name) ?? []), hook]); },
     } as any);
     assert.deepEqual([...tools.keys()].sort(), writeTools
-      ? ['bash', 'edge', 'edit', 'node', 'read', 'write']
-      : ['bash', 'edge', 'node', 'read'], 'the setting controls only write/edit mounting');
+      ? ['bash', 'edit', 'edit_graph', 'read', 'read_graph', 'write']
+      : ['bash', 'edit_graph', 'read', 'read_graph'], 'the setting controls only write/edit mounting');
     // ctx.cwd mirrors what production Pi passes to tools: its own process.cwd().
     return { boundCwd, tools, hooks, context: { cwd: boundCwd, sessionManager: { getSessionId: () => 'planner-test', getSessionFile: () => undefined } } as any };
   } finally {

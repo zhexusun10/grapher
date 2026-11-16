@@ -36,20 +36,20 @@ const reports = files.map(file => {
       call.durationMs = call.endMs - call.startMs;
       call.isError = Boolean(e.isError || e.result?.isError);
       if (call.isError) call.result = e.result;
-      if (['node', 'edge'].includes(call.name)) {
+      if (call.name === 'edit_graph') {
         const text = e.result?.content?.find(c => c.type === 'text')?.text;
-        let mutation;
-        try { mutation = JSON.parse(text); } catch {}
-        // Retained logs may predate the Planner's applied field.
-        const applied = mutation?.applied ?? mutation?.mutationApplied;
+        // Failure is isError; an accepted edit carries a details object.
+        const details = e.result?.details;
+        const applied = call.isError ? false
+          : details && typeof details === 'object' && !Array.isArray(details) ? true : undefined;
         if (applied === true && !call.isError) {
           firstSuccessfulGraphMutationMs ??= call.endMs;
           graphRejectionStreak = 0;
         } else if (applied === false) {
-          lastGraphFailure = mutation.diagnostics ?? [];
+          lastGraphFailure = details?.diagnostics ?? (text ? [text] : []);
           graphRejectionStreak++;
           longestGraphRejectionStreak = Math.max(longestGraphRejectionStreak, graphRejectionStreak);
-          const diagnosticCodes = e.result?.details?.diagnosticCodes
+          const diagnosticCodes = details?.diagnosticCodes
             ?? lastGraphFailure.map(diagnostic => diagnostic.code).filter(Boolean);
           for (const code of diagnosticCodes) {
             graphDiagnostics[code] = (graphDiagnostics[code] ?? 0) + 1;
@@ -75,10 +75,10 @@ const reports = files.map(file => {
     timedOut: end?.timedOut ?? false,
     providerRetries: events.filter(e => e.type === 'auto_retry_start').length, elapsedMs,
     firstAssistantMs: firstAssistantAt == null ? null : firstAssistantAt - origin,
-    firstGraphMutationMs: calls.find(c => ['node', 'edge'].includes(c.name))?.startMs ?? null,
+    firstGraphMutationMs: calls.find(c => c.name === 'edit_graph')?.startMs ?? null,
     firstSuccessfulGraphMutationMs, longestGraphRejectionStreak, graphDiagnostics, lastGraphFailure,
     processSuccess: end?.success ?? null,
-    outcomeNote: 'Process exit success is not graph compilation or task success. firstGraphMutationMs measures the first attempt; firstSuccessfulGraphMutationMs requires applied=true and no tool error.',
+    outcomeNote: 'Process exit success is not graph compilation or task success. firstGraphMutationMs measures the first attempt; firstSuccessfulGraphMutationMs requires an accepted edit (no tool error).',
     toolWallMs, nonToolWallMs: elapsedMs == null ? null : Math.max(0, elapsedMs - toolWallMs),
     timingNote: 'Receipt timestamps measure host-observed activity. Non-tool time includes model generation, network, startup and orchestration; it is not pure reasoning time.',
     tools: calls.length, toolErrors: calls.filter(c => c.isError).length, incompleteCalls: pending.size, usage, calls,

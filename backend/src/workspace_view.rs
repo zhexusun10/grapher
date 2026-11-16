@@ -14,6 +14,11 @@ mod file_scan;
 mod normalization;
 
 mod sha256_stage;
+mod snapshot_recovery;
+mod runtime_inputs;
+pub(crate) use runtime_inputs::verify_native_inputs;
+
+pub(crate) use snapshot_recovery::recover_snapshot_readiness;
 
 const VIEW_SCHEMA: u32 = 6;
 
@@ -1897,12 +1902,36 @@ pub(crate) fn clear_ready(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn mark_ready(path: &Path) -> Result<(), String> {
+    mark_ready_at(path, &workspace::git(path, &["rev-parse", "HEAD"])?)
+}
+fn mark_ready_at(path: &Path, head: &str) -> Result<(), String> {
+    use std::io::Write;
+    if workspace::git(path, &["rev-parse", "HEAD"])? != head {
+        return Err("Workspace HEAD changed before its complete-view gate was published".into());
+    }
     let file = ready(path)?;
     let root = crate::workspace_state::root(path)?;
     crate::path_safety::real_child_path(&root, &file, true)?;
-    fs::write(file, workspace::git(path, &["rev-parse", "HEAD"])?).map_err(|e| e.to_string())
+    // A stopped write must leave either the old complete gate or the new one,
+    // never a truncated marker that loses the previous preparation evidence.
+    let pending = file.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)
+            .map_err(|e| e.to_string())?;
+        output.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        drop(output);
+        fs::rename(&pending, &file).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&pending);
+    }
+    result
 }
-pub(crate) fn validate_ready(path: &Path, source: &Path) -> Result<(), String> {
+fn read_ready(path: &Path, source: &Path) -> Result<String, String> {
     validate_bound(path, source)?;
     crate::workspace::private_git_dir(path)
         .ok_or("Private project view is missing its graph Git metadata; retry preparation")?;
@@ -1910,11 +1939,16 @@ pub(crate) fn validate_ready(path: &Path, source: &Path) -> Result<(), String> {
     let root = crate::workspace_state::root(path)?;
     crate::path_safety::real_child_path(&root, &file, true)?
         .ok_or("Private project preparation did not pass its complete-view gate")?;
-    let recorded = fs::read_to_string(file)
-        .map_err(|_| "Private project preparation did not pass its complete-view gate")?;
-    if recorded != workspace::git(path, &["rev-parse", "HEAD"])? {
+    fs::read_to_string(file)
+        .map_err(|_| "Private project preparation did not pass its complete-view gate".into())
+}
+pub(crate) fn validate_ready(path: &Path, source: &Path) -> Result<(), String> {
+    if read_ready(path, source)? != workspace::git(path, &["rev-parse", "HEAD"])? {
         return Err("Project view preparation is incomplete for the current graph input".into());
     }
+    validate_git_bindings(path)
+}
+fn validate_git_bindings(path: &Path) -> Result<(), String> {
     if let Some((common, current, _, _)) = git_roots(path)? {
         let project = path.canonicalize().map_err(|e| e.to_string())?;
         let state = crate::workspace_state::process_root(path)?;
@@ -2814,6 +2848,11 @@ pub(crate) fn seal_prepared_scoped(
     };
     let record = ViewRecord::new(&view)?;
     if record_matches(source, &head, &record.identity)? {
+        // Reusing immutable evidence still has to finish this slot's local
+        // gate (a previous process may have stopped after publishing the view).
+        if is_bound(path) {
+            mark_ready_at(path, &head)?;
+        }
         // Native Git index stat caches do not distinguish equivalent views;
         // ACLs do. Do not require byte-identical index evidence on reuse.
         return Ok(head);
@@ -3315,7 +3354,7 @@ fn capture_node_view(
         // A sibling can win publication of the same commit/view after this
         // slot moved HEAD. Shared evidence does not update this slot's gate.
         if launchable && is_bound(path) {
-            mark_ready(path)?;
+            mark_ready_at(path, head)?;
         }
         return Ok(());
     }
@@ -3341,7 +3380,7 @@ fn capture_node_view(
         }
     }
     if launchable && is_bound(path) {
-        mark_ready(path)?;
+        mark_ready_at(path, head)?;
     }
     Ok(())
 }

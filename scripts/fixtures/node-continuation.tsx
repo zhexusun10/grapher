@@ -17,7 +17,7 @@ function Fixture() {
   const activity = calls.some(call => call === "resume" || call === "resume_node:task")
     ? [{ kind: "workspace_prepare", nodes: ["task"] }] : [];
   const state = { ...emptySnapshot, runId: "resume-run", config, phase: "needs_attention", approved: true, canResume: true,
-    planType: graph ? "graph" : "serial", graph: { originalGoal: "Original task", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+    planType: graph ? "graph" : "serial", graph: { originalGoal: "Original task", nodes: [{ id: "task", task: "Original task" }], edges: [] },
     ...(planner ? { planning: { planningId: "failed-planner", runId: "resume-run", planType: "graph", status: "failed", error: "failed" } } : {}),
     nodes: { task: { status: "failed", canResume: true, revision: 0, instruction: "", error: "failure" } },
     executions: [{ id: "exec", node: "task", status: "failed", revision: 0, attempt: 1, output: "", startedAt: 1,

@@ -5,6 +5,14 @@ mod rooted_tests {
     include!("workspace_files/rooted_tests.rs");
 }
 
+mod seal_tests {
+    include!("workspace_files/seal_tests.rs");
+}
+
+mod runtime_evidence_tests {
+    include!("workspace_files/runtime_evidence_tests.rs");
+}
+
 fn managed_store(temp: &TempDir, workspace: &Path) -> Files {
     workspace::git(workspace, &["init", "-q"]).unwrap();
     let version_store = temp.path().join("environment-files");
@@ -82,6 +90,36 @@ fn managed_environment_scope_conflicts_and_missing_versions_fail_closed() {
 }
 
 #[test]
+fn legacy_sealing_reuses_only_fully_verified_unchanged_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join(".venv")).unwrap();
+    fs::write(workspace.join(".venv/package"), "offline patched bytes").unwrap();
+    let files = managed_store(&temp, &workspace);
+    let base = Uuid::new_v4().to_string();
+    files.capture(&workspace, &base, "", &[]).unwrap();
+    let stored = stored_files(&files);
+    for _ in 0..3 {
+        assert_eq!(files.capture_reusing(&workspace, &base).unwrap(), base);
+    }
+    assert_eq!(stored_files(&files), stored);
+    fs::write(workspace.join(".venv/package"), "explicit dependency edit").unwrap();
+    let changed = files.capture_reusing(&workspace, &base).unwrap();
+    assert_ne!(changed, base);
+    assert_eq!(files.load(&changed).unwrap().parents, [base.clone()]);
+    files.verify(&workspace, &changed, "").unwrap();
+    let Entry::File { blob, .. } = &files.load(&base).unwrap().entries[".venv/package"] else { panic!() };
+    let blob = files.blob_path(blob).unwrap();
+    fs::remove_file(&blob).unwrap();
+    // Today's matching bytes cannot repair missing historical evidence.
+    fs::write(workspace.join(".venv/package"), "offline patched bytes").unwrap();
+    let damaged = stored_files(&files);
+    assert!(files.capture_reusing(&workspace, &base).unwrap_err().contains("Missing workspace file blob"));
+    assert!(!blob.exists());
+    assert_eq!(stored_files(&files), damaged);
+}
+
+#[test]
 fn unresolvable_environment_links_are_skipped_instead_of_failing_the_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -102,6 +140,34 @@ fn unresolvable_environment_links_are_skipped_instead_of_failing_the_snapshot() 
     let entries = files.load(&version).unwrap().entries;
     assert!(!entries.contains_key(".venv/broken"));
     assert!(entries.contains_key(".venv/package"));
+}
+
+#[test]
+fn legacy_predecessor_does_not_delete_or_traverse_a_skipped_live_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join(".venv/nested")).unwrap();
+    fs::write(workspace.join(".venv/nested/old"), "older bytes").unwrap();
+    fs::write(workspace.join(".venv/package"), "recorded package").unwrap();
+    let files = managed_store(&temp, &workspace);
+    let previous = Uuid::new_v4().to_string();
+    files.capture(&workspace, &previous, "", &[]).unwrap();
+    fs::remove_dir_all(workspace.join(".venv/nested")).unwrap();
+    let target = Uuid::new_v4().to_string();
+    files.capture(&workspace, &target, "", std::slice::from_ref(&previous)).unwrap();
+
+    let outside = temp.path().join("unavailable-target");
+    fs::create_dir(&outside).unwrap();
+    let link = workspace.join(".venv/nested");
+    crate::path_safety::directory_link(&outside, &link);
+    fs::remove_dir(&outside).unwrap();
+    fs::write(workspace.join(".venv/package"), "partial package").unwrap();
+    let stored = stored_files(&files);
+    files.materialize(&workspace, std::slice::from_ref(&target), Some(&previous), false).unwrap();
+    files.verify(&workspace, &target, "").unwrap();
+    assert_eq!(fs::read_to_string(workspace.join(".venv/package")).unwrap(), "recorded package");
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(stored_files(&files), stored);
 }
 
 #[test]

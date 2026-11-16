@@ -44,8 +44,8 @@ try {
       ['20_interpretability', 'Summarize explanations and failure modes.', '汇总模型解释与失败案例。'],
       ['21_final_report', 'Deliver the results, reproducibility guide and artifacts.', '交付结果、复现指南与项目产物。'],
     ];
-    const nodes = nodeSpecs.map(([name, en, cn]) => ({ name, task: zh ? cn : en }));
-    const names = nodes.map(node => node.name);
+    const nodes = nodeSpecs.map(([name, en, cn]) => ({ id: name, task: zh ? cn : en }));
+    const names = nodes.map(node => node.id);
     assert.equal(new Set(names).size, 21, 'demo node names must be unique');
     const dependencies = [
       ['01_data_audit', '05_data_splits'], ['03_eval_protocol', '05_data_splits'],
@@ -96,10 +96,8 @@ try {
     const tools = [
       { type: 'tool_execution_start', toolCallId: 'read-project', toolName: 'bash', args: { command: 'ls && find src -maxdepth 2 -type f' } },
       { type: 'tool_execution_end', toolCallId: 'read-project', toolName: 'bash', isError: false, result: { content: [{ type: 'text', text: 'Project structure inspected.' }] } },
-      { type: 'tool_execution_start', toolCallId: 'nodes', toolName: 'node', args: { nodes } },
-      { type: 'tool_execution_end', toolCallId: 'nodes', toolName: 'node', isError: false, result: { content: [{ type: 'text', text: 'Nodes created.' }] } },
-      { type: 'tool_execution_start', toolCallId: 'edges', toolName: 'edge', args: { edges } },
-      { type: 'tool_execution_end', toolCallId: 'edges', toolName: 'edge', isError: false, result: { content: [{ type: 'text', text: 'Dependencies created.' }] } },
+      { type: 'tool_execution_start', toolCallId: 'graph', toolName: 'edit_graph', args: { nodes: nodes.map(({ id, task }) => ({ id, task })), edges } },
+      { type: 'tool_execution_end', toolCallId: 'graph', toolName: 'edit_graph', isError: false, result: { content: [{ type: 'text', text: `Successfully applied ${nodes.length} node edit(s) and ${edges.length} edge edit(s).` }], details: {} } },
     ];
     const text = zh
       ? '先冻结数据划分，再并行研究视觉、频域和时序模型；验证、鲁棒性测试与最终留出集评估完成后，整合结果并交付。鲁棒性检查可向频域模型发送有界反馈。'

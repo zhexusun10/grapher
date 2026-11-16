@@ -64,6 +64,48 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
   }
 });
 
+test('Planner workspace lookup distinguishes literal ids from inherited object properties', () => {
+  const original = process.cwd();
+  const previous = { ...process.env };
+  const root = mkdtempSync(join(tmpdir(), 'grapher-planner-id-'));
+  const project = join(root, 'source');
+  const workspace = join(root, 'task');
+  mkdirSync(project); mkdirSync(workspace);
+  try {
+    process.env.GRAPHER_EXECUTION_KIND = 'source';
+    for (const fromFile of [false, true]) {
+      const file = join(root, 'targets.json');
+      if (fromFile) process.env.GRAPHER_PLANNER_WORKSPACES_FILE = file;
+      else delete process.env.GRAPHER_PLANNER_WORKSPACES_FILE;
+      const bind = (targets: Record<string, unknown>) => {
+        process.chdir(project);
+        const raw = JSON.stringify(targets);
+        if (fromFile) writeFileSync(file, raw);
+        configurePlannerWorkspace(project, project, project, raw);
+      };
+      for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+        bind({});
+        assert.throws(() => switchPlannerWorkspace(id), {
+          message: `No current workspace is available for node '${id}'`,
+        }, `${id} is not a backend target merely because Object.prototype defines it`);
+        assert.equal(process.cwd(), realpathSync.native(project), 'a missing id cannot change cwd');
+        bind(Object.fromEntries([[id, {
+          requestedNode: id, actualNode: 'task', executionId: 'task-execution', workspace,
+        }]]));
+        const selected = switchPlannerWorkspace(id);
+        assert.equal(selected.requestedNode, id);
+        assert.equal(selected.workspace, realpathSync.native(workspace));
+        assert.equal(process.cwd(), realpathSync.native(workspace), 'explicit prototype-like ids remain usable');
+      }
+    }
+  } finally {
+    process.chdir(original);
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('shared-source Planner exposes no workspace switch even on a follow-up', () => {
   const previous = { ...process.env };
   try {

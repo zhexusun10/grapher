@@ -155,14 +155,14 @@ async function pageFor(front, manifest, runs, label) {
   } };
 }
 async function assertPageGraph(page, nodes) {
-  await until(async () => await page.locator('[data-node-name]').count() === nodes.length, 'DAG topology did not render');
-  assert.deepEqual((await page.locator('[data-node-name]').evaluateAll(els => els.map(el => el.dataset.nodeName))).sort(), [...nodes].sort());
+  await until(async () => await page.locator('[data-node-id]').count() === nodes.length, 'DAG topology did not render');
+  assert.deepEqual((await page.locator('[data-node-id]').evaluateAll(els => els.map(el => el.dataset.nodeId))).sort(), [...nodes].sort());
 }
 async function chooseNode(page, name) {
   // Nodes outside the fitted viewport are still mounted by React Flow. A DOM
   // click performs the actual React onClick, without fabricating component state.
-  await page.locator('[data-node-name]').evaluateAll((els, name) => {
-    const node = els.find(el => el.dataset.nodeName === name); assertExists(node); node.click();
+  await page.locator('[data-node-id]').evaluateAll((els, name) => {
+    const node = els.find(el => el.dataset.nodeId === name); assertExists(node); node.click();
     function assertExists(value) { if (!value) throw new Error('node missing'); }
   }, name);
 }
@@ -331,7 +331,7 @@ try {
   const startWorker = async mode => {
     const marker = join(root, `${mode}-${Date.now()}.ready.json`);
     const config = { repository: manifest.repository, model: 'test', engine: 'pi', piCommand: process.execPath, piArgs: [resolve('scripts/fixtures/conversation-acceptance-worker.mjs'), mode, marker], maxParallel: 1, maxFeedback: 0 };
-    const graph = { originalGoal: `ACCEPTANCE-${mode}`, nodes: [{ name: 'worker', task: mode }], edges: [] };
+    const graph = { originalGoal: `ACCEPTANCE-${mode}`, nodes: [{ id: 'worker', task: mode }], edges: [] };
     const snapshot = await server.api('save_graph', { graph, config });
     await server.api('control', { action: 'approve', runId: snapshot.runId });
     await until(async () => fs.existsSync(marker), 'Worker never produced its stdout prefix');

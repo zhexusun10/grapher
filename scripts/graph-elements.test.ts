@@ -7,10 +7,11 @@ import { computeExecutionLayers, graphEdgeId, graphFeedbackEnabled, indexFeedbac
 import { runningGraphFitViewport, runningViewportForGraph } from "../src/lib/graphFit.ts";
 import { defaultConfig, emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
 import { t } from "../src/i18n/index.ts";
+import { graphCardIds, selectedMergerNode } from "../src/lib/graphNodeIdentity.ts";
 
 const graph: Graph = {
   originalGoal: "Test graph projection",
-  nodes: ["a", "b", "c"].map(name => ({ name, task: name })),
+  nodes: ["a", "b", "c"].map(name => ({ id: name, task: name })),
   edges: [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }],
 };
 
@@ -195,7 +196,7 @@ test("reaching the count or accepting a verdict is not exhaustion", () => {
 function mergerState(): Snapshot {
   return {
     ...emptySnapshot,
-    graph: { originalGoal: "merge", nodes: [{ name: "join", task: "join task" }], edges: [] },
+    graph: { originalGoal: "merge", nodes: [{ id: "join", task: "join task" }], edges: [] },
     nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
     mergers: [{
       id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
@@ -218,7 +219,7 @@ function projectGraph(state: Snapshot, selected: string, selectedMergerId = "", 
 function publicationMergerState(): Snapshot {
   return {
     ...emptySnapshot,
-    graph: { originalGoal: "publish", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }],
+    graph: { originalGoal: "publish", nodes: [{ id: "a", task: "a" }, { id: "b", task: "b" }],
       edges: [{ from: "a", to: "b", feedback: false }] },
     plan: { executionBatches: [["a"], ["b"]], rootNodes: ["a"], terminals: ["b"], warnings: [] },
     nodes: { a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
@@ -236,7 +237,7 @@ test("a publication merger is a card below the terminal layer", () => {
   const idle = projectGraph(state, "");
   const card = idle.nodes.find(node => node.id === "merger:publication");
   assert.ok(card, "publication merger card must exist once invoked");
-  assert.equal(card!.data.name, "publication merger");
+  assert.equal(card!.data.id, "publication merger");
   assert.equal(card!.data.kind, "merger");
   assert.equal(card!.data.status, "completed");
   assert.equal(card!.data.selected, false);
@@ -276,7 +277,7 @@ test("a batch handoff merger connects delivered producers, not unstarted graph t
   assert.deepEqual(edges.map(edge => edge.source), ['a']);
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
   const card = projected.nodes.find(node => node.id === 'merger:publication')!;
-  assert.equal(card.data.name, t('批次回写 merger'));
+  assert.equal(card.data.id, t('批次回写 merger'));
   const producer = projected.nodes.find(node => node.id === 'a')!;
   const downstream = projected.nodes.find(node => node.id === 'b')!;
   assert.ok(card.position.y > producer.position.y);
@@ -310,12 +311,67 @@ test('historical batch merger stays attached to its producers after publication 
   const projected = projectGraph(state, '');
   const card = projected.nodes.find(node => node.id === 'merger:publication')!;
   assert.equal(card.data.status, 'completed');
-  assert.equal(card.data.name, t('批次回写 merger'));
+  assert.equal(card.data.id, t('批次回写 merger'));
   assert.equal(card.data.hint, t('批次回写记录，不属于任务依赖'));
   assert.ok(card.position.y > projected.nodes.find(node => node.id === 'a')!.position.y);
   assert.ok(card.position.y < projected.nodes.find(node => node.id === 'b')!.position.y);
   assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
+});
+
+test("literal graph ids cannot collide with node or publication Merger cards", () => {
+  const state = publicationMergerState();
+  const extraIds = ["join", "publication", "merger:join", "merger:publication"];
+  state.graph.nodes.push(...extraIds.map(id => ({ id, task: `Task ${id}` })));
+  for (const id of extraIds) state.nodes[id] = { status: "waiting", revision: 1, head: null, instruction: "", error: null };
+  state.graph.edges.push({ from: "a", to: "join", feedback: false }, { from: "join", to: "publication", feedback: false });
+  state.mergers!.push(
+    { ...state.mergers![0], id: "join-merger", node: "merge:join" },
+    { ...state.mergers![0], id: "publication-node-merger", node: "merge:publication" },
+  );
+  const projected = projectGraph(state, "");
+  const ids = projected.nodes.map(node => node.id);
+  assert.equal(new Set(ids).size, ids.length, "task IDs and helper-card IDs must be disjoint");
+  for (const node of state.graph.nodes) {
+    const card = projected.nodes.find(card => card.id === node.id)!;
+    assert.ok(card && card.data.kind !== "merger", `literal task ${node.id} keeps its own card`);
+    assert.equal(card.data.task, node.task);
+  }
+  const helpers = projected.nodes.filter(card => card.data.kind === "merger");
+  assert.equal(helpers.length, 3, "publication and both node-composition helpers remain visible");
+  const cards = graphCardIds(state.graph);
+  assert.equal(projected.edges.find(edge => edge.id === graphEdgeId({ from: "a", to: "join", feedback: false }))!.target, cards.mergers.get("join"));
+  assert.equal(projected.edges.find(edge => edge.id === "merger:join->join")!.source, cards.mergers.get("join"));
+  assert.ok(projected.edges.filter(edge => edge.id.startsWith("publication:")).every(edge => edge.target === cards.publication));
+  for (const id of ["merger:join", "merger:publication"]) {
+    const selected = projectGraph(state, id);
+    assert.equal(selected.nodes.find(node => node.id === id)!.data.selected, true);
+    assert.ok(selected.nodes.filter(node => node.data.kind === "merger").every(node => !node.data.selected));
+  }
+  for (const edge of projected.edges) {
+    assert.ok(ids.includes(edge.source) && ids.includes(edge.target), "every edge references a unique rendered card");
+  }
+});
+
+test("task and helper conversations are resolved by identity rather than ID prefixes", () => {
+  const state = mergerState();
+  state.mergers!.push({ ...state.mergers![0], id: "publish-merger", node: "merger" });
+  state.graph.nodes.push(...["merger", "merge:join", "merger:join", "merger:publication", "merger:publication#", "publication"]
+    .map(id => ({ id, task: id })));
+  const cards = graphCardIds(state.graph);
+  assert.deepEqual(graphCardIds({ nodes: [...state.graph.nodes].reverse() }), cards, "card identities survive node-array reordering and reload");
+  for (const node of state.graph.nodes) {
+    assert.equal(selectedMergerNode(state.graph, state.mergers, node.id, "", cards), undefined, `${node.id} is an ordinary task`);
+  }
+  assert.equal(selectedMergerNode(state.graph, state.mergers, cards.mergers.get("join")!, "", cards), "merge:join");
+  assert.equal(selectedMergerNode(state.graph, state.mergers, cards.publication, "", cards), "merger");
+  assert.equal(selectedMergerNode(state.graph, state.mergers, cards.mergers.get("publication")!, "", cards), "merge:publication");
+  assert.notEqual(cards.publication, cards.mergers.get("publication"));
+  // A graph edit may reclaim an old card spelling. The chosen execution still
+  // identifies the helper conversation instead of switching to the new task.
+  assert.equal(selectedMergerNode(state.graph, state.mergers, "merger:join", "merger-1", cards), "merge:join");
+  assert.equal(selectedMergerNode(state.graph, state.mergers, "merger:publication", "publish-merger", cards), "merger");
+  assert.equal(selectedMergerNode(state.graph, state.mergers, "", "publish-merger", cards), undefined);
 });
 
 test("a node-composition merger is a selectable card in the topology", () => {
@@ -356,7 +412,7 @@ test("a node-composition merger is a selectable card in the topology", () => {
 
 test("Merger rows preserve task columns and keep multiple fan-in helpers between their parents and targets", () => {
   const state = mergerState();
-  state.graph = { originalGoal: "merge", nodes: ['a', 'b', 'join', 'other'].map(name => ({ name, task: name })),
+  state.graph = { originalGoal: "merge", nodes: ['a', 'b', 'join', 'other'].map(name => ({ id: name, task: name })),
     edges: ['join', 'other'].flatMap(to => ['a', 'b'].map(from => ({ from, to, feedback: false }))) };
   state.mergers!.push({ ...state.mergers![0], id: 'merger-2', node: 'merge:other' });
   const plain = projectGraph({ ...state, mergers: [] }, '');
@@ -382,7 +438,7 @@ test("Merger rows preserve task columns and keep multiple fan-in helpers between
 
 test('batch Merger centers on its producers rather than a wider unrelated layer', () => {
   const state = publicationMergerState();
-  state.graph.nodes.push(...['c', 'd', 'e'].map(name => ({ name, task: name })));
+  state.graph.nodes.push(...['c', 'd', 'e'].map(name => ({ id: name, task: name })));
   state.plan!.executionBatches = [['a', 'b'], ['c', 'd', 'e']];
   state.batchHandoff = { recoveryExecutionIds: [] };
   state.publication = { repository: '/source', heads: ['ha'], status: 'merging', head: null, error: null, startedAt: 1, completedAt: null };
@@ -415,7 +471,7 @@ test("stale, superseded, invalidated, and removed-route warnings are hidden", ()
 test("downstream edge is dashed only during workspace transfer and immediately turns solid once transfer completes without waiting for node completion", () => {
   const testGraph: Graph = {
     originalGoal: "test topology edge animation",
-    nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }, { name: "c", task: "c" }],
+    nodes: [{ id: "a", task: "a" }, { id: "b", task: "b" }, { id: "c", task: "c" }],
     edges: [
       { from: "a", to: "b", feedback: false },
       { from: "b", to: "c", feedback: false },
@@ -530,7 +586,7 @@ test("downstream edge is dashed only during workspace transfer and immediately t
 test("fan-in dependency edges only turn dashed once all upstream parents are completed and turn solid once prepared", () => {
   const fanInGraph: Graph = {
     originalGoal: "test fan-in edge animation",
-    nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }, { name: "c", task: "c" }],
+    nodes: [{ id: "a", task: "a" }, { id: "b", task: "b" }, { id: "c", task: "c" }],
     edges: [
       { from: "a", to: "c", feedback: false },
       { from: "b", to: "c", feedback: false },

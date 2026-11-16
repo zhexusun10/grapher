@@ -39,19 +39,9 @@ export class RunNotFoundError extends Error {
   }
 }
 
-// A hot-reloaded UI can still be talking to an older backend. Normalize the
-// old Plan spelling without mutating its payload or guessing missing roots.
-function normalizePlan(plan: Plan): Plan {
-  const legacy = plan as Plan & { roots?: string[] };
-  if (Array.isArray(plan.rootNodes) || !Array.isArray(legacy.roots)) return plan;
-  const { roots, ...current } = legacy;
-  return { ...current, rootNodes: roots };
-}
-
 // Translate legacy node completion without inferring it from Run phase,
 // execution output, or publication state.
 function normalizeSnapshot(snapshot: Snapshot): Snapshot {
-  const plan = snapshot.plan ? normalizePlan(snapshot.plan) : snapshot.plan;
   let nodes = snapshot.nodes;
   if (nodes) for (const [name, node] of Object.entries(nodes)) {
     const status: string = node.status;
@@ -59,11 +49,7 @@ function normalizeSnapshot(snapshot: Snapshot): Snapshot {
     if (nodes === snapshot.nodes) nodes = { ...nodes };
     nodes[name] = { ...node, status: "completed" };
   }
-  return nodes === snapshot.nodes && plan === snapshot.plan ? snapshot : {
-    ...snapshot,
-    ...(nodes !== snapshot.nodes ? { nodes } : {}),
-    ...(plan !== snapshot.plan ? { plan } : {}),
-  };
+  return nodes === snapshot.nodes ? snapshot : { ...snapshot, nodes };
 }
 
 function normalizeSnapshotResult<T>(result: T): T {
@@ -171,7 +157,7 @@ export const runtimeService = {
       return await request<Snapshot>("history", { runId });
     }
   },
-  compileGraph: async (graph: Graph) => normalizePlan(await request<Plan>("compile_graph", { graph })),
+  compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
   updateUnstartedNodeTask: (runId: string, node: string, oldTask: string, task: string) =>
     request<Snapshot>("update_unstarted_node_task", { runId, node, oldTask, task }),

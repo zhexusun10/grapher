@@ -171,12 +171,13 @@ for (const mode of ["graph", "serial", "merger", "node-merger"]) {
 
 for (const mode of ["graph", "serial"]) {
   test(`${mode}: explicitly expanding an old record works even while the newest request is stalled`, { timeout: 30_000 }, async () => {
-    let releaseLatest;
+    let releasePrevious, releaseLatest;
     const reads = [];
     const { context, page, errors } = await newPage(async route => {
       if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
       const body = route.request().postDataJSON();
       reads.push(body.executionId);
+      if (body.executionId === "previous") await new Promise(resolve => { releasePrevious = resolve; });
       if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
       const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
       const bytes = Buffer.byteLength(content);
@@ -198,8 +199,14 @@ for (const mode of ["graph", "serial"]) {
       await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
       assert.equal(reads.filter(id => id === "old-record").length, 1);
       assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
+      if (mode === "graph") {
+        const task = page.locator(".node-task-card");
+        assert.equal(await task.isVisible(), false, "an older reply cannot prematurely reveal the task");
+        await page.locator(".session-label-toggle").last().click();
+        await task.waitFor({ state: "visible" });
+      }
       assert.deepEqual(errors, []);
-    } finally { releaseLatest?.(); await context.close(); }
+    } finally { releasePrevious?.(); releaseLatest?.(); await context.close(); }
   });
 }
 
@@ -808,7 +815,7 @@ test("private batch progress includes capped and failed peers until the whole vi
     { status: ["a", "b"].includes(name) ? "completed" : name === "c" ? "failed" : "waiting", revision: 1, instruction: "", error: null }]));
   const snapshot = {
     phase: "needs_attention", isolatedWorkspaces: true, privateBatch: members, nodes,
-    graph: { originalGoal: "whole batch", nodes: [...members, "child"].map(name => ({ name, task: name })), edges: [{ from: "a", to: "child", feedback: false }] },
+    graph: { originalGoal: "whole batch", nodes: [...members, "child"].map(name => ({ id: name, task: name })), edges: [{ from: "a", to: "child", feedback: false }] },
     plan: { executionBatches: [members, ["child"]], rootNodes: members, terminals: ["child"], warnings: [] },
   };
   try {
@@ -1365,7 +1372,7 @@ test("actual App shows a Planner follow-up while its turn is stalled before laun
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const running = { ...empty, runId: "stalled-run", config, planType: "graph", phase: "running", approved: true, planningId: "old-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "running", revision: 1, instruction: "", error: null } },
     executions: [{ id: "running-execution", node: "worker", status: "running", revision: 1, attempt: 1,
       startedAt: 1, completedAt: null, sessionId: "worker-session", worktree: "/mock/stalled-append-worker",
@@ -1429,7 +1436,7 @@ test("actual App keeps a Planner follow-up draft when bootstrap still blocks the
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const saved = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "completed",
-    graph: { originalGoal: "Existing conversation", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Existing conversation", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
     events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
@@ -1499,7 +1506,7 @@ test("actual App re-attaches a running revision plan without locking or stale ro
     roles: {}, totalPlanningDuration: 0, modelDuration: 0 };
   const saved = { ...empty, runId: "recovered-run", config, planType: "graph", phase: "running", approved: true,
     planningId: summary.planningId, planning: summary,
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Worker" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
   const { context, page, errors } = await newPage(route => {
@@ -1542,7 +1549,7 @@ test("a live Planner turn keeps the node conversation the reader opened", { time
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const running = { ...empty, runId: "live-node-view-run", config, planType: "graph", phase: "running", approved: true, planningId: "old-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Worker" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: "worker-execution", node: "worker", status: "completed", revision: 1, attempt: 1,
       startedAt: 1, completedAt: 2, sessionId: "worker-session", worktree: "/mock/live-node-view-worker",
@@ -1745,7 +1752,7 @@ test("actual App reopens a provisional conversation before the Planner assigns a
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const other = { ...empty, runId: "other-run", config, planType: "serial", phase: "completed", approved: true,
-    graph: { originalGoal: "Other", nodes: [{ name: "task", task: "Other" }], edges: [] },
+    graph: { originalGoal: "Other", nodes: [{ id: "task", task: "Other" }], edges: [] },
     nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: "other-exec", node: "task", status: "completed", revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s", worktree: "/mock", before: "", after: "", output: "" }] };
   onPlanStream = (_body, res) => {
@@ -1794,7 +1801,7 @@ test("actual App: first Serial message keeps the footer still through approval a
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const task = "First Serial task";
   const draft = { ...empty, runId: "first-serial", config, planType: "serial", phase: "awaiting_approval",
-    graph: { originalGoal: task, nodes: [{ name: "task", task }], edges: [] },
+    graph: { originalGoal: task, nodes: [{ id: "task", task }], edges: [] },
     nodes: { task: { status: "waiting", revision: 0, instruction: "", error: null } },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] } };
   // Approval changes the phase, but the Runtime leaves the node waiting until
@@ -3322,7 +3329,7 @@ test("actual App preserves scrollback and reuses bounded history on Node/Convers
   const tail = Array.from({ length: 60 }, (_, i) => assistant(`APP_VISIBLE_${i}`)).join("");
   const nodeData = prefix + tail, nodeBytes = Buffer.byteLength(nodeData);
   const runs = Object.fromEntries(["run-a", "run-b"].map(id => [id, { ...empty, runId: id, config, planType: "graph", phase: "paused", paused: true, approved: true,
-    planningId: `plan-${id}`, graph: { originalGoal: `Goal ${id}`, nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
+    planningId: `plan-${id}`, graph: { originalGoal: `Goal ${id}`, nodes: [{ id: "worker", task: "Worker task" }], edges: [] },
     plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: `exec-${id}`, node: "worker", status: "completed", output: "", outputBytes: nodeBytes,
@@ -3446,12 +3453,12 @@ test("Node navigation keeps history painted after the fade while older pages fil
   const tail = startTool("reveal-tail", "echo tail") + endTool("reveal-tail", "x".repeat(4000)) + assistant("NODE_REVEAL_BOTTOM");
   const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
   const snapshot = { ...empty, runId: "node-reveal", config, planType: "graph", phase: "completed", approved: true,
-    graph: { originalGoal: "Node reveal regression", nodes: ["short", "paged"].map(name => ({ name, task: `Task ${name}` })), edges: [] },
+    graph: { originalGoal: "Node reveal regression", nodes: ["short", "paged"].map(name => ({ id: name, task: `Task ${name}` })), edges: [] },
     nodes: Object.fromEntries(["short", "paged"].map(name => [name, { status: "completed", revision: 1, instruction: "", error: null }])),
     executions: ["short", "paged"].map(name => ({ id: name, node: name, status: "completed", output: "",
       outputBytes: name === "paged" ? data.length : Buffer.byteLength(assistant("SHORT_NODE_REPLY")),
       revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: `session-${name}`, worktree: "/mock", before: "", after: "" })) };
-  let releaseOlder;
+  let releaseTail, releaseOlder;
   const { context, page, errors } = await newPage(async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
@@ -3466,6 +3473,7 @@ test("Node navigation keeps history painted after the fade while older pages fil
       case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
       case "get_execution_output": {
         if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+        else if (body.executionId === "paged") await new Promise(resolve => { releaseTail = resolve; });
         const bytes = body.executionId === "paged" ? data : Buffer.from(assistant("SHORT_NODE_REPLY"));
         const start = body.executionId === "paged" && body.before === undefined ? split : 0;
         const end = body.before ?? bytes.length;
@@ -3491,10 +3499,20 @@ test("Node navigation keeps history painted after the fade while older pages fil
         cache.executionTranscriptCache.delete("node-reveal:paged");
       });
       await page.locator('.react-flow__node[data-id="paged"]').click();
+      await page.locator('[data-execution-id="paged"] .transcript-loading').waitFor();
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
+      assert.ok(releaseTail, "hold the first history page, not only the older fill");
+      const task = page.locator(".node-task-card");
+      assert.equal(await task.isVisible(), false, `${reducedMotion}: the task must not flash while history is loading`);
+      assert.ok(await task.evaluate(element => element.getBoundingClientRect().height) > 0,
+        "the hidden task must keep its layout space so readiness cannot move the rows");
+      await page.locator(".pane-bottom-chat textarea").waitFor({ state: "visible" });
+      releaseTail(); releaseTail = undefined;
       await page.getByText("NODE_REVEAL_BOTTOM", { exact: true }).waitFor();
       await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
       for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(10);
       assert.ok(releaseOlder, "the short tail requests older history after its first visible page");
+      await task.waitFor({ state: "visible" });
       await page.evaluate(() => {
         window.nodeRevealFrames = [];
         window.sampleNodeReveal = true;
@@ -3520,7 +3538,7 @@ test("Node navigation keeps history painted after the fade while older pages fil
         `${reducedMotion}: history must not flash back to the top after the fade: ${JSON.stringify(frames.filter(frame => frame.distanceFromBottom > 35))}`);
     }
     assert.deepEqual(errors, []);
-  } finally { releaseOlder?.(); await context.close(); }
+  } finally { releaseTail?.(); releaseOlder?.(); await context.close(); }
 });
 
 test("each Node record waits for its own first viewport fill instead of re-laying out mid-fade", { timeout: 30_000 }, async () => {
@@ -3532,7 +3550,7 @@ test("each Node record waits for its own first viewport fill instead of re-layin
   const tail = assistant("FILL_TAIL_ONLY");
   const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
   const snapshot = { ...empty, runId: "node-fill", config, planType: "graph", phase: "completed", approved: true,
-    graph: { originalGoal: "Node fill regression", nodes: [{ name: "paged", task: "Task paged" }], edges: [] },
+    graph: { originalGoal: "Node fill regression", nodes: [{ id: "paged", task: "Task paged" }], edges: [] },
     nodes: { paged: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: "paged", node: "paged", status: "completed", output: "", outputBytes: data.length,
       revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "session-paged", worktree: "/mock", before: "", after: "" }] };
@@ -3607,7 +3625,7 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const saved = { ...empty, runId: "stop-run", config, planType: "graph", phase: "awaiting_approval", planningId: "old-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "waiting", revision: 1, instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
   let stopped = false, planned = false;
@@ -3688,7 +3706,7 @@ test("switching conversations on a large viewport stays anchored to the newest r
     "graph-paged": {
       ...empty, runId: "graph-paged", config, planType: "graph", phase: "completed", approved: true,
       planningId: "plan-latest",
-      graph: { originalGoal: "TOP_USER_GOAL_graph-paged", nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
+      graph: { originalGoal: "TOP_USER_GOAL_graph-paged", nodes: [{ id: "worker", task: "Worker task" }], edges: [] },
       plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
       nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
       events: [
@@ -3698,14 +3716,14 @@ test("switching conversations on a large viewport stays anchored to the newest r
     },
     "serial-paged": {
       ...empty, runId: "serial-paged", config, planType: "serial", phase: "completed", approved: true,
-      graph: { originalGoal: "TOP_USER_GOAL_serial-paged", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-paged" }], edges: [] },
+      graph: { originalGoal: "TOP_USER_GOAL_serial-paged", nodes: [{ id: "task", task: "TOP_USER_GOAL_serial-paged" }], edges: [] },
       nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
       executions: [{ id: "exec-paged", node: "task", status: "completed", output: "", outputBytes: 100_000,
         revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s-1", worktree: "/mock", before: "", after: "" }],
     },
     "serial-multiturn": {
       ...empty, runId: "serial-multiturn", config, planType: "serial", phase: "completed", approved: true,
-      graph: { originalGoal: "TOP_USER_GOAL_serial-multiturn", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-multiturn" }], edges: [] },
+      graph: { originalGoal: "TOP_USER_GOAL_serial-multiturn", nodes: [{ id: "task", task: "TOP_USER_GOAL_serial-multiturn" }], edges: [] },
       nodes: { task: { status: "completed", revision: 2, instruction: "Follow-up instruction", error: null } },
       executions: [
         { id: "exec-turn-1", node: "task", status: "completed", output: "", outputBytes: 50_000,
@@ -3913,7 +3931,7 @@ test("an edited Planner follow-up keeps its turn and the failure notice", { time
     planningId: "follow-plan",
     planning: { planningId: "follow-plan", status: "success", createdAt: 2, repository: config.repository, runId: "edit-run",
       roles: { planner: { sessionId: "planner-session", sessionStart: 1 } } },
-    graph: { originalGoal: "EDIT GOAL", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    graph: { originalGoal: "EDIT GOAL", nodes: [{ id: "worker", task: "Worker" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: "done-execution", node: "worker", status: "completed", revision: 1, attempt: 1,
       startedAt: 1, completedAt: 2, sessionId: "worker-session", worktree: "/mock/edit-worker",

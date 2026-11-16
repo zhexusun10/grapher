@@ -38,7 +38,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
         let mut runtime = current.runtime.lock().unwrap();
         runtime.create(Graph {
             original_goal:"batch handoff".into(),
-            nodes:["a","b","c","d","join"].into_iter().map(|name| Node { name:name.into(), task:name.into() }).collect(),
+            nodes:["a","b","c","d","join"].into_iter().map(|name| Node { id:name.into(), task:name.into() }).collect(),
             edges:["a","b","c","d"].into_iter().map(|name| Edge { from:name.into(), to:"join".into(), feedback:false }).collect(),
         }, config.clone()).unwrap();
         runtime.set_route("graph").unwrap();
@@ -105,7 +105,7 @@ const graph=JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH, 'utf8'));
 if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
   fs.writeFileSync(session, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'original',parentId:null,message:{role:'user',content:'retained request'}})+'\n');
-  graph.nodes.push({name:'partial',task:'retained draft'});
+  graph.nodes.push({id:'partial',task:'retained draft'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   process.exit(1);
 }
@@ -113,7 +113,7 @@ if (input !== '__grapher_continue_interrupted__') throw Error('unexpected prompt
 const history=fs.readFileSync(session,'utf8');
 if (JSON.parse(history.split('\n')[0]).cwd !== process.cwd() || !history.includes('retained request'))
   throw Error('lost session or cwd');
-if (!graph.nodes.some(node => node.name === 'partial')) throw Error('lost draft');
+if (!graph.nodes.some(node => node.id === 'partial')) throw Error('lost draft');
 fs.writeFileSync('continued.txt', 'Planner shares the active workspace');
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
 "#).unwrap();
@@ -130,7 +130,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             let graph = Graph {
                 original_goal:"shared Planner continuation".into(),
                 nodes:(0..count).map(|index| Node {
-                    name:format!("worker{index}"), task:format!("work {index}"),
+                    id:format!("worker{index}"), task:format!("work {index}"),
                 }).collect(),
                 edges:vec![],
             };
@@ -248,7 +248,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
         assert_eq!(planning.status.as_deref(), Some("success"));
         assert_eq!(planning.worktree, failed.worktree);
         assert_eq!(planning.workspace_execution_id, expected_owner);
-        assert!(result.graph.nodes.iter().any(|node| node.name == "partial"));
+        assert!(result.graph.nodes.iter().any(|node| node.id == "partial"));
         assert_eq!(fs::read_to_string(workspace.join("continued.txt")).unwrap(),
             "Planner shares the active workspace");
         if mode != "source" {
@@ -282,12 +282,12 @@ const graph=JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH,'utf8'));
 if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
   fs.writeFileSync(session, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'revision',parentId:null,message:{role:'user',content:'revision'}})+'\n');
-  graph.nodes.push({name:'partial',task:'retained'});
+  graph.nodes.push({id:'partial',task:'retained'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH,JSON.stringify(graph)); process.exit(1);
 }
 if (input !== '__grapher_continue_interrupted__') throw Error('unexpected prompt');
-if (!fs.existsSync(session) || !graph.nodes.some(node => node.name === 'partial')) throw Error('missing history or draft');
-graph.nodes.push({name:'finished',task:'done'});
+if (!fs.existsSync(session) || !graph.nodes.some(node => node.id === 'partial')) throw Error('missing history or draft');
+graph.nodes.push({id:'finished',task:'done'});
 fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH,JSON.stringify(graph));
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
 "#).unwrap();
@@ -305,7 +305,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
                 Graph {
                     original_goal: "goal".into(),
                     nodes: vec![Node {
-                        name: "worker".into(),
+                        id: "worker".into(),
                         task: "work".into(),
                     }],
                     edges: vec![],
@@ -387,7 +387,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             .graph
             .nodes
             .iter()
-            .map(|node| node.name.as_str())
+            .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
         vec!["worker", "partial", "finished"]
     );
@@ -410,28 +410,28 @@ if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
   if (fs.existsSync(session)) {
     if (input !== 'revision') throw Error(`unexpected revision: ${input}`);
     fs.appendFileSync(session, JSON.stringify({type:'message',id:'revision',parentId:'original',message:{role:'user',content:'revision'}})+'\n');
-    graph.nodes.push({name:'revision-partial',task:'retained revision'});
+    graph.nodes.push({id:'revision-partial',task:'retained revision'});
     fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
     process.exit(1);
   }
   fs.writeFileSync(session, JSON.stringify({type:'session', id, cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'original',parentId:null,message:{role:'user',content:'original goal'}})+'\n');
-  graph.nodes.push({name:'before',task:'retained'});
+  graph.nodes.push({id:'before',task:'retained'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'partial'}]}}));
   process.exit(1);
 }
 if (input !== '__grapher_continue_interrupted__') throw Error(`unexpected prompt: ${input}`);
 if (!fs.readFileSync(session, 'utf8').includes('original goal')) throw Error('missing session history');
-if (graph.nodes[0]?.name !== 'before') throw Error('missing retained draft');
+if (graph.nodes[0]?.id !== 'before') throw Error('missing retained draft');
 const failOnce = path.join(path.dirname(process.argv[1]), 'fail-once');
 if (fs.existsSync(failOnce)) {
   fs.unlinkSync(failOnce);
-  graph.nodes.push({name:'retry',task:'retained after second failure'});
+  graph.nodes.push({id:'retry',task:'retained after second failure'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   process.exit(1);
 }
-graph.nodes.push({name:graph.nodes.some(node => node.name === 'after') ? 'revision-finished' : 'after',task:'finished'});
+graph.nodes.push({id:graph.nodes.some(node => node.id === 'after') ? 'revision-finished' : 'after',task:'finished'});
 fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
 "#).unwrap();
@@ -613,7 +613,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             .graph
             .nodes
             .iter()
-            .map(|node| node.name.as_str())
+            .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
         vec!["before", "retry", "after"]
     );
@@ -659,7 +659,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             .graph
             .nodes
             .iter()
-            .map(|node| node.name.as_str())
+            .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "before",

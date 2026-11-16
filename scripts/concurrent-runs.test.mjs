@@ -59,7 +59,7 @@ try {
     const release = join(root, `release-${name}`);
     const script = join(root, `worker-${name}.sh`);
     await writeFile(script, `cat >/dev/null\ntouch '${started}'\nwhile [ ! -f '${release}' ]; do sleep 0.02; done\nprintf '%s\\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'\n`);
-    const graph = { originalGoal: name, nodes: [{ name: 'worker', task: name }], edges: [] };
+    const graph = { originalGoal: name, nodes: [{ id: 'worker', task: name }], edges: [] };
     const config = { repository, model: 'test', engine: 'pi', piCommand: '/bin/sh', piArgs: [script], maxParallel: 1, maxFeedback: 0 };
     const snapshot = await api('save_graph', { graph, config });
     await api('control', { action: 'approve', runId: snapshot.runId });

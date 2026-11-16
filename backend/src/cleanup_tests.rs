@@ -125,7 +125,7 @@ fn graph() -> Graph {
     Graph {
         original_goal: "cleanup".into(),
         nodes: vec![Node {
-            name: "task".into(),
+            id: "task".into(),
             task: "test".into(),
         }],
         edges: vec![],

@@ -6,6 +6,81 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct Diagnostic {
     pub code: String,
     pub message: String,
+    // E209 evidence lets callers distinguish an existing redundant edge from
+    // a rejected addition without parsing node ids out of diagnostic prose.
+    #[serde(
+        default,
+        rename = "dependencyPath",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dependency_path: Option<Vec<String>>,
+}
+
+// Advisory facts, not rendered messages, define identity across two candidates.
+// No session history is involved: a resolved warning can reappear on a later edit.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Advisory<'a> {
+    DuplicateTask { task: &'a str, nodes: Vec<&'a str> },
+    MissingFeedback { node: &'a str },
+}
+
+impl Advisory<'_> {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::DuplicateTask { .. } => "W301",
+            Self::MissingFeedback { .. } => "W302",
+        }
+    }
+
+    fn message(&self, multiline: bool) -> String {
+        match self {
+            Self::DuplicateTask { nodes, .. } if multiline => format!(
+                "{} nodes have identical task text; they may duplicate work. Confirm that this is intentional.\n- {}",
+                nodes.len(), nodes.join("\n- ")
+            ),
+            Self::DuplicateTask { nodes, .. } => format!(
+                "Nodes {} have identical task text; they may duplicate work. Confirm that this is intentional.",
+                nodes.join(", ")
+            ),
+            Self::MissingFeedback { node } => format!(
+                "{node} mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback."
+            ),
+        }
+    }
+}
+
+fn advisories(graph: &Graph) -> Vec<Advisory<'_>> {
+    // Compare literal task text, not inferred intent or overlapping file paths.
+    let mut task_nodes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for node in &graph.nodes {
+        task_nodes.entry(&node.task).or_default().insert(&node.id);
+    }
+    let mut warnings: Vec<_> = task_nodes.into_iter()
+        .filter(|(_, nodes)| nodes.len() > 1)
+        .map(|(task, nodes)| Advisory::DuplicateTask { task, nodes: nodes.into_iter().collect() })
+        .collect();
+    for node in &graph.nodes {
+        if node.task.contains("<FEEDBACK>")
+            && !graph.edges.iter().any(|edge| edge.feedback && edge.from == node.id)
+        {
+            warnings.push(Advisory::MissingFeedback { node: &node.id });
+        }
+    }
+    warnings
+}
+
+/// Planner-only projection. Full Plan warnings and all blocking diagnostics stay
+/// unchanged. Compare the saved candidate, not the runtime's committed graph.
+pub fn changed_advisories(before: &Graph, after: &Graph) -> Vec<Diagnostic> {
+    let previous: BTreeSet<_> = advisories(before).into_iter().collect();
+    advisories(after).into_iter()
+        .filter(|warning| !previous.contains(warning))
+        .map(|warning| Diagnostic {
+            code: warning.code().into(),
+            message: warning.message(true),
+            dependency_path: None,
+        })
+        .collect()
 }
 
 pub fn downstream(graph: &Graph, start: &str) -> BTreeSet<String> {
@@ -56,14 +131,11 @@ fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<
     None
 }
 
-/// Node names are user- and planner-facing labels and may contain any text.
-/// Worktree directories and Git refs instead use a deterministic, safe id:
-/// names that already satisfy the legacy contract map to themselves (so
-/// existing refs and workspaces stay valid), everything else becomes a
-/// bounded slug plus a short content hash. The result is a single path
-/// component and a valid Git ref component for any input.
+/// Graph node IDs may contain any text. Worktree directories and Git refs use
+/// a deterministic, safe path component: portable IDs map to themselves;
+/// everything else becomes a bounded slug plus a short content hash.
 pub fn node_id(name: &str) -> String {
-    if is_legacy_node_id(name) {
+    if is_portable_node_id(name) {
         return name.to_string();
     }
     let mut slug = String::new();
@@ -111,7 +183,7 @@ fn is_windows_reserved_name(name: &str) -> bool {
         && device.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
 }
 
-fn is_legacy_node_id(name: &str) -> bool {
+fn is_portable_node_id(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -124,41 +196,29 @@ fn is_legacy_node_id(name: &str) -> bool {
 /// run has published, a node whose result was delivered may be reworked (a
 /// task change invalidates and re-runs it) but never removed. Graph structure
 /// alone cannot express this, so the caller supplies the run's unremovable
-/// node names and a missing one is reported as an actionable diagnostic
+/// node IDs and a missing one is reported as an actionable diagnostic
 /// instead of failing the whole commit inside Runtime.
 pub fn unremovable_node_diagnostics(graph: &Graph, unremovable: &[String]) -> Vec<Diagnostic> {
     unremovable
         .iter()
-        .filter(|name| !graph.nodes.iter().any(|node| &node.name == *name))
+        .filter(|name| !graph.nodes.iter().any(|node| &node.id == *name))
         .map(|name| Diagnostic {
             code: "E210".into(),
             message: format!(
                 "Cannot remove node '{name}': its workspace state is already published in this run.",
             ),
+            dependency_path: None,
         })
         .collect()
 }
 
 pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
-    compile_with_policy(graph, final_check, true)
-}
-
-/// Replay persisted graphs from older runs without changing their historical
-/// plan. New graph mutations and runs use `compile`, which rejects redundancy.
-pub fn compile_legacy(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
-    compile_with_policy(graph, final_check, false)
-}
-
-fn compile_with_policy(
-    graph: &Graph,
-    final_check: bool,
-    reject_redundant: bool,
-) -> Result<Plan, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut add = |code: &str, message: String| {
         errors.push(Diagnostic {
             code: code.into(),
             message,
+            dependency_path: None,
         })
     };
     if final_check && graph.nodes.is_empty() {
@@ -167,17 +227,17 @@ fn compile_with_policy(
     let mut names = BTreeSet::new();
     let mut folded_names = BTreeMap::new();
     for node in &graph.nodes {
-        if node.name.is_empty() {
-            add("E201", "Node name must not be empty".into());
+        if node.id.is_empty() {
+            add("E201", "Node id must not be empty".into());
         }
-        if !names.insert(node.name.clone()) {
-            add("E202", format!("Duplicate node: {}", node.name));
+        if !names.insert(node.id.clone()) {
+            add("E202", format!("Duplicate node: {}", node.id));
         } else if let Some(previous) =
-            folded_names.insert(node.name.to_lowercase(), node.name.clone())
+            folded_names.insert(node.id.to_lowercase(), node.id.clone())
         {
             add("E202", format!(
-                "Node names '{previous}' and '{}' differ only by case and would collide on case-insensitive filesystems",
-                node.name
+                "Node ids '{previous}' and '{}' differ only by case and would collide on case-insensitive filesystems",
+                node.id
             ));
         }
         if node.task.trim().is_empty() {
@@ -185,7 +245,7 @@ fn compile_with_policy(
                 "E203",
                 format!(
                     "Node '{}' has an empty task. Each node must have a non-empty task description that will be passed to the executor.",
-                    node.name
+                    node.id
                 ),
             );
         }
@@ -269,6 +329,7 @@ fn compile_with_policy(
                     vec![Diagnostic {
                         code: "E204".into(),
                         message: format!("Unknown endpoint: {}", edge.to),
+                        dependency_path: None,
                     }]
                 })?;
                 *degree -= 1;
@@ -295,57 +356,35 @@ fn compile_with_policy(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            dependency_path: None,
         }]);
     }
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {
         if !downstream(graph, &edge.to).contains(&edge.from) {
-            errors.push(Diagnostic { code: "E207".into(), message: format!("Feedback {} → {} requires a dependency path from {} to {}. Nodes currently reachable from {} through dependencies: {}. Feedback does not provide execution ordering.", edge.from, edge.to, edge.to, edge.from, edge.to, downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")) });
+            errors.push(Diagnostic { code: "E207".into(), message: format!("Feedback {} → {} requires a dependency path from {} to {}. Nodes currently reachable from {} through dependencies: {}. Feedback does not provide execution ordering.", edge.from, edge.to, edge.to, edge.from, edge.to, downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")), dependency_path: None });
         }
     }
     if !errors.is_empty() {
         return Err(errors);
     }
-    if reject_redundant {
-        for edge in &dependencies {
-            if let Some(path) = alternate_dependency_path(graph, &edge.from, &edge.to) {
-                errors.push(Diagnostic {
-                    code: "E209".into(),
-                    message: format!(
-                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream workspace results to {}.",
-                        edge.from, edge.to, path.join(" → "), edge.to
-                    ),
-                });
-            }
+    for edge in &dependencies {
+        if let Some(path) = alternate_dependency_path(graph, &edge.from, &edge.to) {
+            errors.push(Diagnostic {
+                code: "E209".into(),
+                message: format!(
+                    "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream workspace results to {}.",
+                    edge.from, edge.to, path.join(" → "), edge.to
+                ),
+                dependency_path: Some(path),
+            });
         }
     }
     if !errors.is_empty() {
         return Err(errors);
     }
-    let mut warnings = Vec::new();
-    // Compare literal task text, not inferred intent or overlapping file paths.
-    let mut task_nodes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for node in &graph.nodes {
-        task_nodes
-            .entry(node.task.as_str())
-            .or_default()
-            .insert(node.name.as_str());
-    }
-    for nodes in task_nodes.values().filter(|nodes| nodes.len() > 1) {
-        warnings.push(format!(
-            "W301: Nodes {} have identical task text; they may duplicate work. Confirm that this is intentional.",
-            nodes.iter().copied().collect::<Vec<_>>().join(", ")
-        ));
-    }
-    for node in &graph.nodes {
-        if node.task.contains("<FEEDBACK>")
-            && !graph
-                .edges
-                .iter()
-                .any(|edge| edge.feedback && edge.from == node.name)
-        {
-            warnings.push(format!("W302: {} mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback.", node.name));
-        }
-    }
+    let mut warnings: Vec<_> = advisories(graph).into_iter()
+        .map(|warning| format!("{}: {}", warning.code(), warning.message(false)))
+        .collect();
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {
         // Match the runtime's invalidation set exactly: target plus dependency
         // descendants, without following other feedback edges or judging size.
@@ -404,11 +443,11 @@ mod node_id_tests {
             original_goal: String::new(),
             nodes: vec![
                 crate::model::Node {
-                    name: "Worker".into(),
+                    id: "Worker".into(),
                     task: "one".into(),
                 },
                 crate::model::Node {
-                    name: "worker".into(),
+                    id: "worker".into(),
                     task: "two".into(),
                 },
             ],

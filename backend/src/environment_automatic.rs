@@ -382,7 +382,7 @@ mod tests {
         let graph = Graph {
             original_goal: "draft policy".into(),
             nodes: vec![Node {
-                name: "A".into(),
+                id: "A".into(),
                 task: "business".into(),
             }],
             edges: vec![],

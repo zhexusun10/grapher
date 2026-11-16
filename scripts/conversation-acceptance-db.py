@@ -149,7 +149,7 @@ def initialize(root, source):
         db.execute('DELETE FROM checkpoints')
         db.commit()
         (root / name / 'config.json').write_text(encode(config), encoding='utf-8')
-        copies[name] = {'path': str(path), 'runId': run, 'nodes': [n['name'] for n in graph['nodes']], 'executions': expected_real, 'before': stats(db, path)}
+        copies[name] = {'path': str(path), 'runId': run, 'nodes': [n['id'] for n in graph['nodes']], 'executions': expected_real, 'before': stats(db, path)}
         db.close()
     src.close()
     # Restore precisely 890,000 redundant Output fragments from the real
@@ -194,7 +194,7 @@ def initialize(root, source):
     for name, repeats in [('alpha', 4500), ('beta', 1500), ('gamma', 2000)]:
         run_id = 'acceptance-' + name
         marker = name.upper() + '_ONLY: saved history 完成🚀'
-        graph = {'originalGoal': 'Acceptance ' + name, 'nodes': [{'name': 'task', 'task': 'Acceptance ' + name}], 'edges': []}
+        graph = {'originalGoal': 'Acceptance ' + name, 'nodes': [{'id': 'task', 'task': 'Acceptance ' + name}], 'edges': []}
         text = (encode({'type': 'acceptance_noise', 'text': 'x' * 1000}) + '\n') * repeats + assistant(marker)
         text += encode({'type': 'grapher_process_exited', 'elapsedMs': 2250}) + '\n\n── Final response ──\n' + marker + '\n'
         insert(db, run_id, {'type': 'created', 'graph': graph, 'config': config})
@@ -206,7 +206,7 @@ def initialize(root, source):
         insert(db, run_id, {'type': 'settled'}, 4001)
         runs.append({'id': run_id, 'executionId': name + '-exec', 'marker': marker})
     run_id = 'acceptance-failed'
-    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'name': name, 'task': name} for name in ['completed', 'failed']], 'edges': [{'from': 'completed', 'to': 'failed', 'feedback': False}]}
+    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'id': name, 'task': name} for name in ['completed', 'failed']], 'edges': [{'from': 'completed', 'to': 'failed', 'feedback': False}]}
     insert(db, run_id, {'type': 'created', 'graph': graph, 'config': config})
     insert(db, run_id, {'type': 'routed', 'plan_type': 'graph'})
     insert(db, run_id, {'type': 'approved', 'base': head})

@@ -6,7 +6,7 @@ fn chain() -> Graph {
         nodes: ["up", "target", "child", "keep"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: format!("task {name}"),
             })
             .collect(),
@@ -24,7 +24,7 @@ fn chain() -> Graph {
 fn request(from: Option<&str>, to: Option<&str>, feedback: bool) -> ManualNodeRequest {
     ManualNodeRequest {
         node: Node {
-            name: "new".into(),
+            id: "new".into(),
             task: "new task".into(),
         },
         from: from.map(str::to_string),
@@ -40,7 +40,7 @@ fn confirmed(runtime: &Runtime, names: &[&str]) -> Vec<ManualNodeConfirmation> {
         .map(|name| {
             let node = &runtime.state.nodes[*name];
             ManualNodeConfirmation {
-                name: (*name).into(),
+                id: (*name).into(),
                 revision: node.revision,
                 head: node.head.clone(),
             }
@@ -99,7 +99,7 @@ fn unstarted_task_edit_preserves_run_and_replays_without_resetting_work() {
     let up_status = runtime.state.nodes["up"].status.clone();
     runtime.update_unstarted_node_task("child", "task child", "new child task").unwrap();
     assert_eq!(runtime.state.run_id, run_id);
-    assert_eq!(runtime.state.graph.nodes.iter().find(|n| n.name == "child").unwrap().task, "new child task");
+    assert_eq!(runtime.state.graph.nodes.iter().find(|n| n.id == "child").unwrap().task, "new child task");
     assert_eq!(runtime.state.executions.len(), executions);
     assert_eq!(runtime.state.nodes["up"].status, up_status);
     assert_eq!(runtime.state.phase, phase);
@@ -134,7 +134,7 @@ fn manual_node_draft_validates_atomically_and_replays() {
     runtime.save_default_config(&config).unwrap();
     let run_id = runtime.state.run_id.clone();
     let mut bad = request(None, None, false);
-    bad.node.name = "UP".into();
+    bad.node.id = "UP".into();
     assert!(runtime.add_manual_node(bad).unwrap_err().contains("E202"));
     assert_eq!(runtime.state.graph, chain());
     assert!(runtime.add_manual_node(request(None, None, true)).is_err());
@@ -310,7 +310,7 @@ fn manual_node_rejects_affected_running_writers_but_allows_unrelated_work() {
         "a waiting target can acquire a new dependency while unrelated roots run"
     );
     let mut other = request(None, Some("up"), false);
-    other.node.name = "other".into();
+    other.node.id = "other".into();
     let before = runtime.state.graph.clone();
     assert!(runtime
         .add_manual_node(other)

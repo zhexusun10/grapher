@@ -15,8 +15,8 @@ export default async function (pi: any) {
   const text = (result: any) => result.content?.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('\n') || '';
   const target = JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES!).target;
   const switchTool = tools.find(tool => tool.name === 'switch_workspace');
-  assert.deepEqual(switchTool.prepareArguments({ node: 'target' }), { id: 'target' });
-  assert.throws(() => switchTool.prepareArguments({ id: 'target', node: 'other' }), /not both/);
+  assert.equal(switchTool.prepareArguments, undefined);
+  assert.deepEqual(Object.keys(switchTool.parameters.properties), ['id']);
   const switched = JSON.parse(text(await call('switch_workspace', { id: 'target' })));
   assert.equal(switched.requestedId, 'target');
   assert.equal(switched.actualId, target.actualNode);

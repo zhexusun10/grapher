@@ -246,14 +246,14 @@ impl Runtime {
     ) -> Result<Option<PathBuf>, String> {
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
             if ready.is_empty() || !ready.iter().all(|node|
-                self.private_continuation_during_publication(&node.name)) {
+                self.private_continuation_during_publication(&node.id)) {
                 return Ok(None);
             }
             return resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?).map(Some);
         }
         let active = self.active();
         let source_recovery = !ready.is_empty() && ready.iter().all(|node|
-            self.source_batch_recovery(&node.name));
+            self.source_batch_recovery(&node.id));
         if source_recovery {
             if active && (!self.shared_source_workspace()
                 || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")
@@ -268,12 +268,12 @@ impl Runtime {
             // Keep the pending private delivery group. `resumed` on a source
             // dispatch records this temporary recovery, not a new shared batch.
             self.emit(EventKind::ExecutionBatchStarted {
-                nodes: ready.iter().map(|node| node.name.clone()).collect(), isolated: false, resumed: true,
+                nodes: ready.iter().map(|node| node.id.clone()).collect(), isolated: false, resumed: true,
             })?;
             return Ok(Some(repository));
         }
         let retained = !ready.is_empty() && ready.iter().all(|node|
-            self.retained_private_continuation(&node.name).is_some());
+            self.retained_private_continuation(&node.id).is_some());
         let private_dispatch = retained || (!self.state.private_batch.is_empty() && !ready.is_empty());
         if active && (ready.is_empty()
             || (!private_dispatch && !self.shared_source_workspace())
@@ -303,7 +303,7 @@ impl Runtime {
         // delivery, not execution, waits for the whole topology batch.
         if private_dispatch {
             for node in ready {
-                if let Some(previous) = self.retained_private_continuation(&node.name) {
+                if let Some(previous) = self.retained_private_continuation(&node.id) {
                     if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
                         return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
                     }
@@ -314,7 +314,7 @@ impl Runtime {
             }
             if self.state.private_batch.is_empty() {
                 self.emit(EventKind::PrivateBatchSelected {
-                    nodes: self.private_batch_scope(&ready.iter().map(|node| node.name.clone()).collect::<Vec<_>>()),
+                    nodes: self.private_batch_scope(&ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>()),
                 })?;
             }
             let recovered_source = self.shared_source_workspace() && self.state.events.iter().rev().find_map(|event| match &event.kind {
@@ -322,7 +322,7 @@ impl Runtime {
                 _ => None,
             }).unwrap_or(false);
             self.emit(EventKind::ExecutionBatchStarted {
-                nodes: ready.iter().map(|node| node.name.clone()).collect(),
+                nodes: ready.iter().map(|node| node.id.clone()).collect(),
                 isolated: true,
                 // Unstarted consumers must see a prerequisite's completed
                 // source edits. Prepared retries still pin their own inputs.
@@ -430,11 +430,11 @@ impl Runtime {
         }
         if isolated {
             events.push(EventKind::PrivateBatchSelected {
-                nodes: self.private_batch_scope(&ready.iter().map(|node| node.name.clone()).collect::<Vec<_>>()),
+                nodes: self.private_batch_scope(&ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>()),
             });
         }
         events.push(EventKind::ExecutionBatchStarted {
-            nodes: ready.iter().map(|node| node.name.clone()).collect(),
+            nodes: ready.iter().map(|node| node.id.clone()).collect(),
             isolated,
             resumed: false,
         });

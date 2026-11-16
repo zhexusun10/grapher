@@ -52,7 +52,8 @@ function SettingsFixture() {
   </>;
 }
 function EditorFixture() {
-  const [graph, setGraph] = useState({ ...emptyGraph, originalGoal: "Initial graph" });
+  const [graph, setGraph] = useState({ ...emptyGraph, originalGoal: "Initial graph",
+    nodes: [{ id: "worker", task: "Keep name as ordinary task text" }] });
   const [open, setOpen] = useState(true);
   audit.updateGraph = () => setGraph({ ...emptyGraph, originalGoal: "Polled graph" });
   audit.open = () => setOpen(true);
@@ -283,7 +284,7 @@ function LatestScrollFixture() {
   audit.appendToolEvents = (events: unknown[]) => setOutput(previous => previous + events.map(event => JSON.stringify(event) + "\n").join(""));
   audit.unmountConversation = () => setMounted(false);
   const state = { ...emptySnapshot, runId: "latest-run", config, phase: live ? "running" : "paused", paused: !live, approved: true, planType: nodeView ? "graph" : "serial",
-    graph: { originalGoal: "Latest-scroll regression", nodes: [{ name: "task", task: "Inspect the long conversation" }], edges: [] },
+    graph: { originalGoal: "Latest-scroll regression", nodes: [{ id: "task", task: "Inspect the long conversation" }], edges: [] },
     nodes: { task: { status: live ? "running" : "completed", revision: 0, instruction: "", error: null } },
     executions: [{ id: "latest-execution", node: "task", status: live ? "running" : "completed", revision: 0, attempt: 1, output,
       ...(pagedLive ? { outputBytes: 10_000_000 } : {}),
@@ -348,7 +349,7 @@ function PlannerReviewFixture() {
     phase: phase === "review" ? "planning" : "completed", approved: true,
     planningId: phase === "initial" ? "plan-initial" : "plan-review",
     planning: phase === "initial" ? initial : review,
-    graph: { originalGoal: "Review this run", nodes: [{ name: "worker", task: "Do the work" }], edges: [] },
+    graph: { originalGoal: "Review this run", nodes: [{ id: "worker", task: "Do the work" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 0, instruction: "", error: null } },
     events } as Snapshot;
   const noop = () => {};
@@ -400,7 +401,7 @@ function NodeEntryFixture() {
     sessionId: "worker-session", worktree: "/mock", before: "", after: null };
   const state = { ...emptySnapshot, runId: "node-entry", config, planType: serial ? "serial" : "graph", phase: "running",
     approved: true, paused: false, planningId: "node-entry-plan",
-    graph: { originalGoal: "Node entry goal", nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
+    graph: { originalGoal: "Node entry goal", nodes: [{ id: "worker", task: "Worker task" }], edges: [] },
     nodes: { worker: { status: "running", revision: 0, instruction: "", error: null } },
     executions: [execution],
     events: [{ type: "created", sequence: 1, timestamp: 1, planning_id: "node-entry-plan" }] } as Snapshot;
@@ -420,7 +421,7 @@ function PlannerScrollRestoreFixture() {
   audit.selectPlannerScrollView = setSelected;
   audit.setPlannerScrollWidth = setWidth;
   const state = { ...emptySnapshot, runId: "scroll-run", config, planType: "graph", phase: "completed", approved: true,
-    planningId: "scroll-plan", graph: { originalGoal: "Planner scroll goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    planningId: "scroll-plan", graph: { originalGoal: "Planner scroll goal", nodes: [{ id: "worker", task: "Worker" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 0, instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, timestamp: 1, planning_id: "scroll-plan" }] } as Snapshot;
   const noop = () => {};
@@ -442,7 +443,7 @@ function UnrunNodeFixture() {
   audit.growTask = () => setLines(previous => previous + 20);
   const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FIRST_EXECUTION_OUTPUT" }] } }) + "\n";
   const state = { ...emptySnapshot, runId: "unrun-node", config, phase: "paused", paused: true, approved: true, planType: "graph",
-    graph: { originalGoal: "Unrun node regression", nodes: [{ name: "worker", task: Array.from({ length: lines }, (_, index) => `Task paragraph ${index}\n\n`).join("") }], edges: [] },
+    graph: { originalGoal: "Unrun node regression", nodes: [{ id: "worker", task: Array.from({ length: lines }, (_, index) => `Task paragraph ${index}\n\n`).join("") }], edges: [] },
     nodes: { worker: { status: started ? "completed" : "waiting", revision: 0, instruction: "", error: null } },
     executions: started ? [{ id: "first-execution", node: "worker", status: "completed", revision: 0, attempt: 1, output,
       startedAt: 1, completedAt: 2, sessionId: "first-session", worktree: "/mock", before: "", after: "" }] : [] } as Snapshot;

@@ -31,7 +31,7 @@ export const phaseText: Record<string, string> = {
 };
 
 export type WorkNode = Node<{
-  name: string;
+  id: string;
   task: string;
   /** Merger cards are execution helpers, not planner tasks, and use compact geometry. */
   kind?: "task" | "merger";
@@ -50,16 +50,19 @@ export type WorkNode = Node<{
   hasRightSource: boolean;
 }, "work">;
 
-export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
+export const TaskNode = React.memo(({ id, data }: NodeProps<WorkNode>) => {
   return (
     <div
-      data-node-name={data.name}
+      data-node-id={data.kind === "merger" ? undefined : data.id}
+      data-card-id={id}
+      data-node-kind={data.kind === "merger" ? "merger" : "task"}
       className={`task-node ${data.kind === "merger" ? "merger" : ""} ${data.selected ? "selected" : ""} ${data.status}`}
     >
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
       <div className="node-heading">
-        <strong>{data.name}</strong>
+        {data.kind === "merger" && <span className="node-kind-label">{t("合并辅助节点")}</span>}
+        <strong>{data.id}</strong>
       </div>
       <p>{data.task}</p>
       <div className="node-footer">

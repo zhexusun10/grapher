@@ -175,7 +175,7 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
     let fixture = Fixture::new();
     let mut state = fixture.create("status", "/repo", "Status");
     let graph: Graph = serde_json::from_value(serde_json::json!({
-        "originalGoal": "Status", "nodes": [{"name":"worker", "task":"Work"}], "edges":[]
+        "originalGoal": "Status", "nodes": [{"id":"worker", "task":"Work"}], "edges":[]
     }))
     .unwrap();
     let config = state.config.clone().unwrap();
@@ -256,7 +256,7 @@ fn sidebar_title_edits_use_the_canonical_reducer() {
     let mut state = fixture.create("serial", "/repo", "Original");
     let config = state.config.clone().unwrap();
     let graph: Graph = serde_json::from_value(serde_json::json!({
-        "originalGoal": "Original", "nodes": [{"name":"worker", "task":"Work"}], "edges":[]
+        "originalGoal": "Original", "nodes": [{"id":"worker", "task":"Work"}], "edges":[]
     }))
     .unwrap();
     fixture

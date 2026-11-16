@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { activePlannerOutput, plannerConversationEdits, plannerHistoryIds, plannerTurnIds, reviewPlanningIds } from '../src/lib/plannerOutput.ts';
-import { recoveredPlanningForDisplay } from '../src/services/planningRecovery.ts';
+import { recoveredPlanningForDisplay, runningPlanningFromSnapshot } from '../src/services/planningRecovery.ts';
+import { defaultConfig, emptySnapshot, type PlanningSummary, type Snapshot } from '../src/types.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
 const user = (text: string) => JSON.stringify({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });
@@ -111,6 +112,37 @@ test('aborted revision turns stay in the replayed Planner conversation', () => {
     { type: 'graph_revised', planning_id: 'b' },
     { type: 'planner_turn_aborted', planning: { planningId: 'c', createdAt: 5 } },
   ]), ['a', 'b', 'c']);
+});
+
+test('linked recovery takes the committed route from its own running Planner snapshot', () => {
+  const repository = 'C:\\Users\\repo';
+  const summary: PlanningSummary = { planningId: 'review', runId: 'graph-run', repository,
+    roles: {}, status: 'running', totalPlanningDuration: 0, modelDuration: 0 };
+  const snapshot: Snapshot = { ...emptySnapshot, runId: 'graph-run', phase: 'running', planType: 'graph',
+    config: { ...defaultConfig, repository }, planningId: 'review', planning: { ...summary, planType: 'graph' } };
+  assert.equal(runningPlanningFromSnapshot(summary, snapshot, 'c:/users/repo/')?.planType, 'graph');
+  assert.equal(runningPlanningFromSnapshot({ ...summary, planType: 'serial' }, snapshot, repository)?.planType, 'graph');
+  assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, phase: 'planning', planning: null }, repository)?.planningId, 'review',
+    'initial planning may have an identity before its first summary is persisted');
+  assert.ok(runningPlanningFromSnapshot(summary, { ...snapshot, phase: 'planning', planning: { ...summary, status: undefined } }, repository),
+    'older planning snapshots may omit status while still in the planning phase');
+});
+
+test('stale, superseded and foreign planning hints cannot resurrect or combine Runs', () => {
+  const repository = '/repo';
+  const summary: PlanningSummary = { planningId: 'review', runId: 'graph-run', repository,
+    roles: {}, status: 'running', totalPlanningDuration: 0, modelDuration: 0 };
+  const snapshot: Snapshot = { ...emptySnapshot, runId: 'graph-run', phase: 'running', planType: 'graph',
+    config: { ...defaultConfig, repository }, planningId: 'review', planning: summary };
+  for (const status of ['failed', 'success', 'cancelled']) {
+    assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, planning: { ...summary, status } }, repository), null);
+  }
+  assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, planningId: 'new', planning: { ...summary, planningId: 'new' } }, repository), null);
+  assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, runId: 'other-run' }, repository), null);
+  assert.equal(runningPlanningFromSnapshot({ ...summary, repository: '/other' }, snapshot, repository), null);
+  assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, config: { ...defaultConfig, repository: '/other' } }, repository), null);
+  assert.equal(runningPlanningFromSnapshot(summary, { ...snapshot, planning: null }, repository), null,
+    'an old running phase without a running Planner is not sufficient');
 });
 
 test('a newer live Planner turn retires the recovered snapshot instead of keeping it marked running', () => {

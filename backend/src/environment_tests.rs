@@ -152,10 +152,21 @@ fn project_activated_python_path_and_markers_follow_the_private_snapshot() {
     let modules = source.join("extra-node-modules");
     fs::create_dir_all(modules.join("from-project")).unwrap();
     fs::write(modules.join("from-project/index.js"), "module.exports='private-snapshot';\n").unwrap();
+    let python_modules = source.join("python-src");
+    fs::create_dir_all(&python_modules).unwrap();
+    fs::write(python_modules.join("snapshot_module.py"), "VALUE = 'private-snapshot'\n").unwrap();
+    let startup = source.join("shell-startup.sh");
+    fs::write(&startup, "export GTEST_PROJECT_STARTUP=private-snapshot\n").unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
     let node = temp.path().join(".grapher-worktrees/project-path/node");
     workspace::prepare(&source, &node, &base, &[]).unwrap();
     fs::write(modules.join("from-project/index.js"), "module.exports='source-later';\n").unwrap();
+    fs::write(python_modules.join("snapshot_module.py"), "VALUE = 'source-later'\n").unwrap();
+    fs::write(&startup, "export GTEST_PROJECT_STARTUP=source-later\n").unwrap();
+    let mut source_command = Command::new(&python);
+    source_command.current_dir(&source).env_remove("PYTHONHOME").env("PYTHONPATH", &python_modules)
+        .args(["-B", "-c", "import snapshot_module; print(snapshot_module.VALUE)"]);
+    assert_eq!(String::from_utf8(controlled_output(source_command).unwrap()).unwrap().trim(), "source-later");
     let config = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap();
     let mut launch = config.launch;
     let mut paths = vec![prefix.join(bin), source.join("future-tools")];
@@ -170,8 +181,9 @@ fn project_activated_python_path_and_markers_follow_the_private_snapshot() {
     ambient.insert("CONDA_PREFIX".into(), prefix.as_os_str().into());
     ambient.insert("CONDA_DEFAULT_ENV".into(), "business-name".into());
     ambient.insert("NODE_PATH".into(), modules.as_os_str().into());
+    ambient.insert("PYTHONPATH".into(), python_modules.as_os_str().into());
+    ambient.insert("BASH_ENV".into(), startup.as_os_str().into());
     ambient.remove(std::ffi::OsStr::new("NODE_OPTIONS"));
-    ambient.remove(std::ffi::OsStr::new("BASH_ENV"));
     ambient.remove(std::ffi::OsStr::new("ENV"));
     ambient.remove(std::ffi::OsStr::new("PYTHONHOME"));
     let mut command = Command::new(native::trusted_node().unwrap());
@@ -180,7 +192,7 @@ import {pathToFileURL} from 'node:url';
 import {execFileSync} from 'node:child_process';
 const {applyLaunchBinding,managedLaunch,managedBashOptions,managedBashCommand,managedBusinessEnvironment}=await import(pathToFileURL(process.argv[1]));
 applyLaunchBinding();
-const code="import json,os,sys; print(json.dumps({'prefix':sys.prefix,'virtual':os.environ['VIRTUAL_ENV'],'conda':os.environ['CONDA_PREFIX'],'name':os.environ['CONDA_DEFAULT_ENV']}))";
+const code="import json,os,sys,snapshot_module; print(json.dumps({'prefix':sys.prefix,'virtual':os.environ['VIRTUAL_ENV'],'conda':os.environ['CONDA_PREFIX'],'name':os.environ['CONDA_DEFAULT_ENV'],'pythonModule':snapshot_module.VALUE,'pythonFile':snapshot_module.__file__,'startup':os.environ['GTEST_PROJECT_STARTUP']}))";
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 const python=JSON.parse(execFileSync(managedLaunch().shell,['--noprofile','--norc','-c',managedBashCommand('python -c '+quote(code),process.cwd())],{env:managedBashOptions({env:{...process.env}},true).env,encoding:'utf8'}));
 const module=execFileSync(process.execPath,['-e',"process.stdout.write(require('from-project'))"],{env:managedBusinessEnvironment(),encoding:'utf8'});
@@ -194,8 +206,132 @@ console.log(JSON.stringify({...python,module}));
     }
     assert_eq!(values["name"], "business-name");
     assert_eq!(values["module"], "private-snapshot", "NODE_PATH must not import today's source files");
+    assert_eq!(values["pythonModule"], "private-snapshot", "PYTHONPATH must not import today's source files");
+    assert_eq!(values["startup"], "private-snapshot", "BASH_ENV must not execute today's source script");
+    assert_eq!(fs::read_to_string(&startup).unwrap(), "export GTEST_PROJECT_STARTUP=source-later\n");
+    assert!(crate::path_identity::same_path(Path::new(values["pythonFile"].as_str().unwrap()), &node.join("python-src/snapshot_module.py")));
     assert!(!source.join("future-tools").exists());
     assert!(!node.join("future-tools").exists());
+}
+
+#[test]
+fn project_package_config_paths_follow_latest_private_bytes_not_live_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source project");
+    fs::create_dir_all(source.join("config")).unwrap();
+    git2::Repository::init(&source).unwrap();
+    let write_config = |root: &Path, value: u32| {
+        fs::write(root.join("config/pip.ini"), format!("[global]\ntimeout = {value}\n")).unwrap();
+        fs::write(root.join("config/npmrc"), format!("fetch-timeout={value}000\n")).unwrap();
+    };
+    write_config(&source, 17);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let config = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap();
+    let mut ambient: BTreeMap<_, _> = std::env::vars_os().collect();
+    // Explicit disposable project files, not a host configuration/HOME import.
+    ambient.retain(|name, _| {
+        let name = name.to_string_lossy().to_ascii_uppercase();
+        !name.starts_with("PIP_") && !name.starts_with("NPM_CONFIG_")
+            && !name.starts_with("LD_") && !name.starts_with("DYLD_")
+            && !matches!(name.as_str(), "BASH_ENV" | "ENV" | "NODE_OPTIONS" | "NODE_PATH" | "PYTHONHOME" | "PYTHONPATH")
+    });
+    ambient.insert("PIP_CONFIG_FILE".into(), source.join("config/pip.ini").into_os_string());
+    ambient.insert("npm_config_userconfig".into(), source.join("config/npmrc").into_os_string());
+    ambient.insert("npm_config_cache".into(), temp.path().join("source-npm-cache").into_os_string());
+    ambient.insert("npm_config_offline".into(), "true".into());
+    ambient.insert("npm_config_update_notifier".into(), "false".into());
+    ambient.insert("PYTHONUTF8".into(), "1".into());
+    ambient.insert("PYTHONIOENCODING".into(), "utf-8".into());
+    let python_command = if cfg!(windows) { "python" } else { "python3" };
+    // `config list` reads pip's effective merged config; `config get` selects
+    // a write-oriented file kind and does not include PIP_CONFIG_FILE values.
+    let business = format!("{python_command} -m pip config list && npm config get fetch-timeout");
+    let execute = |root: &Path, private: bool| -> Vec<String> {
+        let mut command;
+        if private {
+            let launch = config.launch.expanded(root);
+            let serialized = serde_json::to_vec(&launch).unwrap();
+            let binding = temp.path().join("launch.json");
+            fs::write(&binding, &serialized).unwrap();
+            command = Command::new(native::trusted_node().unwrap());
+            command.current_dir(root).args(["--input-type=module", "-e", r#"
+import {pathToFileURL} from 'node:url';
+import {execFileSync} from 'node:child_process';
+const {applyLaunchBinding,managedLaunch,managedBashOptions,managedBashCommand}=await import(pathToFileURL(process.argv[1]));
+applyLaunchBinding();
+process.stdout.write(execFileSync(managedLaunch().shell,['--noprofile','--norc','-c',managedBashCommand(process.argv[2],process.cwd())],{env:managedBashOptions({env:{...process.env}},true).env,encoding:'utf8'}));
+"#]).arg(native::installation_root().join("engine/launch-binding.mjs")).arg(&business)
+                .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", root);
+            clean_command_with_environment(&mut command, &launch, Some(&binding), ambient.clone()).unwrap();
+            assert_eq!(serde_json::to_vec(&launch).unwrap(), serialized, "business config paths are transient, not new L");
+        } else {
+            command = Command::new(&config.launch.shell);
+            command.current_dir(root).env_clear().envs(&ambient)
+                .args(["--noprofile", "--norc", "-c", &business]);
+        }
+        let output = String::from_utf8(controlled_output(command).unwrap()).unwrap();
+        let timeout = output.lines().find_map(|line| line.strip_prefix("global.timeout=")).expect("pip must read the project config");
+        vec![timeout.trim_matches('\'').into(), output.lines().last().unwrap().trim().into()]
+    };
+    assert_eq!(execute(&source, false), ["17", "17000"]);
+    write_config(&source, 91);
+    let a = temp.path().join(".grapher-worktrees/config-paths/A");
+    workspace::prepare(&source, &a, &base, &[]).unwrap();
+    assert_eq!(execute(&a, true), ["17", "17000"], "private commands must not read today's source config");
+    write_config(&a, 23);
+    let latest = workspace::snapshot_node(&a, &source, "A").unwrap();
+    let b = temp.path().join(".grapher-worktrees/config-paths/B");
+    workspace::prepare(&source, &b, &latest, &[]).unwrap();
+    assert_eq!(execute(&b, true), ["23", "23000"], "downstream must read A's latest config");
+    let historical = temp.path().join(".grapher-worktrees/config-paths/history");
+    workspace::prepare(&source, &historical, &base, &[]).unwrap();
+    assert_eq!(execute(&historical, true), ["17", "17000"]);
+    assert_eq!(execute(&source, false), ["91", "91000"]);
+}
+
+#[test]
+fn project_config_and_startup_paths_preserve_external_values_overrides_and_legacy_rules() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    let alias = temp.path().join("source-alias");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&target).unwrap();
+    crate::path_safety::directory_link(&source, &alias);
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    for automatic in [false, true] {
+        launch.unbound_path = automatic.then(|| launch.path.clone());
+        for name in ["BASH_ENV", "ENV", "PIP_CONFIG_FILE", "npm_config_userconfig", "NPM_CONFIG_USERCONFIG"] {
+            let key = if cfg!(windows) { name.to_ascii_lowercase() } else { name.to_string() };
+            for (value, mapped) in [
+                (text(&source.join("startup.sh")), Some(text(&target.join("startup.sh")))),
+                (text(&alias.join("future.sh")), Some(text(&target.join("future.sh")))),
+                (text(&temp.path().join("host-startup.sh")), None),
+                (text(&source.join("missing/../startup.sh")), None),
+                (format!("\"{}\"", text(&source.join("startup.sh"))), None),
+                (if cfg!(windows) { "NUL" } else { "/dev/null" }.into(), None),
+                ("startup.sh".into(), None),
+                ("$HOME/startup.sh".into(), None),
+                (String::new(), None),
+            ] {
+                let mut command = Command::new(&launch.entry);
+                command.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target).env(&key, &value);
+                clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
+                    [(name.into(), "ambient-not-the-override".into())].into_iter().collect()).unwrap();
+                let actual = command.get_envs().find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case(&key))
+                    .unwrap().1.unwrap().to_str().unwrap();
+                let expected = if automatic { mapped.unwrap_or(value) } else { value };
+                assert_eq!(actual.replace('\\', "/"), expected.replace('\\', "/"), "{name}");
+            }
+            let mut removed = Command::new(&launch.entry);
+            removed.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target).env_remove(&key);
+            clean_command_with_environment(&mut removed, &launch, Some(Path::new("binding.json")),
+                [(name.into(), source.join("startup.sh").into_os_string())].into_iter().collect()).unwrap();
+            assert!(!removed.get_envs().any(|(name, value)| name.to_string_lossy().eq_ignore_ascii_case(&key) && value.is_some()));
+        }
+    }
 }
 
 #[test]
@@ -216,12 +352,34 @@ fn native_business_paths_do_not_relax_entry_or_legacy_validation() {
 }
 
 #[test]
+fn recovery_runtime_locations_do_not_add_business_launch_compatibility_conditions() {
+    let mut left = policy().launch;
+    let root = std::env::temp_dir();
+    left.environment = Some(serde_json::from_value(serde_json::json!({
+        "kind":"venv","prefix":"env","abi":"0".repeat(40),"root":"workspace",
+        "runtimeEvidence":{"schema":1,"roots":{"workspace":root.join("entry-a")},
+            "files":[{"location":"external","path":root.join("native-input"),"blob":"0".repeat(40)}]}
+    })).unwrap());
+    let mut right = left.clone();
+    let mut metadata = serde_json::to_value(right.environment.as_ref().unwrap()).unwrap();
+    metadata["runtimeEvidence"]["roots"]["workspace"] = serde_json::json!(root.join("entry-b"));
+    right.environment = Some(serde_json::from_value(metadata).unwrap());
+    assert_ne!(left, right, "immutable L still retains distinct per-entry evidence");
+    assert!(left.same_business_launch(&right));
+    right.environment.as_mut().unwrap().abi = "1".repeat(40);
+    assert!(!left.same_business_launch(&right), "actual ABI/business criteria are unchanged");
+    right = left.clone();
+    right.path.push("different-business-search-path".into());
+    assert!(!left.same_business_launch(&right));
+}
+
+#[test]
 fn ambient_python_home_is_retained_only_without_a_verified_prefix() {
     let mut launch = policy().launch;
     launch.inherit_ambient = true;
     for bound in [false, true] {
         launch.environment = bound.then(|| crate::environment_discovery::Binding {
-            kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+            kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()), runtime_evidence: None,
         });
         let mut command = Command::new(native::trusted_node().unwrap());
         clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
@@ -368,7 +526,7 @@ pub(super) fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
         nodes: names
             .iter()
             .map(|name| Node {
-                name: (*name).into(),
+                id: (*name).into(),
                 task: (*name).into(),
             })
             .collect(),
@@ -619,6 +777,7 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
         prefix: "business-env".into(),
         abi: "0".repeat(40),
         root: None,
+        runtime_evidence: None,
     });
     let custom = store.launch(&previous).unwrap();
     assert!(store
@@ -645,7 +804,7 @@ fn history_scope_checks_compare_snapshot_roots_not_project_exclusions() {
     let bound = |root: &str, prefix: &str| {
         let mut launch = config.launch.clone();
         launch.environment = Some(crate::environment_discovery::Binding {
-            kind: "venv".into(), prefix: prefix.into(), abi: "0".repeat(40), root: Some(root.into()),
+            kind: "venv".into(), prefix: prefix.into(), abi: "0".repeat(40), root: Some(root.into()), runtime_evidence: None,
         });
         launch.owned_scopes = Some(vec![EnvironmentScope { root: root.into(), path: prefix.into() }]);
         store.launch(&launch).unwrap()
@@ -796,7 +955,53 @@ fn node_path_rebinding_preserves_nodes_literal_quote_semantics() {
 }
 
 #[test]
-fn node_path_rebinding_refuses_unrepresentable_destination_components() {
+fn python_path_rebinding_preserves_literal_entries_overrides_and_legacy_rules() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    let external = temp.path().join("external");
+    fs::create_dir(&external).unwrap();
+    fs::write(external.join("external_module.py"), "VALUE = 'external'\n").unwrap();
+    for (root, value) in [(&source, "source"), (&target, "private")] {
+        for (directory, module) in [("modules", "ordinary_module"), ("quoted", "quoted_module"), ("relative", "relative_module")] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join(format!("{module}.py")), format!("VALUE = '{value}'\n")).unwrap();
+        }
+    }
+    let delimiter = if cfg!(windows) { ';' } else { ':' };
+    let original = format!("\"{}\"{delimiter}{}{delimiter}{}{delimiter}relative{delimiter}{delimiter}{}",
+        source.join("quoted").display(), source.join("modules").display(), external.display(), source.join("future").display());
+    let rebased = format!("\"{}\"{delimiter}{}{delimiter}{}{delimiter}relative{delimiter}{delimiter}{}",
+        source.join("quoted").display(), target.join("modules").display(), external.display(), target.join("future").display());
+    let key = if cfg!(windows) { "pYtHoNpAtH" } else { "PYTHONPATH" };
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    for automatic in [false, true] {
+        launch.unbound_path = automatic.then(|| launch.path.clone());
+        let serialized = serde_json::to_vec(&launch).unwrap();
+        let mut command = Command::new(&launch.entry);
+        command.current_dir(&target).args(["-B", "-c",
+            "import json,importlib.util,ordinary_module,external_module,relative_module; print(json.dumps([ordinary_module.VALUE,external_module.VALUE,relative_module.VALUE,importlib.util.find_spec('quoted_module') is None]))"])
+            .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target)
+            .env(key, &original);
+        let ambient = [("PYTHONPATH".into(), "not-the-explicit-value".into())].into_iter().collect();
+        clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")), ambient).unwrap();
+        let effective = command.get_envs().find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case("PYTHONPATH"))
+            .unwrap().1.unwrap().to_str().unwrap();
+        assert_eq!(effective.replace('\\', "/"), (if automatic { &rebased } else { &original }).replace('\\', "/"));
+        let output: serde_json::Value = serde_json::from_slice(&controlled_output(command).unwrap()).unwrap();
+        assert_eq!(output, serde_json::json!([if automatic { "private" } else { "source" }, "external", "private", true]));
+        assert_eq!(serde_json::to_vec(&launch).unwrap(), serialized, "transient values must not enter L");
+    }
+    let mut removed = Command::new(&launch.entry);
+    removed.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target).env_remove(key);
+    clean_command_with_environment(&mut removed, &launch, Some(Path::new("binding.json")),
+        [("PYTHONPATH".into(), original.into())].into_iter().collect()).unwrap();
+    assert!(!removed.get_envs().any(|(name, value)| name.to_string_lossy().eq_ignore_ascii_case("PYTHONPATH") && value.is_some()));
+}
+
+#[test]
+fn module_path_rebinding_refuses_unrepresentable_destination_components() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     fs::create_dir_all(source.join("modules")).unwrap();
@@ -805,11 +1010,13 @@ fn node_path_rebinding_refuses_unrepresentable_destination_components() {
     let mut launch = policy().launch;
     launch.inherit_ambient = true;
     launch.unbound_path = Some(launch.path.clone());
-    let mut command = Command::new(native::trusted_node().unwrap());
-    command.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target);
-    let error = clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
-        [("NODE_PATH".into(), source.join("modules").into_os_string())].into_iter().collect()).unwrap_err();
-    assert!(error.contains("NODE_PATH"), "{error}");
+    for key in ["NODE_PATH", "PYTHONPATH"] {
+        let mut command = Command::new(native::trusted_node().unwrap());
+        command.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target);
+        let error = clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
+            [(key.into(), source.join("modules").into_os_string())].into_iter().collect()).unwrap_err();
+        assert!(error.contains(key), "{error}");
+    }
 }
 
 #[cfg(feature = "fixture")]

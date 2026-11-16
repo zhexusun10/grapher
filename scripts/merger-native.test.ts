@@ -55,7 +55,7 @@ test('production Planner writes source directly; legacy private Runs retain node
       const label = [...cases.keys()].find(key => prompt.includes(key));
       assert.ok(label, `Missing task marker: ${prompt}`);
       const scenario = cases.get(label)!;
-      const planner = body.tools?.some((tool: any) => tool.function.name === 'node');
+      const planner = body.tools?.some((tool: any) => tool.function.name === 'edit_graph');
       const userTurn = messages[messages.findLastIndex((message: any) => message.role === 'user')];
       const userInstruction = typeof userTurn.content === 'string' ? userTurn.content
         : userTurn.content.map((part: any) => part.text ?? '').join('');
@@ -83,11 +83,11 @@ test('production Planner writes source directly; legacy private Runs retain node
         } else if (turnResults.length === 1) {
           assert.equal((await readFile(join(scenario.repository, 'shared.txt'), 'utf8')).trim(), expected,
             'Bash writes must already be in the source before planning finishes');
-          if (failedRevision) tool = { name: 'node', arguments: { nodes: [{ name: 'verify', delete: true }] } };
-          else if (!scenario.fail) tool = { name: 'node', arguments: { nodes: [{ name: revision ? 'late' : 'verify',
+          if (failedRevision) tool = { name: 'edit_graph', arguments: { nodes: [{ id: 'verify', delete: true }] } };
+          else if (!scenario.fail) tool = { name: 'edit_graph', arguments: { nodes: [{ id: revision ? 'late' : 'verify',
             task: `${label} ${revision ? 'VERIFY_PLANNER_REVISION' : 'VERIFY_PLANNER_SOURCE'}` }] } };
         } else if (revision && turnResults.length === 2) {
-          tool = { name: 'edge', arguments: { edges: [{ from: 'verify', to: 'late' }] } };
+          tool = { name: 'edit_graph', arguments: { edges: [{ from: 'verify', to: 'late' }] } };
         }
       } else if (merger) {
         const system = messages.filter((message: any) => message.role === 'system')
@@ -278,8 +278,8 @@ test('production Planner writes source directly; legacy private Runs retain node
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), 'planner change');
         assert.equal(initial.planning.roles.merger, undefined, 'source-native planning needs no publication Merger');
       } else {
-        const nodes = [{ name: 'left', task: `${label} WRITE_LEFT` }, { name: 'right', task: `${label} WRITE_RIGHT` }];
-        if (kind === 'node') nodes.push({ name: 'join', task: `${label} VERIFY_RESOLUTION` });
+        const nodes = [{ id: 'left', task: `${label} WRITE_LEFT` }, { id: 'right', task: `${label} WRITE_RIGHT` }];
+        if (kind === 'node') nodes.push({ id: 'join', task: `${label} VERIFY_RESOLUTION` });
         // Keep historical node-Merger coverage: new adaptive batches deliver
         // private results before downstream dispatch rather than at its fan-in.
         initial = await legacyGraph(api, data, { config: config(repository), graph: { originalGoal: label, nodes,

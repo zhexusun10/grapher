@@ -19,36 +19,16 @@ fn count_log_deserialization<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Node {
-    pub name: String,
+    pub id: String,
     pub task: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Edge {
     pub from: String,
     pub to: String,
     pub feedback: bool,
-}
-
-impl<'de> Deserialize<'de> for Edge {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct EdgeInput {
-            from: String,
-            to: String,
-            feedback: bool,
-            // Read historical graphs/events without retaining or re-emitting relation.
-            #[serde(default, rename = "relation")]
-            _legacy_relation: Option<serde::de::IgnoredAny>,
-        }
-        let input = EdgeInput::deserialize(deserializer)?;
-        Ok(Self {
-            from: input.from,
-            to: input.to,
-            feedback: input.feedback,
-        })
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -66,11 +46,9 @@ pub struct Route {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Plan {
     pub execution_batches: Vec<Vec<String>>,
-    // Older checkpoints and snapshots used `roots`; serialize only rootNodes.
-    #[serde(alias = "roots")]
     pub root_nodes: Vec<String>,
     pub terminals: Vec<String>,
     pub warnings: Vec<String>,
@@ -2566,11 +2544,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning = planning.clone();
             // The committed topology replaces the provisional draft.
             state.preview_graph = None;
-            state.plan = crate::compiler::compile_legacy(graph, true).ok();
+            state.plan = crate::compiler::compile(graph, true).ok();
             state.nodes = graph
                 .nodes
                 .iter()
-                .map(|node| (node.name.clone(), NodeState::default()))
+                .map(|node| (node.id.clone(), NodeState::default()))
                 .collect();
             state.phase = "awaiting_approval".into();
         }
@@ -2642,12 +2620,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             // members, new peers and prerequisites against the revised graph.
             state.graph = graph.clone();
             state.preview_graph = None;
-            state.plan = crate::compiler::compile_legacy(graph, true).ok();
+            state.plan = crate::compiler::compile(graph, true).ok();
             state
                 .nodes
-                .retain(|name, _| graph.nodes.iter().any(|node| node.name == *name));
+                .retain(|name, _| graph.nodes.iter().any(|node| node.id == *name));
             for node in &graph.nodes {
-                state.nodes.entry(node.name.clone()).or_default();
+                state.nodes.entry(node.id.clone()).or_default();
             }
             for name in invalidated {
                 // A reworked node starts a fresh session: its prior executions stay
@@ -2699,21 +2677,21 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
         }
         EventKind::NodeTaskUpdated { node, task } => {
-            if let Some(target) = state.graph.nodes.iter_mut().find(|item| item.name == *node) {
+            if let Some(target) = state.graph.nodes.iter_mut().find(|item| item.id == *node) {
                 target.task = task.clone();
             }
-            state.plan = crate::compiler::compile_legacy(&state.graph, true).ok();
+            state.plan = crate::compiler::compile(&state.graph, true).ok();
         }
         EventKind::DraftEdited { graph, config } => {
             state.graph = graph.clone();
             state.preview_graph = None;
             state.config = Some(config.clone());
             state.plan_type = Some("graph".into());
-            state.plan = crate::compiler::compile_legacy(graph, true).ok();
+            state.plan = crate::compiler::compile(graph, true).ok();
             state.nodes = graph
                 .nodes
                 .iter()
-                .map(|node| (node.name.clone(), NodeState::default()))
+                .map(|node| (node.id.clone(), NodeState::default()))
                 .collect();
             state.phase = "awaiting_approval".into();
             // Planning identity and conversation history stay with this Run.
@@ -3479,7 +3457,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     .graph
                     .nodes
                     .iter_mut()
-                    .find(|node| node.name == *target)
+                    .find(|node| node.id == *target)
                 {
                     node.task = instruction.clone();
                 }

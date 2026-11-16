@@ -54,7 +54,13 @@ approval. The execution contract is backend-owned, not a user environment choice
   task-text parser, extra binding message or maintenance Agent is involved.
 - After drain, Runtime tries to identify a unique private candidate's ownership,
   native metadata, actual interpreter prefix and ABI/library-byte evidence, then
-  versions L and captures E separately. The current workspace policy treats
+  versions L and captures E separately. Actual use of a unique verified private
+  prefix can replace the previous binding, including W↔S switches in the same
+  physical slot; both roots retain their ownership and captured bytes. A private
+  switch is not external use merely because it differs from the old binding.
+  During a bound turn, creating a prefix through a host interpreter still
+  records external use; creation does not prove that the new prefix was used
+  instead of the host. The current workspace policy treats
   project Python/version declarations as business inputs, not startup/binding
   gates or proof of package compatibility. `.env`, `environment.yml` and
   temporary activation/exports alone do not bind anything. Multiple candidates,
@@ -96,25 +102,39 @@ are rebound to `{workspace}` instead of discarded. Relative entries retain nativ
 cwd semantics; Windows Bash represents empty entries as `.` so MSYS conversion
 does not drop the cwd search. Windows PATH quoting is preserved: a directory
 containing `;` remains one native entry, including in bootstrap-tool evidence.
+Activation-hook capture transports Bash's PATH separately from MSYS's lossy
+native-environment conversion. Existing components retain their native spelling;
+new absolute components are converted together, while relative/empty entries
+keep cwd semantics. Entries removed by a hook are not silently reintroduced.
 Bash conversion batches separate path arguments in one native converter process,
 not a lossy split of a joined path list. Absolute paths containing `..` are not guessed or
 rewritten. The recorded `unboundPath` survives environment switches: activation
 prepends its verified bins, while unbinding restores the original business path
 rather than deleting all project paths. Older records keep their recorded rules.
 
-For these launches, project-root `NODE_PATH` entries and absolute activation
-markers (`VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`) are also rebound
-transiently. `NODE_PATH` follows Node's literal delimiter grammar, not Windows
-PATH quoting: quote characters remain literal. A rebased directory containing
-Node's list delimiter is refused rather than split into unintended search roots.
-External paths and Conda names stay unchanged. Arbitrary variable
+For these launches, project-root `NODE_PATH` / `PYTHONPATH` entries and absolute
+activation markers (`VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`) are also
+rebound transiently. Module paths use their literal native-delimiter grammar,
+not Windows PATH quoting: quote characters remain literal. A rebased directory
+containing the module list delimiter is refused rather than split into unintended
+search roots. Absolute project-owned `BASH_ENV` / `ENV` startup-file references
+also follow the selected workspace's recorded files, not today's source files.
+Existing project-owned absolute `PIP_CONFIG_FILE` and `npm_config_userconfig`
+references follow those same recorded project bytes, including a downstream
+node's latest config edits; npm's case-insensitive variable names are respected.
+These are existing tool variables, not Grapher declarations or a host-config
+import. File contents (including paths written inside config files) are not
+rewritten. Effective overrides/removals are respected; external paths, relative
+paths, startup expressions and Conda names stay unchanged. Arbitrary variable
 strings, `NODE_OPTIONS` contents and script bytes are not rewritten; this is not
 environment relocation. No host HOME/configuration tree is copied as a fallback.
 A PATH shim may still depend on missing HOME defaults: the offline project
 [baseline and explicit setup guidance](../development/environment-baselines.md#private-home-discovery-is-not-mutable-state)
 reproduce this with real Rustup/Cargo. Tool discovery/configuration, per-slot
 writable state, cache and credential helpers are distinct inputs; there is no
-generic automatic host-config import or cross-layout rebuild API.
+generic automatic host-config import. Rebuilding an existing fixed-layout private
+environment at another physical path is an explicit non-goal under the current
+workspace lifecycle.
 
 An unbound automatic entry is an absolute Bash and need not be first in PATH.
 Bound environments, activation hooks and legacy explicit launches still require
@@ -122,7 +142,9 @@ the default entry directory first as a fully absolute path. A hook cannot replac
 it with an empty/relative PATH merely because the current cwd matches that
 directory. Activation subprocesses restore the selected workspace after
 `BASH_ENV`, before path conversion and hook execution, while retaining startup
-variables/functions; startup side effects are not undone. Trusted engine Node and bootstrap Git are
+variables/functions; startup side effects are not undone. When already in the
+same physical directory (including a root alias), the adapter skips `cd` so it
+does not overwrite `OLDPWD`, change `cd -`, or fail on a readonly `OLDPWD`. Trusted engine Node and bootstrap Git are
 resolved independently outside the business project, before that binding. Pi PATH processing and Windows MSYS
 startup cannot add host bins; managed Bash resets PATH inside Bash. Hooks run
 before extension/MCP factories and cannot change Runtime/Pi identity, Node
@@ -136,6 +158,73 @@ Automatic policies record the inheritance rule, not an inventory of secret value
 legacy explicit policies authorize inherited values by name. No secret values belong in literal policy variables, hooks, arguments or
 managed trees. Arbitrary business files are not automatically scrubbed for
 secrets. Existing [native permission limits](filesystem-isolation.md) apply.
+
+## Zero-configuration source HOME discovery
+
+**Status: not implemented.** Private HOME isolation and later inheritance of
+already private HOME bytes do not establish source-default tool/config discovery.
+A project working in its source context can still fail in its first private slot
+when an unchanged tool looks for defaults through HOME. No project-only file-query
+interface is accepted as satisfying this contract.
+
+The required business contract is:
+
+- The original project, command and setup scripts run unchanged. No Grapher query
+  API, tool-path manifest, environment selector or added model instruction.
+- Runtime supplies the first private workspace's necessary source discovery
+  context without running the business workload on the host as a compatibility
+  check. Ordinary private writes/cache remain independent and source is unchanged.
+- Later executions use Runtime's selected workspace's **latest** state, not newly
+  imported host defaults. Parent edits, deletions, independent branches and failed
+  retry state retain their existing semantics. No parallel inheritance selector.
+- Source metadata/credentials are not bulk-copied or automatically persisted.
+  Referenced host input changes must not silently override recorded private state.
+  Source/sibling/data permission denials still apply through any redirected view.
+- No silent tool/OS/namespace fallback, downloads, global changes, writable
+  hardlinks, arbitrary script/binary rewriting or new publication gate/channel.
+
+An arbitrary tool can use the same HOME both to read implicit defaults and to
+write state. PATH/variable forwarding alone cannot generically split those file
+operations. A general native private read/write view, or another demonstrably
+equivalent lower-level mechanism, needs design and native acceptance before this
+can be claimed. Current Linux bubblewrap and macOS Seatbelt permissions do not
+implement that HOME view; Windows currently has no such virtualization layer.
+No driver, mount, host registration or filesystem-semantic change is implicitly
+authorized by this requirement.
+
+A Runtime-owned implementation would need one logical HOME view per physical
+workspace: an automatically selected read-only source/config layer beneath the
+selected workspace's existing private state, with writes/deletions represented
+only in that workspace's private upper layer. The same business path (for example
+`$HOME/.config/tool/settings`) must work without shell hooks or API calls. A later
+node's selected parent bytes must win over the source layer; copy-up and
+whiteouts must remain branch-local, survive drain/retry and seal through the
+existing E ownership boundary. Runtime does not choose a different parent, and
+this view cannot become a project-code/publication channel.
+
+This is a design target, **not a claim that a specific union mount is sufficient**.
+A candidate native provider must also account for lookup/enumeration, links,
+renames, concurrent host changes and the source files actually observed. If a
+referenced host input drifts, silently substituting new bytes is not acceptable;
+full bytes/config contents must not be persisted just to pin the lower layer.
+Directory listing and file-reference evidence, cache carve-outs, lifecycle/drain,
+cleanup and all native permission boundaries need explicit proofs. The mechanism
+must be available without downloading/installing a driver, changing the host or
+falling back to an unisolated launch. Linux, macOS and Windows each need genuine
+native acceptance for source reads, private writes, parent precedence, branch
+independence and cleanup before this can ship. No source-HOME mount, read-through
+view, filesystem provider or new admission requirement is currently implemented.
+
+No admission metadata, business-shell query API, path manifest or project helper is
+shipped. E/L and HOME inheritance are not modified to simulate source discovery.
+The opt-in `zero_configuration_home_source_and_parent_without_setup` acceptance
+case uses one unchanged ordinary HOME-reading/writing workload in source, first
+private execution and two independent children. It requires source defaults,
+latest-parent precedence, independent writes and no bulk sensitive-file capture.
+It currently fails at the first private execution; its ignored/default status is
+an explicit implementation gap, never passing coverage. Native platform boundary
+acceptance remains separate. [Explicit baseline setup](../development/environment-baselines.md#private-home-discovery-is-not-mutable-state)
+is still useful cost/tool evidence, not a replacement for this contract.
 
 ## Current state, historical evidence and ownership
 
@@ -154,7 +243,17 @@ D + codeRef + environmentRef + launchRef + resourceRefs
 Immutable E snapshots and L records are retained under
 `<data>/environments/<run>/`. Completion advances lineage current aliases in the
 same SQLite transaction as completion/queued feedback; historical executions
-stay unchanged. E/L changes count even when the Git head is unchanged.
+stay unchanged. E/L changes count even when the Git head is unchanged. Managed capture fully
+validates the parent bytes and collects current bytes/metadata before publishing
+a new E manifest; unchanged contents and root/scope/cache coverage reuse the old
+E without an orphan version. Each generation still appends its own execution
+records. A per-operation checked set reads each distinct immutable stored blob
+once, while every live file and materialized destination still receives full
+byte verification. No proof survives into another operation; no size/mtime
+cache or historical-record rewrite is involved. Offline dependencies and local
+patches remain actual captured bytes, not manifest-based reconstruction. See the
+[sealing cost procedure](../development/environment-baselines.md#immutable-dependency-sealing-optimization)
+for the scope and measurement limits.
 
 Environment manifests and persisted E/L records remain readable for replay and
 recovery. Missing or damaged records fail when that evidence is explicitly needed;
@@ -212,6 +311,130 @@ follow the [Git workspace contract](workspace-snapshots-and-feedback.md#cleanup-
 
 Environment evidence participates in [feedback generation/drain checks](runtime.md#bounded-feedback) and [pinned workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Failed and pending-feedback views are not opportunistically reclaimed. Managed layouts and snapshots remain until explicit conversation deletion; bounded long-term retention/reference GC is not implemented.
 
+### Native runtime inputs during recovery
+
+New verified bindings also store optional `runtimeEvidence.schema = 3` in L.
+Schema 2 retains its external-target selector contract, schema 1 its file-only
+contract, and absent evidence the old ABI-only contract. None is retrofitted with
+newly inferred selector relationships.
+This reuses the existing interpreter/ABI probe's bounded native-file inventory;
+it does not import a host environment or enumerate HOME/configuration/secrets.
+The probe hashes each observed file's same byte stream for the existing SHA-256
+ABI payload and a Git blob identity. Its framed extra output is removed before
+computing `Binding.abi`, preserving the exact legacy ABI payload/startup output.
+L's immutable content hash binds the new evidence alongside that ABI.
+
+The evidence records canonical W/S locations and root-qualified native files.
+Recorded locations are not resolved through today's filesystem: redirecting an
+old root must not authorize a different root with the same name/content. Trusted
+aliases that still resolve to the recorded location remain valid; missing W/S
+can be reconstructed only at that location. Another managed slot's native files
+inside the backend-selected workspace bucket cannot be labeled host toolchain
+inputs or used to bind the current environment. The bucket is derived from the
+physical workspace, so a trusted W alias cannot bypass this ownership boundary.
+
+| Native file evidence | Recovery behavior |
+| --- | --- |
+| W/S file covered by the selected E frame | Require that root's recorded regular-file entry and matching fully verified blob. A damaged/missing live interpreter is not used to supply evidence or run preflight; the captured bytes may restore it. |
+| Ordinary project W file outside E scopes | Keep the original `codeRef` channel. Schema-3 recovery workers with the exact target codeRef verify its regular-file tree entry and full Git blob bytes before code reconstruction/reset. After code preparation, recheck real paths and bytes before E writes. Do not copy it through E or use current files to repair missing code history. |
+| Explicitly excluded private cache | Verification-only live input: require its current real file/path and bytes to match. Missing/changed cache inputs fail; no rebuild/download or cache restoration is implied. |
+| External native file | Verification-only observed input: require its canonical path, regular-file type and full bytes to match. Schemas 2/3 also check recorded external selector paths against that same target before recovery writes (schema 3 projects any owned portions through E). Do not copy, activate, repair or grant access to its host directory. |
+| State root/path without captured coverage, or absence/link-only entry inside an E scope | Refuse; live or same-named other-root files cannot fill missing E history. Project Git ownership is not E byte evidence. |
+| Schema 2 `runtimeEvidence` | Preserve its original external-target selectors and startup rules. It does not contain selectors whose final targets return to W/S; no new return-path evidence is inferred for it. |
+| Schema 1 `runtimeEvidence` | Preserve its file-only preflight and startup checks, without adding selector admission rules, changing its serialization or inventing missing original paths. Its originally aliased external inputs can still evade early detection if the old canonical target survives. |
+| Legacy L without `runtimeEvidence` | Keep the recorded baseline/byte checks and original native ABI startup contract. Startup does not construct new evidence and apply its admission rules before discarding it. New discovery/adoption still requires the new ownership checks; legacy startup is not permission to create a new shared binding. No new native-file preflight coverage is claimed and no historical evidence is synthesized. |
+
+Native workers check E-owned/external/cache evidence before historical code reset
+or managed root materialization. Missing-W result/descriptor entry also checks it
+before reconstructing project code, so a known bad external input cannot first
+reset S or create W. Schema-3 workers also check observed project native bytes
+against the **codeRef about to be installed**, including a composed descriptor's
+new head rather than just the entry's previous codeRef. This reads existing graph
+Git trees/blobs, never current source files; no checkout, refs, index, filters or
+object repair are involved. SHA-1 and SHA-256 Git storage both retain the native
+probe's SHA-1 blob identity. Exact Git names take precedence; Windows alias
+fallback uses native ordinal case comparison and requires one match, rather than
+Unicode lowercase equivalence. Missing/non-file entries, ambiguous fallback
+aliases and missing/corrupt objects fail early. macOS nonexact Git spelling is
+explicitly deferred to the existing prepared-file check: Git alone cannot prove
+the destination volume's case/Unicode equivalence, and early preflight must not
+introduce a refusal for that uncertainty. This is a coverage limit, not successful
+early byte verification. Only referenced tree levels and observed blobs are read.
+Blob bodies are streamed from Git through a fixed 64 KiB input buffer and hashed
+incrementally, including the original Git blob header. The incremental hasher
+retains libgit2's collision-detection failure semantics; ordinary SHA-1 output
+alone is insufficient. The reader verifies the
+response object/type/length, terminator, EOF, full content hash and successful
+Git exit; truncated/extra output and missing/corrupt objects cannot pass. Stderr
+is continuously drained with only a 16 KiB prefix retained. The read-only utility
+is registered under the current execution/result owner, so cancellation interrupts
+blocked pipe reads without stopping another owner. It keeps host Git's existing
+resource-limit semantics. Child waiting runs concurrently with output verification;
+direct exit or failure terminates any remaining pipe holders in that invocation's
+process boundary. No temporary blob copy or object-store write is needed.
+This bounds backend blob buffering, not Git's own pack/delta memory, tree-listing
+memory or whole-process-tree peak usage. Schemas 1/2 keep their prior staged rules.
+
+Project selector traversal and supplemental view metadata still follow codeRef
+preparation and the prepared-path check; this is not complete pre-code native
+verification. Known bad prepared-code inputs fail before E writes; existing code
+restoration is not rolled back. Actor/reference queries remain metadata-only. After materialization, actual
+interpreter/prefix/ABI/library verification still gates startup as before; file
+proof alone is not a compatibility assertion. Recovery-only evidence locations
+are excluded from the existing business-launch equivalence comparison, while
+ABI, entry/PATH/hooks/variables and managed prefix-byte criteria remain. They add
+no source/host run validation, environment agreement condition or publication gate.
+
+Schema 2 captures the probe's original native-file references before resolving
+away their selectors. For files whose canonical targets are external, observation
+follows links out of owned W/S prefixes and records the external continuation
+and its observed canonical target. Early preflight checks that relationship
+without executing or reading a recoverable live prefix. Thus a real venv's
+external Python alias may remain valid, but retargeting it cannot pass merely
+because the old installation survives or a replacement has equal bytes. An
+intermediate alias change that still selects the same target remains valid;
+link spelling/topology itself is not frozen. A target already redirected between
+the probe and evidence construction is rejected, not reinterpreted as new proof.
+
+Schema 3 additionally retains the original references for **all** observed native
+files, including external aliases returning to W/S. Preflight projects pathname
+resolution without creating anything: E-owned directories, file types and links
+come from the selected immutable manifest; external links and excluded caches
+remain live inputs. Native target blobs are still fully verified independently.
+This permits dangling external aliases to missing-but-restorable W/S files while
+rejecting redirected targets, cross-root substitutions, missing recorded entries,
+non-directory traversal and link cycles. Missing root scaffolds do not require a
+live interpreter. If E stores an internal link directly to its root-relative
+target, preflight uses that restored link, not an obsolete external detour that
+materialization removes. Win32 dot-segment normalization and POSIX link/parent
+traversal retain their respective native semantics.
+
+Path **traversal** crossing ordinary project code is deferred until codeRef
+preparation, then rechecked before E writes; current/partial W cannot supply that
+historical path proof early. The native target's recorded Git blob bytes can be
+checked beforehand as described above. Intermediate project links remain staged
+even if the final native file is in E or external. Schema 3 separately retains the earlier external
+continuations, so project deferral cannot hide already-observed bad external
+inputs. It adds no alternative project-code delivery channel or filesystem
+transaction; prepared-code changes are not rolled back on a later failure.
+
+Each original-reference/external-continuation inventory is bounded to 128, and
+path resolution to 64 traversal passes. They are recovery-only evidence, not
+additional business-launch agreement criteria; real startup still verifies the
+original ABI and native-file inventory. Unobserved tool-manager configuration,
+loader search decisions, unsupported filesystem redirections and transitive
+dependencies remain outside this bounded pathname proof.
+
+Coverage is only the interpreter and explicitly observed native files from the
+existing adapter, not all transitive OS libraries, arbitrary application imports,
+services, credentials or every inactive environment's startup dependencies.
+Inactive/unbound prefixes can have restorable E bytes without a runnable native
+binding. Old L/E JSON, checksums, references and execution results are not
+rewritten. This preflight is not a filesystem transaction or protection against
+concurrent host toolchain changes; later I/O/startup failures remain failures,
+not successful partial recovery. Full host-state rollback and arbitrary venv/
+Conda relocation are still outside this contract.
+
 ## Branches, metadata and storage
 
 Private Planner switching rebinds the process cwd and the backend-provided
@@ -237,9 +460,42 @@ Runtime may carry a non-owning ambient hint as
 hints are preserved, sorted and deduplicated; no hint is authoritative and
 conflicting hints do not block the node. The downstream Node may ignore, verify, activate or replace a hint through Bash; it is not Runtime activation or authorization.
 
+### Unbound private HOME branches
+
+A fresh slot can inherit a parent's **already private HOME bytes** without
+adopting an interpreter. This applies only to the automatic unbound launch,
+with no active binding, hook, or retained environment-prefix ownership, and a
+root-qualified E containing only S HOME files/internal HOME links (plus empty
+default-scope directories). The frozen launch must still match; older single-root
+records, external links, W frames and files elsewhere in S do not establish this
+capability. Runtime does not scan/copy the host HOME or read the parent's live tree.
+
+Selection records `unbound-home-fork` and retains the selected immutable E;
+non-owning hints are combined in L as usual. The native worker validates all
+stored bytes; only an otherwise empty managed target receives independent
+materialization. A populated target instead keeps its live state and remains
+runnable unbound, recording `unbound-home-target-preserved` rather than claiming
+parent-byte inheritance. Input byte validation is still required; this cannot
+repair or bypass missing history. Existing target caches are retained; parent
+cache bytes were excluded from E. Links within HOME are rebased to the child's
+own HOME. A failed retry keeps that child's partial state. Explicit historical
+restoration keeps its prior rollback semantics. Neither operation is governed
+by a diagnostic `inheritance.reason` string from an earlier generation. Each
+child seals its own latest state; historical references/source delivery stay unchanged.
+
+At a fresh-slot fan-in, equal E refs or (when the frozen policy permits) a single
+descendant of every input can supply HOME bytes. Only that selected frame must
+be forkable; older frames need not be, since their bytes are not copied. Equal
+E refs cannot order incompatible launches. Divergent independent states are not
+directory-merged or selected by input ordering; they retain the existing unbound
+fallback. A slot with current state is never reset by this path. This is byte inheritance, **not**
+venv/Conda relocation, package reconciliation or a guarantee that absolute paths
+embedded inside HOME files remain usable. Unsupported inputs are not reported as
+successful HOME inheritance. No environment-selection UI or declaration is added.
+
 At fan-in, Runtime selects a provable local input if one exists; other parents'
 E/L are provenance, not constraints on the downstream task. Otherwise the current
-workspace starts unbound. Runtime never cleans or resets business environment
+workspace starts unbound, with the narrow HOME inheritance above when proven. Runtime never cleans or resets business environment
 paths. All input manifests and stored bytes are still validated before preparation,
 including environments not selected for reuse. Known custom prefixes remain
 excluded from copying and Git collection. Root-qualified ownership in L is
@@ -259,6 +515,18 @@ environment can be reconstructed or relocated.
 Ordinary business Bash retains its existing exploration/creation behavior and
 permissions. Best-effort tool observation preserves per-command exports rather
 than resetting HOME or package-manager configuration to the initial launch.
+Relative Conda prefix arguments (including `--prefix env`) resolve from that
+invocation's actual cwd, never from S or a same-named scope under another root;
+name-based selection is not reinterpreted as a path. Conda `run` selectors end
+before the child executable, with or without `--`; application `--prefix` /
+`--name` options cannot select a managed environment. Python module observation
+follows the interpreter entrypoint, including compact short options: `-m venv`
+inside script, `-c`, stdin or another module's arguments is not creation evidence,
+and application `-m pip` arguments do not trigger package policy. Option values
+and help/version requests are not environment actions. Unrecognized interpreter
+options still run unchanged but cannot supply module-based binding evidence.
+Interpreter provenance keeps the lexical entry path: a private venv symlink does
+not become an external-use hint merely because its target is a host Python binary.
 
 Copying project bytes is not venv relocation. New native observer contexts also
 record the backend-bound source root. If an observed environment tool resolves
@@ -280,7 +548,15 @@ bits. An unreadable or unresolvable link (for example a Windows reparse point
 whose target no longer resolves, such as Chrome's `INetCache\Content.IE5`) is
 skipped with a log instead of failing the whole snapshot: it has no content to
 inherit, the live entry is left untouched, and the rest of the scope still
-snapshots. A cache may be a top-level path or a subtree carved out of a scope:
+snapshots. Recovery inventories these omitted entries separately from byte
+evidence. If a recorded destination would traverse/replace one, or a recorded
+file/link would replace a directory containing an omitted entry or live cache,
+all-root preflight refuses before either root changes. The diagnostic names the
+obstruction; history is not repaired and the entry is not silently removed.
+Unrelated omitted links/caches do not block restoration of recorded siblings.
+Legacy predecessor paths also cannot authorize deleting or traversing a skipped
+live link. This is obstruction handling, not recovery of the omitted target.
+A cache may be a top-level path or a subtree carved out of a scope:
 anything at or below a cache path is excluded from the snapshot and left
 untouched in the live view. The automatic policy excludes the machine-local
 Windows/browser caches under S's redirected `.agent-home` (for example
@@ -384,9 +660,15 @@ Serial/source Planner launches retain their source-native environment contract; 
 - Recovery outside recorded W/S scope coverage, arbitrary external-root rollback
   and complete host-state restoration.
 - Complete automatic package/toolchain and resource/device policy synthesis;
-  transparent cross-slot environment rebuilding and arbitrary multi-environment
-  execution; new fan-in uses local reuse/unbound selection, not a package solver.
-- Namespace-backed fixed logical paths / transparent cross-slot migration.
+  arbitrary multi-environment execution; new fan-in uses local reuse/unbound
+  selection, not a package solver.
+- **Non-goal:** moving an existing private workspace, rebasing its W/S roots, or
+  rebuilding its fixed-layout environment at another physical path. A private
+  workspace stays at its allocated location; same-location E recovery remains
+  supported. Source-checkout relocation belongs to its external owner; the source
+  lifecycle may remove its records, and Runtime does not migrate them.
+- Namespace-backed fixed logical paths / transparent cross-slot migration are
+  not implemented and are not prerequisites for the current fixed-layout lifecycle.
 - Shared working layers, system snapshots and extended snapshot metadata.
 - Run/host-wide and Linux/macOS aggregate quotas, disk quotas and bounded GC.
 - Native Linux/macOS acceptance and actual reflink/APFS/block-clone outcomes.

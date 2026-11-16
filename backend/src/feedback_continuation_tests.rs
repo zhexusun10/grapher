@@ -9,7 +9,7 @@ fn configured(shared: bool) -> (TempDir, PathBuf, Runtime) {
         nodes: ["owner", "review", "related", "later", "unrelated"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: format!("ORIGINAL {name}"),
             })
             .collect(),
@@ -390,7 +390,7 @@ fn feedback_continuation_keeps_queued_human_messages_even_after_wording_was_boun
         .graph
         .nodes
         .iter()
-        .filter(|node| node.name == "review")
+        .filter(|node| node.id == "review")
         .cloned()
         .collect::<Vec<_>>();
     runtime.prepare_feedback_continuations(&nodes).unwrap();

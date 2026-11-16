@@ -90,7 +90,7 @@ fn batch_regression_unrelated_revision_preserves_undelivered_members_across_rest
         }
         if manual {
             runtime.add_manual_node(ManualNodeRequest {
-                node: Node { name: "z".into(), task: "z".into() }, from: None, to: None,
+                node: Node { id: "z".into(), task: "z".into() }, from: None, to: None,
                 feedback: false, confirmed_completed: vec![],
             }).unwrap();
         } else {

@@ -60,7 +60,7 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const running = { ...empty, runId: "handoff-run", config, planType: "graph", phase: "running", approved: true, planningId: "old-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: "done-execution", node: "worker", status: "completed", revision: 1, attempt: 1,
       startedAt: 1, completedAt: 2, sessionId: "worker-session", worktree: "/mock/handoff-worker",
@@ -137,7 +137,7 @@ async function openPagedPlanner({ graphRunning = true, stalled = false } = {}) {
   const planning = { planningId: "fill-plan", status: "success", createdAt: 1, runId: "fill-run", repository: config.repository, roles: { planner: {} } };
   const snapshot = { runId: "fill-run", config, planType: "graph", phase: graphRunning ? "running" : "completed",
     approved: true, paused: false, base: "", feedbackCounts: {}, planningId: planning.planningId, planning,
-    graph: { originalGoal: "Planner fill regression", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Planner fill regression", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: graphRunning ? "running" : "completed", revision: 1, instruction: "", error: null } },
     plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
     executions: [{ id: "worker-execution", node: "worker", status: graphRunning ? "running" : "completed", revision: 1,
@@ -247,7 +247,7 @@ test("empty failed Planner composer resumes its own turn without adding a user m
     planningId: summary.planningId, planning: summary, graph: { originalGoal: "Original goal", nodes: [], edges: [] },
     nodes: {}, plan: null, executions: [], events: [{ type: "planning_failed", sequence: 1, timestamp: 1, planning: summary }], base: "", feedbackCounts: {} };
   const complete = { ...failed, phase: "awaiting_approval", planningId: "continued-plan", planning: { ...summary, planningId: "continued-plan", status: "success", error: null },
-    graph: { originalGoal: "Original goal", nodes: [{ name: "restored", task: "task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "restored", task: "task" }], edges: [] },
     nodes: { restored: { status: "waiting", revision: 0, instruction: "", error: null } } };
   let body;
   onPlanStream = (request, res) => {
@@ -303,7 +303,7 @@ test("post-task review output starts after a divider instead of continuing the p
   const completed = { runId: "review-divider-run", config, planType: "graph", phase: "completed", approved: true,
     paused: false, base: "", feedbackCounts: {}, plan: null, executions: [],
     planningId: "plan-review", planning: review,
-    graph: { originalGoal: "Review this run", nodes: [{ name: "worker", task: "Do the work" }], edges: [] },
+    graph: { originalGoal: "Review this run", nodes: [{ id: "worker", task: "Do the work" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 0, instruction: "", error: null } },
     events: [
       { type: "created", sequence: 1, planning_id: "plan-initial", timestamp: 1, planning: initial },
@@ -398,7 +398,7 @@ test("a steer whose durable window starts at that turn stays visible after the r
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const planned = { ...empty, runId: "steer-window-run", config, planType: "graph", phase: "running", approved: true, planningId: "new-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, planning_id: "new-plan", timestamp: 1,
       planning: { planningId: "new-plan", status: "success", roles: {}, createdAt: 1 } }] };
@@ -467,7 +467,7 @@ test("a steer whose durable window starts at that turn stays visible after the r
 test("Planner shows generated tools immediately and moves a queued steer only when Pi consumes it", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/steer-live", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
   const initial = { runId: "steer-live-run", config, planType: "graph", phase: "awaiting_approval", approved: false, planningId: "old-plan",
-    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "waiting", revision: 1, instruction: "", error: null } },
     plan: null, executions: [], events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }],
     paused: false, base: "", feedbackCounts: {} };
@@ -546,8 +546,10 @@ test("Planner shows generated tools immediately and moves a queued steer only wh
     assert.equal(await page.getByText(/grapher-steer-id/).count(), 0);
     // Durable command replies still carry the previous committed graph. They
     // must not erase nodes previewed by the ongoing Planner SSE stream.
-    emit({ type: "tool_execution_end", toolCallId: "preview-node", toolName: "node",
-      args: { nodes: [{ id: "preview", task: "Live draft task" }] }, result: { content: [] } });
+    emit({ type: "tool_execution_start", toolCallId: "preview-node", toolName: "edit_graph",
+      args: { nodes: [{ id: "preview", task: "Live draft task" }] } });
+    emit({ type: "tool_execution_end", toolCallId: "preview-node", toolName: "edit_graph",
+      result: { content: [{ type: "text", text: 'Successfully created node "preview".' }], details: {} } });
     const preview = page.locator('.graph-canvas .react-flow__node[data-id="preview"]');
     await preview.waitFor();
     await input.fill("/thinking high"); await input.press("Escape"); await input.press("Enter");

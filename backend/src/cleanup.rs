@@ -547,7 +547,7 @@ pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
     // Preserve Runtime's recorded route and legacy single-task fallback.
     let serial = match state.plan_type.as_deref() {
         Some(mode) => mode == "serial",
-        None => state.graph.nodes.len() == 1 && state.graph.nodes[0].name == "task",
+        None => state.graph.nodes.len() == 1 && state.graph.nodes[0].id == "task",
     };
     !serial && state.isolated_workspaces.is_some()
         && (!state.pending_feedback.is_empty()

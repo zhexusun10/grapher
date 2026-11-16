@@ -52,7 +52,7 @@ test("stream deltas preserve completed objects and never mutate frozen history",
 });
 
 test("snapshot sharing preserves every backend field, deletions, order and changed subtrees", () => {
-  const previous = { ...emptySnapshot, runId: "run", graph: { originalGoal: "goal", nodes: [{ name: "a", task: "task" }], edges: [] },
+  const previous = { ...emptySnapshot, runId: "run", graph: { originalGoal: "goal", nodes: [{ id: "a", task: "task" }], edges: [] },
     executions: [{ id: "exec", output: "", outputBytes: 10, status: "running" }], extra: { important: true } };
   const same = shareJson(previous, structuredClone(previous));
   assert.equal(same, previous);

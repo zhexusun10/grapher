@@ -29,7 +29,7 @@ fn file_changes_api_unions_scoped_paths_before_capping_and_preserves_empty_scope
             graph: Graph {
                 original_goal: "file change aggregation".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],
@@ -173,7 +173,7 @@ fn empty_run_id_file_changes_reads_the_active_run() {
             graph: Graph {
                 original_goal: "active".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "t".into(),
                 }],
                 edges: vec![],
@@ -277,7 +277,7 @@ fn historical_run_routes_to_its_own_projection_while_the_active_run_is_busy() {
                 graph: Graph {
                     original_goal: "historical".into(),
                     nodes: vec![Node {
-                        name: "task".into(),
+                        id: "task".into(),
                         task: "t".into(),
                     }],
                     edges: vec![],
@@ -556,7 +556,7 @@ fn open_workspace_file_rejects_missing_files_and_unknown_executions_without_laun
             graph: Graph {
                 original_goal: "open file".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],

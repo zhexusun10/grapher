@@ -10,7 +10,7 @@ fn graph(names: &[&str]) -> Graph {
         nodes: names
             .iter()
             .map(|name| Node {
-                name: (*name).into(),
+                id: (*name).into(),
                 task: (*name).into(),
             })
             .collect(),
@@ -769,7 +769,7 @@ fn fan_in_tracked_file_conflict_invokes_git_merger() {
         nodes: ["left", "right", "join"]
             .iter()
             .map(|name| Node {
-                name: (*name).into(),
+                id: (*name).into(),
                 task: (*name).into(),
             })
             .collect(),

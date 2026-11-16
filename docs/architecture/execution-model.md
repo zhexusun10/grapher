@@ -47,7 +47,7 @@ The newest eligible workspace is selected even while its node/Merger writer is a
 
 For approved Graphs with unfinished work, each context-bearing follow-up receives a regenerated transport block naming the selected node and every node's status. A rework explanation is added only while its one-shot marker is pending. A source turn with all nodes completed or a new draft awaiting approval receives only the user's instruction, no workspace/status context or switch tool; it still consumes a pending rework marker without injecting the explanation. Transport context is stored in Pi history but stripped from the browser conversation projection.
 
-A context-bearing follow-up exposes `switch_workspace` and its move instruction only when another valid workspace exists. Optional workspaces that lack the current attempt's preparation evidence or fail the private-view gate are omitted, including all aliases of the same physical owner; their failure does not block a valid current workspace. A later turn may offer them after a successful retry. The tool accepts the node `id` (or the historical `node` argument for compatibility), updates the same Planner session's cwd, and returns `requestedId` and `actualId` for the selected workspace in that turn. Downstream-owner redirects are explained in the result. Later follow-ups preserve the move until a newer node workspace update takes precedence. A steer revalidates refreshed targets and restricts them to the initial cwd and workspace paths granted to that Planner process at launch; newly valid paths require a new turn.
+A context-bearing follow-up exposes `switch_workspace` and its move instruction only when another valid workspace exists. Optional workspaces that lack the current attempt's preparation evidence or fail the private-view gate are omitted, including all aliases of the same physical owner; their failure does not block a valid current workspace. A later turn may offer them after a successful retry. The tool accepts only the node `id`, updates the same Planner session's cwd, and returns `requestedId` and `actualId` for the selected workspace in that turn. IDs are literal keys in the backend target table: prototype-like strings work only when explicitly present and never resolve through inherited JavaScript properties. Downstream-owner redirects are explained in the result. Later follow-ups preserve the move until a newer node workspace update takes precedence. A steer revalidates refreshed targets and restricts them to the initial cwd and workspace paths granted to that Planner process at launch; newly valid paths require a new turn.
 
 The same Pi conversation/ID survives cwd changes, reload, and reclamation of the
 old workspace; only its validated session-header cwd is rebound, recorded as
@@ -66,6 +66,18 @@ writes keep their source-snapshot behavior. Failed/cancelled turns retain the
 previous graph but capture surviving writes too. Interrupted private turns are
 captured during recovery; a snapshot/recovery failure pauses the Run rather than
 scheduling stale inputs. Node conversations are never imported into Planner.
+
+Explicit continuation and interrupted-turn capture may finish a stopped host
+snapshot's local readiness gate only after the current owner is prepared and
+all writers in that directory have drained. The previous complete gate and
+recorded input must remain ancestors of HEAD. The current project/Git view and
+code tree must match either validated immutable evidence or the complete view
+identity embedded in the host snapshot commit; missing snapshot evidence can
+then be captured without changing files, HEAD, index or conversation history.
+Existing damaged/partial records, later dirty changes, cleared/missing gates,
+unfinished merges and changed ownership/bindings are not repaired by guessing.
+Gate updates atomically replace the previous marker only after view capture
+succeeds. Ordinary workspace discovery never performs this recovery.
 
 Focused evidence: [Planner workspace regressions](../../backend/src/planner_workspace_tests.rs)
 and the Planner details browser case in [conversation UI tests](../../scripts/conversation-history-ui.test.mjs).
@@ -97,7 +109,7 @@ restart.
 The review uses the normal Planner tool policy and may inspect, verify, revise the graph, report or make administrative source edits. It does not receive node conversation histories.
 
 Its output streams through durable planning logs and SSE wake-ups. Successful
-node/edge edits immediately project a live candidate graph without dispatching
+`edit_graph` batches immediately project a live candidate graph without dispatching
 work before the turn finishes. The saved conversation replays review output as
 its own section, separated from the planned turns by a divider, so the review
 reply does not read as part of the turn that produced the published graph.

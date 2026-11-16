@@ -90,10 +90,10 @@ function recoveryGraph(status = "running") {
   const runId = "93bf2c6a-df98-4fb5-9146-63c7291f99c2";
   const planning = { planningId: "graph-followup", runId, repository, status, planType: "graph",
     createdAt: 2, goal: "Continue the existing graph", roles: {}, modelDuration: 0, totalPlanningDuration: 0 };
-  const graph = { originalGoal: "Existing large graph", nodes: Array.from({ length: 80 }, (_, i) => ({ name: `task-${i}`, task: `Task ${i}` })), edges: [] };
+  const graph = { originalGoal: "Existing large graph", nodes: Array.from({ length: 80 }, (_, i) => ({ id: `task-${i}`, task: `Task ${i}` })), edges: [] };
   return { ...empty, runId, config, phase: "running", planType: "graph", approved: true, graph,
     planningId: planning.planningId, planning,
-    nodes: Object.fromEntries(graph.nodes.map(node => [node.name, { status: "completed", revision: 2 }])),
+    nodes: Object.fromEntries(graph.nodes.map(node => [node.id, { status: "completed", revision: 2 }])),
     executions: Array.from({ length: 148 }, (_, i) => ({ id: `attempt-${i}`, node: `task-${i % 80}`, status: "success", output: "", startedAt: 1, endedAt: 2 })),
     events: [{ type: "planning_started", sequence: 1, plan_type: "graph" }, { type: "routed", sequence: 2, plan_type: "graph" }] };
 }
@@ -303,7 +303,7 @@ test("Feedback opt-out preserves old session edges and hides the legend only for
   const makeRun = (runId, enabled, legacy = false) => ({
     ...empty, runId, config: { ...config, ...(legacy ? {} : { feedbackEnabled: enabled }) },
     planType: "graph", approved: true, paused: true, phase: "paused",
-    graph: { originalGoal: `Goal ${runId}`, nodes: [{ name: "a", task: "Build" }, { name: "b", task: "Review" }],
+    graph: { originalGoal: `Goal ${runId}`, nodes: [{ id: "a", task: "Build" }, { id: "b", task: "Review" }],
       edges: [{ from: "a", to: "b", feedback: false }, ...(enabled ? [{ from: "b", to: "a", feedback: true }] : [])] },
     nodes: { a: { status: "waiting", revision: 1 }, b: { status: "waiting", revision: 1 } },
   });
@@ -498,7 +498,7 @@ test("sidebar keeps the live dot through planning, follow-ups and standalone Mer
 
 test("paused sidebar cards stop pulsing after writers drain even with dirty descendants", { timeout: 30_000 }, async () => {
   const paused = { ...fast, runId: "paused", phase: "paused", paused: true, approved: true,
-    graph: { originalGoal: "Paused work", nodes: [{ name: "qa", task: "Review" }], edges: [] },
+    graph: { originalGoal: "Paused work", nodes: [{ id: "qa", task: "Review" }], edges: [] },
     nodes: { qa: { status: "dirty", revision: 2 } } };
   const running = { id: "worker", node: "qa", status: "running", output: "" };
   const snapshots = { paused, draining: { ...paused, runId: "draining", executions: [running] } };
@@ -910,7 +910,7 @@ test("saving a Node Agent model synchronizes the failed Run before explicit Cont
     worktree: "/same-workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     metrics: { model: "test/old", thinkingLevel: "off" }, startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: true,
-    graph: { originalGoal: "Recover with another model", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    graph: { originalGoal: "Recover with another model", nodes: [{ id: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
     nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider quota exhausted" } },
     executions: [failedExecution] };
@@ -965,7 +965,7 @@ test("serial failure displays the saved retry model without rewriting the failed
     worktree: repository, before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     metrics: { model: "test/old", thinkingLevel: "off" }, startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType: "serial", approved: true, phase: "needs_attention", canResume: true,
-    graph: { originalGoal: "Retry serial", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    graph: { originalGoal: "Retry serial", nodes: [{ id: "task", task: "Finish the task" }], edges: [] },
     nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider failure" } },
     executions: [failedExecution] };
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -1001,7 +1001,7 @@ for (const planType of ["graph", "serial"]) {
     worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType, approved: true, phase: "needs_attention", canResume: true,
-    graph: { originalGoal: "Recover unknown failure", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    graph: { originalGoal: "Recover unknown failure", nodes: [{ id: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
     nodes: { task: { status: "failed", canResume: true, revision: 1, head: null, instruction: "", error: "Unrecognized frobnicator error #843" } },
     executions: [failed] };
@@ -1034,7 +1034,7 @@ for (const planType of ["graph", "serial"]) {
       assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0,
         "Serial has no run-wide topology control");
     } else {
-      await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
+      await page.locator('.task-node[data-node-id="task"] .status', { hasText: "Failed" }).waitFor();
     }
     const button = page.getByRole("button", {
       name: planType === "serial" ? "Continue this agent (without adding a message)" : "Resume", exact: true,
@@ -1044,7 +1044,7 @@ for (const planType of ["graph", "serial"]) {
     await button.click();
     await until(() => resumes === 1);
     if (planType === "graph") {
-      await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
+      await page.locator('.task-node[data-node-id="task"] .status', { hasText: "Running" }).waitFor();
     } else {
       await button.waitFor({ state: "detached" });
     }
@@ -1067,7 +1067,7 @@ test("a resumed failed node keeps virtualized tool cards evenly spaced", { timeo
     worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: true,
-    graph: { originalGoal: "Recover", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    graph: { originalGoal: "Recover", nodes: [{ id: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
     nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider failed" } }, executions: [failed] };
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -1090,10 +1090,10 @@ test("a resumed failed node keeps virtualized tool cards evenly spaced", { timeo
   });
   try {
     await page.locator('[data-run-id="fast"]').click();
-    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
+    await page.locator('.task-node[data-node-id="task"] .status', { hasText: "Failed" }).waitFor();
     await page.getByRole("button", { name: "Resume", exact: true }).click();
-    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
-    await page.locator('.task-node[data-node-name="task"]').click();
+    await page.locator('.task-node[data-node-id="task"] .status', { hasText: "Running" }).waitFor();
+    await page.locator('.task-node[data-node-id="task"]').click();
     const retry = page.locator('[data-execution-id="retry"]');
     await retry.locator(".tool-call-card").first().waitFor();
     const scroll = page.locator(".initial-query-scroll");
@@ -1118,7 +1118,7 @@ test("serial continuation waits for writer drain and targets only its agent", { 
   const execution = { id: "worker", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/workspace",
     before: "", after: null, status: "running", output: "", outputBytes: 0, startedAt: 1, completedAt: null };
   let current = { ...empty, runId: "fast", config, planType: "serial", approved: true, paused: true, phase: "paused", canResume: false,
-    graph: { originalGoal: "Pause safely", nodes: [{ name: "task", task: "Work" }], edges: [] },
+    graph: { originalGoal: "Pause safely", nodes: [{ id: "task", task: "Work" }], edges: [] },
     nodes: { task: { status: "running", revision: 1, head: null, instruction: "", error: null } }, executions: [execution] };
   let polls = 0, resumes = 0;
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -1168,7 +1168,7 @@ test("a paused node intervention does not automatically retry an unrelated unkno
   const execution = (id, node, status) => ({ id, node, revision: 1, attempt: 1, sessionId: id,
     worktree: "/workspace", before: "base", after: null, status, output: "", outputBytes: 0, startedAt: 1, completedAt: 2 });
   let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, paused: true, phase: "paused", canResume: true,
-    graph: { originalGoal: "Recover one node", nodes: [{ name: "task", task: "Work" }, { name: "other", task: "Other" }], edges: [] },
+    graph: { originalGoal: "Recover one node", nodes: [{ id: "task", task: "Work" }, { id: "other", task: "Other" }], edges: [] },
     plan: { executionBatches: [["task", "other"]], roots: ["task", "other"], terminals: ["task", "other"], warnings: [] },
     nodes: { task: { status: "paused", revision: 1, head: null, instruction: "", error: "Execution paused by the user" },
       other: { status: "failed", revision: 1, head: null, instruction: "", error: "Unrecognized failure" } },
@@ -1198,7 +1198,7 @@ test("a paused node intervention does not automatically retry an unrelated unkno
   });
   try {
     await page.locator('[data-run-id="fast"]').click();
-    await page.locator('.task-node[data-node-name="task"]').click();
+    await page.locator('.task-node[data-node-id="task"]').click();
     const composer = page.locator('.pane-bottom-chat textarea');
     await composer.fill("Continue this node"); await composer.press("Enter");
     await until(() => actions.length === 2);
@@ -1215,7 +1215,7 @@ test("queued input for waiting or feedback-dirty nodes never resumes the Run or 
     // completed is a stale browser: feedback has made it dirty by acceptance.
     let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, paused: true, phase: "paused",
       ...(status === "waiting" ? { planningId: planning.planningId, planning } : {}),
-      graph: { originalGoal: "Wait for upstream", nodes: [{ name: "parent", task: "Parent" }, { name: "task", task: "Original task" }],
+      graph: { originalGoal: "Wait for upstream", nodes: [{ id: "parent", task: "Parent" }, { id: "task", task: "Original task" }],
         edges: [{ from: "parent", to: "task", feedback: false }] },
       plan: { executionBatches: [["parent"], ["task"]], roots: ["parent"], terminals: ["task"], warnings: [] },
       nodes: { parent: { status: "dirty", revision: 2, instruction: "Feedback: repair" },
@@ -1248,7 +1248,7 @@ test("queued input for waiting or feedback-dirty nodes never resumes the Run or 
     });
     try {
       await page.locator('[data-run-id="fast"]').click();
-      await page.locator('.task-node[data-node-name="task"]').click();
+      await page.locator('.task-node[data-node-id="task"]').click();
       const composer = page.locator('.pane-bottom-chat textarea');
       for (const [index, text] of ["Additional constraint one", "Additional constraint two"].entries()) {
         await composer.fill(text); await composer.press("Enter");
@@ -1274,7 +1274,7 @@ test("Graph and Serial replay place the shared response after all pre-dispatch q
       startedAt: 3, completedAt: 4 };
     const messages = ["First pre-start constraint", "Second pre-start constraint"];
     const current = { ...empty, runId: "fast", config, planType, approved: true, phase: "completed",
-      graph: { originalGoal: "Queued constraints", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+      graph: { originalGoal: "Queued constraints", nodes: [{ id: "task", task: "Original task" }], edges: [] },
       plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
       nodes: { task: { status: "completed", revision: 1, instruction: "", head: "", error: null, pendingMessages: [] } },
       executions: [execution], events: [
@@ -1296,7 +1296,7 @@ test("Graph and Serial replay place the shared response after all pre-dispatch q
       for (let reload = 0; reload < 2; reload++) {
         if (reload) await page.reload({ waitUntil: "domcontentloaded" });
         await page.locator('[data-run-id="fast"]').click();
-        if (planType === "graph") await page.locator('.task-node[data-node-name="task"]').click();
+        if (planType === "graph") await page.locator('.task-node[data-node-id="task"]').click();
         await page.getByText(response, { exact: true }).waitFor();
         for (const text of messages) {
           const message = page.getByText(text, { exact: true });
@@ -1393,7 +1393,7 @@ test("saving an incompatible legacy level updates defaults to the Pi-adjusted va
 test("Settings edits the conversation profile even while a node with an override is selected", { timeout: 30_000 }, async () => {
   const node = { status: "failed", revision: 1, head: null, instruction: "", error: "quota" };
   let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention",
-    graph: { originalGoal: "Node scope", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }], edges: [] },
+    graph: { originalGoal: "Node scope", nodes: [{ id: "a", task: "a" }, { id: "b", task: "b" }], edges: [] },
     plan: { executionBatches: [["a", "b"]], rootNodes: ["a", "b"], terminals: ["a", "b"], warnings: [] },
     nodes: { a: { ...node }, b: { ...node } },
   };

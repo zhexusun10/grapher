@@ -174,7 +174,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
                 nodes: names
                     .into_iter()
                     .map(|name| Node {
-                        name: name.into(),
+                        id: name.into(),
                         task: name.into(),
                     })
                     .collect(),
@@ -531,7 +531,7 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
         runtime.save_default_config(&settings).unwrap();
         runtime.revise_graph(Graph {
             original_goal: "feedback admission drain".into(),
-            nodes: ["root", "a", "b"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+            nodes: ["root", "a", "b"].into_iter().map(|name| Node { id: name.into(), task: name.into() }).collect(),
             edges: vec![Edge { from: "root".into(), to: "a".into(), feedback: false },
                 Edge { from: "a".into(), to: "root".into(), feedback: true }],
         }, PlanningSummary::default()).unwrap();
@@ -879,7 +879,7 @@ fn driver_publishes_the_whole_visible_private_batch_not_each_worker_group() {
         let graph = Graph {
             original_goal: "whole private batch".into(),
             nodes: ["a", "b", "c", "d", "e", "child"].into_iter()
-                .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+                .map(|name| Node { id: name.into(), task: name.into() }).collect(),
             edges: vec![crate::model::Edge { from: "a".into(), to: "child".into(), feedback: false }],
         };
         runtime.create(graph, config).unwrap();
@@ -924,7 +924,7 @@ fn driver_recovers_source_prerequisite_without_publishing_or_relocating_the_held
             runtime.create(Graph {
                 original_goal: "source prerequisite recovery".into(),
                 nodes: ["a", "b", "a1", "a2", "a3", "a4", "b1"].into_iter()
-                    .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+                    .map(|name| Node { id: name.into(), task: name.into() }).collect(),
                 edges: [("a", "a1"), ("a", "a2"), ("a", "a3"), ("a", "a4"), ("b", "b1")].into_iter()
                     .map(|(from, to)| crate::model::Edge { from: from.into(), to: to.into(), feedback: false }).collect(),
             }, config).unwrap();

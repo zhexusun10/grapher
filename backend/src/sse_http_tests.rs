@@ -205,7 +205,7 @@ fn planner_endpoint_delivers_thinking_while_the_model_is_still_running() {
 printf '%s\n' '{{"type":"message_start","message":{{"role":"assistant","content":[]}}}}'
 printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"thinking_delta","contentIndex":0,"delta":"LIVE_PROBE"}}}}'
 while [ ! -f {release:?} ]; do sleep 0.02; done
-printf '%s' '{{"originalGoal":"Goal","nodes":[{{"name":"work","task":"Do work"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{{"originalGoal":"Goal","nodes":[{{"id":"work","task":"Do work"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"completed"}}],"stopReason":"stop"}}}}'
 "#, release = release.to_string_lossy())).unwrap();
     let service = Arc::new(Service {

@@ -39,7 +39,7 @@ fn legacy_checkpoint_reopens_as_completed_without_rewriting_persisted_evidence()
         plan_type: Some("serial".into()),
         graph: Graph {
             nodes: vec![Node {
-                name: "task".into(),
+                id: "task".into(),
                 task: "Keep the saved result".into(),
             }],
             ..Graph::default()

@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 #[path = "environment_snapshots.rs"]
 mod snapshots;
+#[path = "environment_forks.rs"]
+mod forks;
 
 /// Ownership evidence is independent of which environment is currently active.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -328,6 +330,29 @@ pub(crate) fn project_path_template(path: &Path, source: &Path) -> Option<String
     Some(if suffix.is_empty() { "{workspace}".into() } else { format!("{{workspace}}/{suffix}") })
 }
 
+/// NODE_PATH and PYTHONPATH use literal native-delimiter lists, not Windows
+/// PATH quoting. Rebind only known project paths; retain external/relative,
+/// empty, quoted and not-yet-created entries without guessing their meaning.
+fn rebind_project_module_path(
+    value: &str,
+    source: &Path,
+    workspace: &Path,
+    variable: &str,
+) -> Result<String, String> {
+    let workspace = native::host_path(workspace).to_string_lossy().replace('\\', "/");
+    let delimiter = if cfg!(windows) { ';' } else { ':' };
+    let paths = value.split(delimiter).map(|value| {
+        if let Some(mapped) = project_path_template(Path::new(value), source) {
+            let mapped = mapped.replace("{workspace}", &workspace);
+            if mapped.contains(delimiter) {
+                return Err(format!("Rebound {variable} directory contains its list delimiter; choose a workspace path representable by the module loader"));
+            }
+            Ok(mapped)
+        } else { Ok(value.to_string()) }
+    }).collect::<Result<Vec<_>, String>>()?;
+    Ok(paths.join(&delimiter.to_string()))
+}
+
 impl LaunchConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.is_empty()
@@ -397,6 +422,18 @@ impl LaunchConfig {
         // An unbound automatic entry is an absolute Bash executable, not a
         // business-tool selector. Its installation must not outrank host tools.
         !self.inherit_ambient || self.environment.is_some() || self.hook.is_some()
+    }
+
+    /// Recovery locations are evidence for each entry, not additional business
+    /// compatibility criteria. Callers still validate every entry's native
+    /// startup and compare its managed prefix bytes as before.
+    pub(crate) fn same_business_launch(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        for launch in [&mut left, &mut right] {
+            if let Some(binding) = &mut launch.environment { binding.runtime_evidence = None; }
+        }
+        left == right
     }
 
     pub(crate) fn state_bound(&self) -> bool {
@@ -920,8 +957,16 @@ impl Environments {
             .cloned()
             .collect();
         let reusable = local.first().map(|(_, input)| input.clone());
+        // A fresh slot may inherit plain private HOME state without inheriting
+        // a fixed interpreter or another slot's owned prefixes. Existing slots
+        // keep their own current state; this never authorizes a partial reset.
+        let home_fork = if reusable.is_none() && local_current.is_none() {
+            self.select_home_fork(inputs)?
+        } else { None };
         let reason = if reusable.is_some() {
             "same-layout"
+        } else if home_fork.is_some() {
+            "unbound-home-fork"
         } else if inputs.iter().any(|(_, input)| {
             self.load_launch(&input.launch_ref)
                 .is_ok_and(|launch| launch.environment.is_some())
@@ -930,7 +975,7 @@ impl Environments {
         } else {
             "unbound-inputs"
         };
-        let mut selected = reusable.unwrap_or_else(|| baseline.clone());
+        let mut selected = reusable.or(home_fork).unwrap_or_else(|| baseline.clone());
         let mut hints = Vec::new();
         for input in inputs.iter().map(|(_, input)| input).chain(current) {
             hints.extend(self.load_launch(&input.launch_ref)?.ambient_hints);
@@ -1019,22 +1064,36 @@ impl Environments {
             crate::path_identity::same_path(Path::new(original), Path::new(&layout))
         });
         let scoped = self.scoped_files(&selected.launch_ref)?;
-        let state = self.environment_root_for(path, &selected.launch_ref)?;
         let unbound_best_effort = self.config.best_effort
             && selected.layout.is_none()
             && self
                 .load_launch(&selected.launch_ref)?
                 .environment
                 .is_none();
+        if !preserve_failed && !unbound_best_effort && (history_edit || !same_view) {
+            self.preflight_prepared_runtime_evidence(path, selected)?;
+        }
+        let state = self.environment_root_for(path, &selected.launch_ref)?;
+        let mut retained_home = None;
         if !unbound_best_effort && same_view && !history_edit && !preserve_failed {
             self.verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
         } else if !preserve_failed && !unbound_best_effort {
-            // Materialization validates every root's bytes and destinations
-            // before applying any root. Legacy records keep their own format.
-            if let Some(layouts) = &root_layouts {
-                self.files.materialize_roots(&self.snapshot_targets(path, layouts)?, &selected.environment_ref)?;
+            // Operation intent and recorded byte/launch coverage govern this
+            // protection, never a diagnostic reason inherited from an old job.
+            // An explicit history restoration retains its existing semantics.
+            if !same_view && !history_edit {
+                retained_home = self.retain_existing_home_target(path, selected)?;
+            }
+            if retained_home.is_some() {
+                scoped.validate(std::slice::from_ref(&selected.environment_ref))?;
             } else {
-                scoped.materialize(&state, std::slice::from_ref(&selected.environment_ref), None, false)?;
+                // Materialization validates every root's bytes and destinations
+                // before applying any root. Legacy records keep their own format.
+                if let Some(layouts) = &root_layouts {
+                    self.files.materialize_roots(&self.snapshot_targets(path, layouts)?, &selected.environment_ref)?;
+                } else {
+                    scoped.materialize(&state, std::slice::from_ref(&selected.environment_ref), None, false)?;
+                }
             }
         } else {
             scoped.validate(std::slice::from_ref(&selected.environment_ref))?;
@@ -1075,7 +1134,7 @@ impl Environments {
                 return Err("Native environment preparation modified the project view; no agent may see runtime-injected files".into());
             }
         }
-        self.finalize_input(path, selected, generation, head, resources)
+        self.finalize_input(path, retained_home.as_ref().unwrap_or(selected), generation, head, resources)
     }
 
     /// Seal the current workspace view as this execution's input composite.
@@ -1253,17 +1312,10 @@ impl Environments {
     }
 
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
-        let files = self.scoped_files(reference)?;
-        let version = Uuid::new_v4().to_string();
         if let Some(layouts) = self.root_layouts_for_launch(&self.load_launch(reference)?)? {
-            self.files.capture_roots(&self.snapshot_targets(path, &layouts)?, &layouts, &version, &[parent.into()])?;
+            self.files.capture_roots_reusing(&self.snapshot_targets(path, &layouts)?, &layouts, parent)
         } else {
-            files.capture(&self.environment_root_for(path, reference)?, &version, "", &[parent.into()])?;
-        }
-        if files.same_contents(parent, &version)? {
-            Ok(parent.into())
-        } else {
-            Ok(version)
+            self.scoped_files(reference)?.capture_reusing(&self.environment_root_for(path, reference)?, parent)
         }
     }
 
@@ -1320,13 +1372,7 @@ impl Environments {
 
     #[cfg(test)]
     fn capture(&self, path: &Path, parent: &str) -> Result<String, String> {
-        let version = Uuid::new_v4().to_string();
-        self.files.capture(path, &version, "", &[parent.into()])?;
-        if self.files.same_contents(parent, &version)? {
-            Ok(parent.into())
-        } else {
-            Ok(version)
-        }
+        self.files.capture_reusing(path, parent)
     }
 
     pub(crate) fn seal(
@@ -1638,26 +1684,32 @@ fn clean_command_with_environment(
             command.env(key, value);
         }
     }
-    if launch.unbound_path.is_some() {
-        if let (Some(value), Some((source, workspace))) = (business_node.get("NODE_PATH"), &project_roots) {
-            let workspace = native::host_path(workspace).to_string_lossy().replace('\\', "/");
-            let mut changed = false;
-            let delimiter = if cfg!(windows) { ';' } else { ':' };
-            // Node's module loader uses a literal delimiter split. Windows
-            // PATH's quote grammar must not be applied to NODE_PATH.
-            let paths = value.split(delimiter).map(|value| {
-                if let Some(mapped) = project_path_template(Path::new(value), source) {
-                    let mapped = mapped.replace("{workspace}", &workspace);
-                    if mapped.contains(delimiter) {
-                        return Err("Rebound NODE_PATH directory contains its list delimiter; choose a workspace path representable by Node".to_string());
-                    }
-                    changed = true;
-                    Ok(mapped)
-                } else { Ok(value.to_string()) }
-            }).collect::<Result<Vec<_>, String>>()?;
-            if changed {
-                business_node.insert("NODE_PATH".into(), paths.join(&delimiter.to_string()));
-            }
+    if let Some((source, workspace)) = project_roots.as_ref().filter(|_| launch.unbound_path.is_some()) {
+        if let Some(value) = business_node.get("NODE_PATH") {
+            let value = rebind_project_module_path(value, source, workspace, "NODE_PATH")?;
+            business_node.insert("NODE_PATH".into(), value);
+        }
+        // Use effective values AFTER explicit overrides/removals and frozen
+        // launch variables. These known business paths stay transient, not new
+        // L. Startup/config files are paths, not contents to parse or rewrite.
+        let business_paths: Vec<_> = command.get_envs().filter_map(|(key, value)| {
+            let name = key.to_str()?;
+            // npm treats its config-variable names case-insensitively on every
+            // host (including npm's own lowercase variables in script children).
+            let name = if cfg!(windows) || name.eq_ignore_ascii_case("NPM_CONFIG_USERCONFIG") {
+                name.to_ascii_uppercase()
+            } else { name.to_string() };
+            if !matches!(name.as_str(), "PYTHONPATH" | "BASH_ENV" | "ENV" | "PIP_CONFIG_FILE" | "NPM_CONFIG_USERCONFIG") { return None; }
+            Some((key.to_os_string(), name, value?.to_str()?.to_string()))
+        }).collect();
+        for (key, name, value) in business_paths {
+            let mapped = if name == "PYTHONPATH" {
+                Some(rebind_project_module_path(&value, source, workspace, &name)?)
+            } else {
+                project_path_template(Path::new(&value), source).map(|mapped| mapped.replace("{workspace}",
+                    &native::host_path(workspace).to_string_lossy().replace('\\', "/")))
+            };
+            if let Some(value) = mapped { command.env(key, value); }
         }
     }
     // Business loader variables must not inject code into bubblewrap/Seatbelt
@@ -1905,3 +1957,7 @@ mod tests;
 #[cfg(all(test, feature = "fixture"))]
 #[path = "environment_best_effort_tests.rs"]
 mod best_effort_tests;
+
+#[cfg(all(test, feature = "fixture"))]
+#[path = "environment_fork_tests.rs"]
+mod fork_tests;

@@ -18,7 +18,7 @@ fn created(repository: &str, direct: Option<&str>, nested: Option<&str>) -> Even
             nodes: ["completed", "failed", "live"]
                 .iter()
                 .map(|name| Node {
-                    name: (*name).into(),
+                    id: (*name).into(),
                     task: "test".into(),
                 })
                 .collect(),

@@ -2,7 +2,8 @@ import { t } from "../i18n";
 import { useMemo, useRef } from "react";
 import { shareById } from "../services/structuralSharing";
 import type { Edge } from "@xyflow/react";
-import { publicationMergerCardId, type FeedbackExhaustion, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../types";
+import { type FeedbackExhaustion, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../types";
+import { graphCardIds } from "../lib/graphNodeIdentity";
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
@@ -68,10 +69,10 @@ export function indexFeedbackExhaustion(state: Pick<Snapshot, "graph" | "nodes" 
 export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
   if (plan?.executionBatches && plan.executionBatches.length > 0) {
     const scheduled = new Set(plan.executionBatches.flat());
-    const missing = graph.nodes.map((node) => node.name).filter((name) => !scheduled.has(name));
+    const missing = graph.nodes.map((node) => node.id).filter((name) => !scheduled.has(name));
     return missing.length ? [...plan.executionBatches, missing] : plan.executionBatches;
   }
-  const nodeNames = graph.nodes.map((n) => n.name);
+  const nodeNames = graph.nodes.map((n) => n.id);
   if (nodeNames.length === 0) return [];
   const names = new Set(nodeNames);
   const deps = graph.edges.filter(
@@ -122,11 +123,12 @@ export function useGraphElements(
   activity: RuntimeActivity[] = [],
   recentlyAddedNodeNames: Set<string> = new Set(),
 ) {
+  const cardIds = useMemo(() => graphCardIds(state.graph), [state.graph.nodes]);
   // Saved routes remain executable when the default for future edits changes.
   // Render the authoritative graph, never hide those routes behind Settings.
   const mergeTargets = useMemo(() => {
     const targets = new Map<string, NonNullable<Snapshot["mergers"]>[number]>();
-    const names = new Set(state.graph.nodes.map((node) => node.name));
+    const names = new Set(state.graph.nodes.map((node) => node.id));
     for (const merger of state.mergers ?? []) {
       const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
       if (target && names.has(target)) targets.set(target, merger);
@@ -164,7 +166,7 @@ export function useGraphElements(
     return { batch: false, heads: heads ?? [] };
   }, [state.events, state.batchHandoff, state.publication, publicationMerger?.id]);
   const publicationTargets = useMemo(() => {
-    const names = new Set(state.graph.nodes.map((node) => node.name));
+    const names = new Set(state.graph.nodes.map((node) => node.id));
     if (publicationContext.batch) {
       const heads = new Set(publicationContext.heads);
       const producers = new Set(state.executions.filter(execution => execution.after && heads.has(execution.after))
@@ -301,41 +303,41 @@ export function useGraphElements(
 
   const nodes = useMemo<WorkNode[]>(() => {
     const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
-      const position = graphLayout.positions.get(node.name) ?? { x: PADDING_X, y: PADDING_Y, layer: 0 };
-      const nodeAttempts = indexes.attempts.get(node.name) ?? [];
-      const incoming = indexes.incoming.get(node.name) ?? [];
-      const outgoing = indexes.outgoing.get(node.name) ?? [];
+      const position = graphLayout.positions.get(node.id) ?? { x: PADDING_X, y: PADDING_Y, layer: 0 };
+      const nodeAttempts = indexes.attempts.get(node.id) ?? [];
+      const incoming = indexes.incoming.get(node.id) ?? [];
+      const outgoing = indexes.outgoing.get(node.id) ?? [];
       const route = (edge: Graph["edges"][number]) => edgeRouting.get(graphEdgeId(edge));
-      const mergerPlacement = graphLayout.mergerPlacements.get(node.name);
-      const rawStatus = state.nodes[node.name]?.status ?? "waiting";
-      const status = rawStatus === "running" && runningMergerTargets.has(node.name) ? "waiting" : rawStatus;
+      const mergerPlacement = graphLayout.mergerPlacements.get(node.id);
+      const rawStatus = state.nodes[node.id]?.status ?? "waiting";
+      const status = rawStatus === "running" && runningMergerTargets.has(node.id) ? "waiting" : rawStatus;
       return {
-        id: node.name,
+        id: node.id,
         type: "work",
         width: NODE_WIDTH,
         origin: NODE_ORIGIN,
         position: { x: position.x, y: position.y },
         // A short-lived entrance class lets newly created cards animate in
         // without re-triggering the animation on later data updates.
-        className: recentlyAddedNodeNames.has(node.name) ? "node-entering" : undefined,
+        className: recentlyAddedNodeNames.has(node.id) ? "node-entering" : undefined,
         data: {
-          name: node.name,
+          id: node.id,
           task: node.task,
           status,
           // Pause/Continue creates another execution record, not another attempt.
           attempts: nodeAttempts.reduce((latest, execution) => Math.max(latest, execution.attempt), 0),
-          hint: (indexes.hints.get(node.name) ?? [])
+          hint: (indexes.hints.get(node.id) ?? [])
             .map((edge) => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)
             .join("\n"),
           reviewer: outgoing.some((edge) => edge.feedback),
-          feedbackExhaustion: feedbackExhaustion.get(node.name),
+          feedbackExhaustion: feedbackExhaustion.get(node.id),
           // A merger conversation is its own selected card; the node card is not
           // highlighted while one of its merger attempts is addressed.
-          selected: selected === node.name && !selectedMergerId,
+          selected: selected === node.id && !selectedMergerId,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
           hasTop: !!mergerPlacement || incoming.some((edge) => route(edge)?.targetHandle === "top"),
           hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom") ||
-            (!!publicationMerger && publicationTargets.has(node.name)),
+            (!!publicationMerger && publicationTargets.has(node.id)),
           hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target"),
           hasLeftSource: outgoing.some((edge) => route(edge)?.sourceHandle === "left-source"),
           hasRightTarget: incoming.some((edge) => route(edge)?.targetHandle === "right-target"),
@@ -349,13 +351,13 @@ export function useGraphElements(
       const placement = graphLayout.mergerPlacements.get(target)!;
       const attempts = mergerAttempts.get(`merge:${target}`) ?? 0;
       return {
-        id: `merger:${target}`, type: "work", width: MERGER_WIDTH, origin: NODE_ORIGIN,
+        id: cardIds.mergers.get(target)!, type: "work", width: MERGER_WIDTH, origin: NODE_ORIGIN,
         position: { x: placement.x, y: placement.y },
         data: {
-          name: `merger · ${target}`, task: t("合并上游分支冲突"), kind: "merger",
+          id: `merger · ${target}`, task: t("合并上游分支冲突"), kind: "merger",
           status: merger.status === "completed" ? "completed" : merger.status === "running" ? "running" : "failed",
           attempts, hint: t("合并至 {0}", target), reviewer: false,
-          selected: selected === `merger:${target}` || (selected === target && merger.id === selectedMergerId),
+          selected: selected === cardIds.mergers.get(target) || merger.id === selectedMergerId,
           worktree: merger.worktree, hasTop: true, hasBottom: true,
           hasLeftTarget: false, hasLeftSource: false,
           hasRightTarget: false, hasRightSource: false,
@@ -364,10 +366,10 @@ export function useGraphElements(
     });
     if (!publicationMerger || !publicationPosition) return [...taskNodes, ...mergerNodes];
     return [...taskNodes, ...mergerNodes, {
-      id: publicationMergerCardId, type: "work", width: MERGER_WIDTH, origin: NODE_ORIGIN,
+      id: cardIds.publication, type: "work", width: MERGER_WIDTH, origin: NODE_ORIGIN,
       position: { x: publicationPosition.x, y: publicationPosition.y },
       data: {
-        name: publicationContext.batch ? t("批次回写 merger") : t("publication merger"),
+        id: publicationContext.batch ? t("批次回写 merger") : t("publication merger"),
         task: publicationContext.batch ? t("合并已完成派发组的回写冲突") : t("合并最终回写结果冲突"), kind: "merger",
         status: publicationMerger.status === "completed" ? "completed" : publicationMerger.status === "running" ? "running" : "failed",
         attempts: publicationAttempts, hint: publicationContext.batch && publicationMerger.status !== "running"
@@ -377,7 +379,7 @@ export function useGraphElements(
         hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
       },
     }];
-  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, runningMergerTargets, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets, publicationContext.batch, recentlyAddedNodeNames]);
+  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, runningMergerTargets, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets, publicationContext.batch, recentlyAddedNodeNames, cardIds]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {
@@ -429,7 +431,7 @@ export function useGraphElements(
       return {
         id: edgeId,
         source: edge.from,
-        target: !isFeedback && mergeTargets.has(edge.to) ? `merger:${edge.to}` : edge.to,
+        target: !isFeedback && mergeTargets.has(edge.to) ? cardIds.mergers.get(edge.to)! : edge.to,
         type: "workflow",
         sourceHandle: routing?.sourceHandle ?? "bottom",
         targetHandle: routing?.targetHandle ?? "top",
@@ -450,7 +452,7 @@ export function useGraphElements(
           const isTerminalCompleted = state.nodes[name]?.status === "completed";
           const isMergerRunning = publicationMerger.status === "running";
           return {
-            id: `publication:${name}->merger`, source: name, target: publicationMergerCardId,
+            id: `publication:${name}->merger`, source: name, target: cardIds.publication,
             sourceHandle: routing?.sourceHandle ?? "bottom", targetHandle: routing?.targetHandle ?? "top", type: "workflow",
             markerEnd: "workflow-arrow-default",
             animated: isTerminalCompleted && isMergerRunning,
@@ -479,7 +481,7 @@ export function useGraphElements(
       const animated = isMergerCompleted && !isTargetTerminal && (isTargetPreparingActivity || !isTargetPrepared);
 
       return {
-        id: `merger:${target}->${target}`, source: `merger:${target}`, target,
+        id: `merger:${target}->${target}`, source: cardIds.mergers.get(target)!, target,
         sourceHandle: "bottom",
         targetHandle: "top",
         type: "workflow",
@@ -489,7 +491,7 @@ export function useGraphElements(
       };
     });
     return [...graphEdges, ...publicationEdges, ...mergerEdges];
-  }, [state.graph.edges, state.nodes, state.events, activity, indexes, recentlyAddedEdgeIds, edgeRouting, mergeTargets, publicationMerger, publicationTargets, graphLayout]);
+  }, [state.graph.edges, state.nodes, state.events, activity, indexes, recentlyAddedEdgeIds, edgeRouting, mergeTargets, publicationMerger, publicationTargets, graphLayout, cardIds]);
 
   const previous = useRef({ runId: state.runId, nodes, edges });
   const shared = useMemo(() => {

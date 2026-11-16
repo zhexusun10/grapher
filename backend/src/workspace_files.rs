@@ -4,6 +4,7 @@
 use crate::{path_safety::real_child_path, workspace};
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
@@ -11,18 +12,65 @@ use std::{
 use uuid::Uuid;
 
 mod rooted;
+mod runtime_evidence;
+mod runtime_paths;
+pub(crate) use runtime_paths::{RuntimePath, RuntimePaths};
+mod home_fork;
 pub(crate) use rooted::RootScope;
 
 type Entries = BTreeMap<String, Entry>;
 
 #[derive(Clone, Copy)]
 enum Collection<'a> {
-    Capture,
-    Verify(&'a Entries),
-    // Restoration needs the current tree for safe removal/conflict planning,
-    // not a new snapshot of bytes it is about to discard. Still hash every
-    // live file and retain all existing path/link/metadata checks.
-    Inspect,
+    Capture(&'a RefCell<BTreeSet<String>>),
+    // Opt-in benchmark reference: pre-optimization per-file stored-byte reads.
+    #[cfg(test)]
+    CaptureUnbatched,
+    Verify(&'a Entries, &'a RefCell<BTreeSet<String>>),
+    // Track omitted live entries separately: they are not restorable evidence
+    // or permission to delete them. Still hash every ordinary live file.
+    Inspect(&'a RefCell<BTreeSet<String>>),
+}
+
+impl Collection<'_> {
+    fn note_untouched(self, path: &Path) -> Result<(), String> {
+        if let Self::Inspect(paths) = self {
+            paths.borrow_mut().insert(inspection_key(&path_name(path)?));
+        }
+        Ok(())
+    }
+}
+
+// Match native Windows aliases without normalizing any persisted manifest.
+fn inspection_key(name: &str) -> String {
+    if cfg!(windows) { name.to_lowercase() } else { name.into() }
+}
+
+fn untouched_blocker<'a>(
+    untouched: &'a BTreeSet<String>,
+    name: &str,
+    directory: bool,
+) -> Option<&'a str> {
+    if untouched.is_empty() {
+        return None;
+    }
+    let key = inspection_key(name);
+    let mut ancestor = key.as_str();
+    loop {
+        if let Some(path) = untouched.get(ancestor) {
+            return Some(path.as_str());
+        }
+        let Some((parent, _)) = ancestor.rsplit_once('/') else { break };
+        ancestor = parent;
+    }
+    if !directory {
+        // A file/link also cannot replace a directory containing retained
+        // descendants. Sorted lookup avoids scanning every omission per file.
+        let prefix = format!("{key}/");
+        return untouched.range(prefix.clone()..).next()
+            .filter(|path| path.starts_with(&prefix)).map(String::as_str);
+    }
+    None
 }
 
 struct Materialization {
@@ -297,6 +345,7 @@ impl Files {
         Ok(value)
     }
 
+    #[cfg(test)]
     pub(crate) fn same_contents(&self, left: &str, right: &str) -> Result<bool, String> {
         let left = self.load(left)?;
         let right = self.load(right)?;
@@ -334,12 +383,38 @@ impl Files {
         Ok(self.directory.join("blobs").join(blob))
     }
 
-    fn save_blob(&self, source: &Path) -> Result<String, String> {
+    // Proof is local to one operation on this immutable store. Never retain it
+    // on Files, between writers, or across capture/verify/materialize calls.
+    fn verify_blob(&self, blob: &str, checked: &RefCell<BTreeSet<String>>) -> Result<(), String> {
+        if checked.borrow().contains(blob) {
+            return Ok(());
+        }
+        let path = self.blob_path(blob)?;
+        real_child_path(&self.directory, &path, true)?.ok_or("Missing workspace file blob")?;
+        if hash(&path)? != blob {
+            return Err(format!("Damaged workspace file blob: {blob}"));
+        }
+        checked.borrow_mut().insert(blob.into());
+        Ok(())
+    }
+
+    fn save_blob(&self, source: &Path, checked: Option<&RefCell<BTreeSet<String>>>) -> Result<String, String> {
+        // Every live file is read, even if another file has identical content.
+        // Only the test-only unbatched reference omits operation-local proof.
         let blob = hash(source)?;
+        if checked.is_some_and(|checked| checked.borrow().contains(&blob)) {
+            return Ok(blob);
+        }
         let destination = self.blob_path(&blob)?;
-        if real_child_path(&self.directory, &destination, true)?.is_some() {
-            if hash(&destination)? != blob {
+        if let Some(stored) = real_child_path(&self.directory, &destination, true)? {
+            // The existing-blob branch already checked the real child path.
+            // Do not repeat that traversal via verify_blob, particularly in the
+            // unbatched reference: the original capture checked it only once.
+            if hash(&stored)? != blob {
                 return Err(format!("Damaged workspace file blob: {blob}"));
+            }
+            if let Some(checked) = checked {
+                checked.borrow_mut().insert(blob.clone());
             }
             return Ok(blob);
         }
@@ -392,6 +467,11 @@ impl Files {
             }
         })();
         let _ = fs::remove_file(temporary);
+        if result.is_ok() {
+            if let Some(checked) = checked {
+                checked.borrow_mut().insert(blob);
+            }
+        }
         result
     }
 
@@ -410,6 +490,7 @@ impl Files {
             ));
         }
         if self.is_excluded(name) || path == self.excluded_data {
+            collection.note_untouched(name)?;
             return Ok(());
         }
         let metadata = fs::symlink_metadata(path)
@@ -431,6 +512,7 @@ impl Files {
                 // Some Windows reparse points expose no readable link target.
                 // There is no content to inherit, so pass the live entry through
                 // untouched instead of failing the whole environment snapshot.
+                collection.note_untouched(Path::new(&name))?;
                 eprintln!(
                     "Skipping unreadable environment link (not inherited): {}",
                     path.display()
@@ -443,6 +525,7 @@ impl Files {
                 // INetCache\Content.IE5 junction, whose malformed print name
                 // makes Windows report path-not-found). Pass the live entry
                 // through untouched instead of failing the snapshot.
+                collection.note_untouched(Path::new(&name))?;
                 eprintln!(
                     "Skipping unresolvable environment link (not inherited): {}",
                     path.display()
@@ -494,21 +577,18 @@ impl Files {
             return Ok(());
         } else if metadata.is_file() {
             let blob = match collection {
-                Collection::Capture => self.save_blob(path)?,
-                Collection::Inspect => hash(path)?,
-                Collection::Verify(expected) => {
+                Collection::Capture(checked) => self.save_blob(path, Some(checked))?,
+                #[cfg(test)]
+                Collection::CaptureUnbatched => self.save_blob(path, None)?,
+                Collection::Inspect(_) => hash(path)?,
+                Collection::Verify(expected, checked) => {
                     let Some(Entry::File { blob, .. }) = expected.get(&name) else {
                         return Err("Feedback workspace files changed after completion".into());
                     };
                     if hash(path)? != *blob {
                         return Err("Feedback workspace files changed after completion".into());
                     }
-                    let stored = self.blob_path(blob)?;
-                    real_child_path(&self.directory, &stored, true)?
-                        .ok_or("Missing workspace file blob")?;
-                    if hash(&stored)? != *blob {
-                        return Err(format!("Damaged workspace file blob: {blob}"));
-                    }
+                    self.verify_blob(blob, checked)?;
                     blob.clone()
                 }
             };
@@ -554,23 +634,46 @@ impl Files {
         for parent in parents {
             self.load(parent)?;
         }
-        let root = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let value = self.capture_value(workspace, head, parents, &RefCell::default())?;
+        self.save_version(version, value)
+    }
+
+    fn capture_value(
+        &self,
+        workspace: &Path,
+        head: &str,
+        parents: &[String],
+        checked: &RefCell<BTreeSet<String>>,
+    ) -> Result<Version, String> {
+        let root = workspace.canonicalize().map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut entries, Collection::Capture)?;
+            self.collect(&root, &path, &mut entries, Collection::Capture(checked))?;
         }
-        self.save_version(
-            version,
-            Version {
-                head: head.into(),
-                parents: parents.to_vec(),
-                entries,
-                checksum: None,
-                rooted: None,
-            },
-        )
+        Ok(Version { head: head.into(), parents: parents.to_vec(), entries, checksum: None, rooted: None })
+    }
+
+    /// Environment sealing only: preserve the parent's immutable reference when
+    /// full live-byte/metadata collection proves no change, without writing an
+    /// orphan manifest. Missing history must fail before any live bytes are saved.
+    pub(crate) fn capture_reusing(&self, workspace: &Path, parent: &str) -> Result<String, String> {
+        let previous = self.load(parent)?;
+        if previous.rooted.is_some() {
+            return Err("Root-qualified environment capture requires explicit root targets".into());
+        }
+        let checked = RefCell::default();
+        self.validate_value(&previous, &checked)?;
+        let value = self.capture_value(workspace, "", &[parent.into()], &checked)?;
+        self.save_changed(value, parent, &previous)
+    }
+
+    fn save_changed(&self, value: Version, parent: &str, previous: &Version) -> Result<String, String> {
+        if value.entries == previous.entries && value.rooted == previous.rooted {
+            return Ok(parent.into());
+        }
+        let version = Uuid::new_v4().to_string();
+        self.save_version(&version, value)?;
+        Ok(version)
     }
 
     fn ancestors(&self, version: &str) -> Result<BTreeSet<String>, String> {
@@ -689,26 +792,31 @@ impl Files {
     }
 
     pub(crate) fn validate(&self, versions: &[String]) -> Result<(), String> {
+        let checked = RefCell::default();
         if versions.len() == 1 {
-            if let Some(rooted) = self.load(&versions[0])?.rooted {
-                for root in rooted.roots.values() {
-                    self.validate_entries(&root.entries)?;
-                }
-                return Ok(());
+            let value = self.load(&versions[0])?;
+            if value.rooted.is_some() {
+                return self.validate_value(&value, &checked);
             }
         }
-        self.validate_entries(&self.compose(versions)?)
+        // Legacy composition still validates its recorded ancestry.
+        self.validate_entries(&self.compose(versions)?, &checked)
     }
 
-    fn validate_entries(&self, entries: &Entries) -> Result<(), String> {
+    fn validate_value(&self, value: &Version, checked: &RefCell<BTreeSet<String>>) -> Result<(), String> {
+        self.validate_entries(&value.entries, checked)?;
+        if let Some(rooted) = &value.rooted {
+            for root in rooted.roots.values() {
+                self.validate_entries(&root.entries, checked)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_entries(&self, entries: &Entries, checked: &RefCell<BTreeSet<String>>) -> Result<(), String> {
         for entry in entries.values() {
             if let Entry::File { blob, .. } = entry {
-                let path = self.blob_path(blob)?;
-                real_child_path(&self.directory, &path, true)?
-                    .ok_or("Missing workspace file blob")?;
-                if hash(&path)? != *blob {
-                    return Err(format!("Damaged workspace file blob: {blob}"));
-                }
+                self.verify_blob(blob, checked)?;
             }
         }
         Ok(())
@@ -726,8 +834,9 @@ impl Files {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
+        let checked = RefCell::default();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut entries, Collection::Verify(&value.entries))?;
+            self.collect(&root, &path, &mut entries, Collection::Verify(&value.entries, &checked))?;
         }
         if entries != value.entries {
             return Err("Feedback workspace files changed after completion".into());
@@ -797,14 +906,22 @@ impl Files {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let mut current = Entries::new();
+        let untouched = RefCell::new(BTreeSet::new());
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut current, Collection::Inspect)?;
+            self.collect(&root, &path, &mut current, Collection::Inspect(&untouched))?;
         }
+        let untouched = untouched.into_inner();
         // Resolve all destination parents before changing even the first root.
         // A captured regular file that will be replaced by a directory is not
         // traversal: removal precedes creation. Links remain forbidden, even
         // when the snapshot would replace them with a directory.
-        for name in desired.keys() {
+        for (name, entry) in &desired {
+            if let Some(blocker) = untouched_blocker(&untouched, name, matches!(entry, Entry::Directory { .. })) {
+                return Err(format!(
+                    "Cannot restore managed path {}: conflicts with untouched excluded cache or unreadable/unresolvable link at {blocker}; preserving live state",
+                    root.join(name).display()
+                ));
+            }
             if let Some(parent) = Path::new(name).parent().filter(|path| !path.as_os_str().is_empty()) {
                 let mut replaced = None;
                 for ancestor in parent.ancestors().filter(|path| !path.as_os_str().is_empty()) {
@@ -824,7 +941,11 @@ impl Files {
             if previous.rooted.is_some() {
                 return Err("Root-qualified environment snapshot cannot be used as a single-root predecessor".into());
             }
-            previous.entries.keys().map(|name| root.join(name)).collect()
+            // A legacy predecessor cannot authorize deleting/traversing an
+            // omitted live link. Ancestor directories are removed only if empty.
+            previous.entries.keys()
+                .filter(|name| untouched_blocker(&untouched, name, true).is_none())
+                .map(|name| root.join(name)).collect()
         } else { Vec::new() };
         Ok(Some(Materialization { root, desired, current, tracked: tracked.into_iter().map(str::to_owned).collect(), previous_paths }))
     }

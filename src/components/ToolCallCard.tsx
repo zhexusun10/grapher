@@ -9,7 +9,6 @@ import {
   FileCode,
   FileEdit,
   GitFork,
-  Boxes,
   Compass,
   Globe,
   Wrench,
@@ -183,21 +182,11 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             summary: args.plan_type ? t("决定任务路线: [{0}]", args.plan_type) : t("任务路线决策"),
             type: "route",
           };
-        case "node":
-          return {
-            icon: <Boxes size={14} className="tool-icon node" />,
-            badge: "node",
-            summary: args.name ? t("创建执行节点 [{0}]", args.name) : t("定义拓扑节点"),
-            type: "graph",
-          };
-        case "edge":
+        case "edit_graph":
           return {
             icon: <GitFork size={14} className="tool-icon edge" />,
-            badge: "edge",
-            summary:
-              args.from && args.to
-                ? `${args.feedback ? t("反馈边") : t("依赖边")}: [${args.from}] → [${args.to}]`
-                : t("连接依赖关系"),
+            badge: "edit_graph",
+            summary: t("编辑任务图"),
             type: "graph",
           };
         case "web_search":

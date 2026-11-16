@@ -7,6 +7,13 @@ use crate::{
     runtime::{perform, perform_result, Job, Runtime},
 };
 
+#[path = "environment_runtime_selector_tests.rs"]
+mod rooted_runtime_selector_tests;
+#[path = "environment_runtime_return_native_tests.rs"]
+mod rooted_runtime_return_native_tests;
+#[path = "environment_runtime_code_tests.rs"]
+mod rooted_runtime_code_tests;
+
 fn automatic() -> EnvironmentConfig {
     let mut config = state_policy();
     config.discovery = true;
@@ -48,6 +55,16 @@ fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
 }
 
 fn run_created_at(runtime: &mut Runtime, job: &Job, prefix: &str, workspace_owned: bool) {
+    run_created_at_with(runtime, job, prefix, workspace_owned, |_, _| Ok(()));
+}
+
+fn run_created_at_with(
+    runtime: &mut Runtime,
+    job: &Job,
+    prefix: &str,
+    workspace_owned: bool,
+    configure: impl Fn(&Path, &Path) -> Result<(), String>,
+) {
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -91,6 +108,7 @@ fn run_created_at(runtime: &mut Runtime, job: &Job, prefix: &str, workspace_owne
                 return Err(format!("native venv creation failed: {code}"));
             }
             fs::write(venv.join("marker"), &job.execution.node).map_err(|e| e.to_string())?;
+            configure(&venv, Path::new(&job.execution.worktree))?;
             Ok(())
         },
     );
@@ -101,6 +119,26 @@ fn run_created_at(runtime: &mut Runtime, job: &Job, prefix: &str, workspace_owne
         "{:?}",
         runtime.state.nodes[&job.execution.node].error
     );
+}
+
+// A genuine project-owned native dependency, not a copied HOME/toolchain.
+// This fixture's explicit .pth installation is business configuration; Runtime
+// never rewrites it or native binaries to pretend relocation is supported.
+fn install_project_native_input(venv: &Path, work: &Path) -> Result<(), String> {
+    let python = venv.join(if cfg!(windows) { "Scripts/python.exe" } else { "bin/python" });
+    let mut command = Command::new(python);
+    command.args(["-I", "-B", "-c", "import _hashlib,json,sysconfig; print(json.dumps({'native':_hashlib.__file__,'site':sysconfig.get_path('purelib')}))"]);
+    let output = controlled_output(command)?;
+    let info: serde_json::Value = serde_json::from_slice(&output).map_err(|e| e.to_string())?;
+    let native = Path::new(info["native"].as_str().ok_or("Missing native extension")?);
+    let site = Path::new(info["site"].as_str().ok_or("Missing venv site directory")?);
+    let vendor = work.join("vendor/native");
+    fs::create_dir_all(&vendor).map_err(|e| e.to_string())?;
+    fs::copy(native, vendor.join(native.file_name().ok_or("Missing native extension filename")?)).map_err(|e| e.to_string())?;
+    let path = crate::native::host_path(&vendor).to_string_lossy().into_owned();
+    let literal = serde_json::to_string(&path).map_err(|e| e.to_string())?.chars().map(|c| if c.is_ascii() { c.to_string() } else { format!("\\U{:08x}", c as u32) }).collect::<String>();
+    fs::write(site.join("project-native.pth"), format!("import sys; sys.path.insert(0, {literal})\n")).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
@@ -177,7 +215,7 @@ fs.writeFileSync('code.txt','business-code');
     // active binding remains. It must not reinterpret state paths as project paths.
     let mut bound = launch;
     bound.environment = Some(crate::environment_discovery::Binding {
-        kind: "venv".into(), prefix: "env-a".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+        kind: "venv".into(), prefix: "env-a".into(), abi: "0".repeat(40), root: Some("workspace".into()), runtime_evidence: None,
     });
     let input = CompositeResult { launch_ref: env.launch(&bound).unwrap(), ..result.clone() };
     let next = env.discover(Path::new(&job.execution.worktree), &input, &runtime.root.join("empty-session")).unwrap();
@@ -201,7 +239,7 @@ fn root_qualified_scopes_keep_state_names_out_of_project_capture_and_survive_loc
         EnvironmentScope { root: "state".into(), path: "state-only".into() },
     ]);
     launch.environment = Some(crate::environment_discovery::Binding {
-        kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+        kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()), runtime_evidence: None,
     });
     let reference = env.launch(&launch).unwrap();
     assert_eq!(env.exclusions(&reference).unwrap(), vec!["business-env"]);
@@ -508,19 +546,187 @@ fn rooted_terminals_with_w_and_s_bindings_keep_named_results_and_real_interprete
         let env = store(&runtime);
         let launch = env.load_launch(&result.launch_ref).unwrap();
         assert_eq!(launch.environment.as_ref().unwrap().root.as_deref(), Some(if name == "A" { "workspace" } else { "state" }));
+        assert!(launch.environment.as_ref().unwrap().runtime_evidence.is_some());
         env.verify_view(Path::new(result.layout.as_deref().unwrap()), &result.launch_ref, &result.environment_ref).unwrap();
         let entry = descriptor.entries.iter().find(|entry| entry.name == name).unwrap();
         let expected = if name == "A" { PathBuf::from(&entry.workspace).join(".venv") } else { state_of(&runtime, &entry.workspace).join(".venv") };
         fs::write(expected.join("marker"), "partial environment edit").unwrap();
+        // Preflight must use captured native bytes, not execute the broken live
+        // prefix. Removing the whole bin directory also avoids retaining broken
+        // sibling interpreter links that intentionally cannot be overwritten.
+        fs::remove_dir_all(expected.join(if cfg!(windows) { "Scripts" } else { "bin" })).unwrap();
+        env.preflight_history_result(Path::new(&entry.workspace), &entry.result, &entry.result.launch_ref).unwrap();
         let restored = env.prepare(Path::new(&entry.workspace), &entry.result, &Uuid::new_v4().to_string(), &entry.result.code_ref, vec![], false, true).unwrap();
         assert_eq!(fs::read_to_string(expected.join("marker")).unwrap(), name);
         assert_eq!(restored.environment_ref, entry.result.environment_ref);
         env.validate_launch(Path::new(&entry.workspace), &env.load_launch(&restored.launch_ref).unwrap()).unwrap();
+        let mut legacy = env.load_launch(&restored.launch_ref).unwrap();
+        legacy.environment.as_mut().unwrap().runtime_evidence = None;
+        if name == "B" { legacy.environment.as_mut().unwrap().root = None; }
+        let legacy_ref = env.launch(&legacy).unwrap();
+        let legacy_file = env.directory.join("launches").join(format!("{legacy_ref}.json"));
+        let old_bytes = fs::read(&legacy_file).unwrap();
+        env.validate_launch(Path::new(&entry.workspace), &legacy).unwrap();
+        assert_eq!(fs::read(&legacy_file).unwrap(), old_bytes, "legacy ABI/JSON is not rewritten or retrofitted");
         let launch = env.load_launch(&restored.launch_ref).unwrap().expanded(Path::new(&entry.workspace));
         let mut command = Command::new(&launch.entry);
         command.args(["-I", "-c", "import sys,pathlib; assert pathlib.Path(sys.prefix).resolve()==pathlib.Path(sys.argv[1]).resolve(); print(sys.executable)"]).arg(&expected);
         controlled_output(command).unwrap();
     }
+}
+
+// Deliberately stale evidence is written as a NEW L; installed host tools and
+// historical execution/launch records remain untouched.
+fn stale_external_launch(env: &Environments, reference: &str) -> String {
+    let mut value = serde_json::to_value(env.load_launch(reference).unwrap()).unwrap();
+    let external = value["environment"]["runtimeEvidence"]["files"].as_array_mut().unwrap()
+        .iter_mut().find(|file| file["location"] == "external").expect("real venv has observed external native inputs");
+    external["blob"] = serde_json::Value::String("0".repeat(40));
+    env.launch(&serde_json::from_value(value).unwrap()).unwrap()
+}
+
+#[test]
+fn rooted_runtime_preflight_mismatch_preserves_code_both_roots_and_history() {
+    let (_temp, _source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created_at(&mut runtime, &job, ".venv", true);
+    let result = runtime.state.nodes["A"].result.as_ref().unwrap().clone();
+    let env = store(&runtime);
+    let path = Path::new(&job.execution.worktree);
+    let state = env.state_root(path).unwrap();
+    let history = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    let stale = CompositeResult { launch_ref: stale_external_launch(&env, &result.launch_ref), ..result.clone() };
+    fs::write(path.join("partial-code"), "keep code").unwrap();
+    fs::write(path.join(".venv/marker"), "keep W").unwrap();
+    fs::create_dir_all(state.join(".agent-home")).unwrap();
+    fs::write(state.join(".agent-home/partial"), "keep S").unwrap();
+    env.validate_result_metadata(&stale).unwrap(); // Actor still does no native IO.
+    let error = env.preflight_history_result(path, &stale, &result.launch_ref).unwrap_err();
+    assert!(error.contains("runtime input bytes changed"), "{error}");
+    assert!(env.prepare(path, &stale, &Uuid::new_v4().to_string(), &stale.code_ref, vec![], false, true).is_err());
+    assert_eq!(fs::read_to_string(path.join("partial-code")).unwrap(), "keep code");
+    assert_eq!(fs::read_to_string(path.join(".venv/marker")).unwrap(), "keep W");
+    assert_eq!(fs::read_to_string(state.join(".agent-home/partial")).unwrap(), "keep S");
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), history);
+    env.validate_result(&result).unwrap();
+}
+
+#[test]
+fn rooted_missing_w_result_checks_runtime_inputs_before_reconstruction_or_s_restore() {
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created_at(&mut runtime, &job, ".venv", true);
+    let descriptor = publish(&mut runtime, &source);
+    let env = store(&runtime);
+    let stale = stale_external_launch(&env, &descriptor.result.launch_ref);
+    let state = env.state_root(Path::new(&descriptor.workspace)).unwrap();
+    fs::create_dir_all(state.join(".agent-home")).unwrap();
+    fs::write(state.join(".agent-home/partial"), "keep S without W").unwrap();
+    fs::remove_dir_all(&descriptor.workspace).unwrap();
+    let history = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    let (mut job, control) = runtime.start_result(&["-c".into(), "print('must not execute')".into()]).unwrap();
+    // Inject only a copied worker input to model stale external bytes without
+    // mutating the machine's installed Python or manufacturing a publication.
+    job.fixture_environment_launch(stale);
+    let outcome = perform_result(&job, &control, |_| panic!("bad preflight cannot prepare a writer"));
+    assert!(outcome.as_ref().unwrap_err().contains("runtime input bytes changed"), "{outcome:?}");
+    assert!(runtime.finish_result(&job, &control, outcome).is_err());
+    assert!(!Path::new(&descriptor.workspace).exists(), "no code was reconstructed before rejecting the native input");
+    assert_eq!(fs::read_to_string(state.join(".agent-home/partial")).unwrap(), "keep S without W");
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), history);
+}
+
+#[test]
+fn rooted_missing_w_descriptor_checks_runtime_inputs_before_reconstructing_code() {
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+    let execution = runtime.jobs().unwrap().remove(0);
+    run_created_at(&mut runtime, &execution, ".venv", true);
+    let descriptor = publish(&mut runtime, &source);
+    let env = store(&runtime);
+    let stale = stale_external_launch(&env, &descriptor.result.launch_ref);
+    let state = env.state_root(Path::new(&descriptor.workspace)).unwrap();
+    fs::create_dir_all(state.join(".agent-home")).unwrap();
+    fs::write(state.join(".agent-home/partial"), "keep S without W").unwrap();
+    fs::remove_dir_all(&descriptor.workspace).unwrap();
+    let history = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    let mut job = runtime.publication_environment_input().unwrap().unwrap();
+    // Change only the copied worker input, never a published historical L.
+    job.inputs[0].1.launch_ref = stale;
+    job.validate().unwrap();
+    let error = job.descriptor(&descriptor.result.code_ref).unwrap_err();
+    assert!(error.contains("runtime input bytes changed"), "{error}");
+    assert!(!Path::new(&descriptor.workspace).exists(), "descriptor reconstruction wrote W before rejecting a known bad native input");
+    assert_eq!(fs::read_to_string(state.join(".agent-home/partial")).unwrap(), "keep S without W");
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), history);
+}
+
+#[test]
+fn rooted_private_switch_inherits_the_new_binding_and_restores_both_histories() {
+    let (_temp, source, mut runtime) = setup(
+        graph(&["A", "B", "C"], &[("A", "B", false), ("B", "C", false)]),
+        automatic(),
+        r#"
+const {execFileSync}=await import('node:child_process');
+const prefix=process.env.GTEST_STATE+'/same-env';
+if(name==='A') {
+  execFileSync('python',['-m','venv','--without-pip',prefix],{env:process.env});
+  fs.writeFileSync(prefix+'/marker','S original');
+}
+if(name==='C') {
+  execFileSync('python',['-I','-c',"import pathlib,sys; p=pathlib.Path(sys.prefix); assert p.resolve()==pathlib.Path(sys.argv[1]).resolve(); assert (p/'marker').read_text()=='B patch'",prefix],{env:process.env});
+}
+"#,
+    );
+    let a = runtime.jobs().unwrap().remove(0);
+    run_created_at(&mut runtime, &a, "same-env", true);
+    let first = runtime.state.nodes["A"].result.clone().unwrap();
+    let b = runtime.jobs().unwrap().remove(0);
+    let data = runtime.root.clone();
+    let outcome = perform(&b, &data, &[], |_| {}, |head| {
+        runtime.emit(EventKind::Prepared { execution_id: b.execution.id.clone(), head })?;
+        let env = store(&runtime);
+        let input = env.load_record_metadata(&b.execution.id, "before")?;
+        let path = Path::new(&b.execution.worktree);
+        let launch = env.load_launch(&input.launch_ref)?.expanded(path);
+        let state = env.state_root(path)?;
+        let prefix = state.join("same-env");
+        let interpreter = prefix.join(if cfg!(windows) { "Scripts/python.exe" } else { "bin/python" });
+        let session = data.join("sessions").join(&b.execution.id);
+        let context = crate::environment_discovery::context_with_source(path, Some(&state), Some(&source),
+            &b.execution.id, &launch, &session, true)?;
+        let code = crate::environment_discovery::tool(vec![context.to_string_lossy().into_owned(),
+            "python".into(), interpreter.to_string_lossy().into_owned(), "-I".into(), "-c".into(),
+            "import pathlib,sys; p=pathlib.Path(sys.prefix); assert p.resolve()==pathlib.Path(sys.argv[1]).resolve(); (p/'marker').write_text('B patch')".into(),
+            prefix.to_string_lossy().into_owned()])?;
+        if code != 0 { return Err(format!("private switch command failed: {code}")); }
+        Ok(())
+    });
+    assert!(outcome.is_ok(), "{outcome:?}");
+    runtime.finish(&b.execution, outcome).unwrap();
+    let second = runtime.state.nodes["B"].result.clone().unwrap();
+    let env = store(&runtime);
+    assert_eq!(env.load_launch(&first.launch_ref).unwrap().environment.unwrap().root.as_deref(), Some("workspace"));
+    assert_eq!(env.load_launch(&second.launch_ref).unwrap().environment.unwrap().root.as_deref(), Some("state"));
+    let c = runtime.jobs().unwrap().remove(0);
+    assert_eq!(c.environment_input.as_ref().unwrap().launch_ref, second.launch_ref);
+    run(&mut runtime, &c);
+    let historical = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    let path = Path::new(&c.execution.worktree);
+    let state = env.state_root(path).unwrap();
+    let mut previous = runtime.state.nodes["C"].result.as_ref().unwrap().launch_ref.clone();
+    for (selected, expected_state) in [(&first, "S original"), (&second, "B patch")] {
+        env.preflight_history_result(path, selected, &previous).unwrap();
+        let restored = env.prepare(path, selected, &Uuid::new_v4().to_string(), &selected.code_ref,
+            vec![], false, true).unwrap();
+        let launch = env.load_launch(&restored.launch_ref).unwrap();
+        env.validate_launch(path, &launch).unwrap();
+        assert_eq!(restored.launch_ref, selected.launch_ref);
+        assert_eq!(restored.environment_ref, selected.environment_ref);
+        assert_eq!(fs::read_to_string(path.join("same-env/marker")).unwrap(), "A");
+        assert_eq!(fs::read_to_string(state.join("same-env/marker")).unwrap(), expected_state);
+        previous = restored.launch_ref;
+    }
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), historical);
 }
 
 #[test]
@@ -548,6 +754,35 @@ fs.writeFileSync(process.env.HOME+'/recorded-config','S config');
     assert!(!state.join(".venv").exists(), "recorded S absence is distinct from W .venv");
     assert!(path.join(".venv/marker").is_file());
     assert!(!source.join(".venv").exists());
+}
+
+#[test]
+fn rooted_project_native_dependency_uses_coderef_not_e_and_runs_after_missing_w_recovery() {
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(),
+        "const {execFileSync}=await import('node:child_process');execFileSync('git',['add','--','vendor/native']);");
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created_at_with(&mut runtime, &job, ".venv", false, install_project_native_input);
+    assert!(workspace::project_git(Path::new(&job.execution.worktree), &["ls-files"]).unwrap().contains("vendor/native/"));
+    let descriptor = publish(&mut runtime, &source);
+    let env = store(&runtime);
+    let binding = serde_json::to_value(env.load_launch(&descriptor.result.launch_ref).unwrap().environment.unwrap()).unwrap();
+    assert_eq!(binding["root"], "state");
+    assert!(binding["runtimeEvidence"]["files"].as_array().unwrap().iter().any(|file| file["root"] == "workspace" && file["path"].as_str().is_some_and(|path| path.starts_with("vendor/native/"))));
+    let frame: serde_json::Value = serde_json::from_slice(&fs::read(env.directory.join("files/versions").join(format!("{}.json", descriptor.result.environment_ref))).unwrap()).unwrap();
+    assert!(frame["rooted"]["roots"].get("workspace").is_none(), "project native code must not acquire a second E delivery path");
+    let work = PathBuf::from(&descriptor.workspace);
+    let state = state_of(&runtime, &descriptor.workspace);
+    let source_modules = fs::read_dir(source.join("vendor/native")).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>();
+    assert_eq!(source_modules.len(), 1, "native project dependency follows normal publication");
+    let historical = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    fs::remove_dir_all(&work).unwrap();
+    fs::remove_dir_all(state.join(".venv").join(if cfg!(windows) { "Scripts" } else { "bin" })).unwrap();
+    let args = vec!["-I".into(), "-B".into(), "-c".into(), "import ssl,_hashlib,pathlib,sys; assert pathlib.Path(_hashlib.__file__).resolve().is_relative_to(pathlib.Path.cwd().resolve()/'vendor'/'native'); print(pathlib.Path(sys.prefix,'marker').read_text())".into()];
+    let (job, control) = runtime.start_result(&args).unwrap();
+    let outcome = perform_result(&job, &control, |input| runtime.emit(EventKind::ResultExecutionPrepared { input }));
+    assert_eq!(runtime.finish_result(&job, &control, outcome).unwrap().trim(), "A");
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), historical);
+    assert!(work.join("vendor/native").join(&source_modules[0]).is_file());
 }
 
 #[test]

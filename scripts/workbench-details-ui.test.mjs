@@ -25,7 +25,7 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
     const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
     const longName = "inspect_" + "workbench_layout_and_interaction_details_".repeat(8);
     const graph = { originalGoal: "Workbench details", nodes: [
-      { name: longName, task: "Inspect the layout" }, { name: "verify", task: "Verify the interactions" },
+      { id: longName, task: "Inspect the layout" }, { id: "verify", task: "Verify the interactions" },
     ], edges: [{ from: longName, to: "verify", feedback: false }] };
     const completed = { runId: "details-completed", config, planType: "graph", phase: "completed", approved: true, paused: false,
       graph, nodes: { [longName]: { status: "completed" }, verify: { status: "completed" } },
@@ -41,10 +41,10 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
     const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
     const labels = language === "en" ? {
       create: "New node", cancel: "Cancel node creation", back: "Back to Planner conversation",
-      progress: "Node completion progress", approve: "Approve", reject: "Reject", name: "Name (name)",
+      progress: "Node completion progress", approve: "Approve", reject: "Reject", name: "Identifier (id)",
     } : {
       create: "新建节点", cancel: "取消新建节点", back: "返回规划对话",
-      progress: "节点完成进度", approve: "批准", reject: "拒绝", name: "名称 (name)",
+      progress: "节点完成进度", approve: "批准", reject: "拒绝", name: "标识 (id)",
     };
     const errors = [];
     const server = await createServer({ cacheDir: "node_modules/.vite-workbench-details",

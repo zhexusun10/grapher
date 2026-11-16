@@ -254,7 +254,7 @@ mod tests {
         for index in 0..64 {
             let name = format!("node-{index}");
             let status = match index % 4 { 0 => "running", 1 => "failed", 2 => "blocked", _ => "completed" };
-            state.graph.nodes.push(crate::model::Node { name: name.clone(), task: name.clone() });
+            state.graph.nodes.push(crate::model::Node { id: name.clone(), task: name.clone() });
             state.nodes.insert(name.clone(), crate::model::NodeState { status: status.into(), ..Default::default() });
             state.executions.push(serde_json::from_value(json!({
                 "id":format!("exec-{index}"),"node":name,"revision":1,"attempt":1,
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn indexed_recovery_preserves_preparation_session_and_merger_failure_evidence() {
         let mut state = Snapshot { approved: true, phase: "needs_attention".into(), ..Default::default() };
-        state.graph.nodes.push(crate::model::Node { name: "task".into(), task: "test".into() });
+        state.graph.nodes.push(crate::model::Node { id: "task".into(), task: "test".into() });
         state.nodes.insert("task".into(), crate::model::NodeState { status: "blocked".into(),
             error: Some("Workspace composition blocked: Merger failed: conflict".into()), ..Default::default() });
         let execution: crate::model::Execution = serde_json::from_value(json!({
@@ -358,7 +358,7 @@ mod tests {
             phase: "needs_attention".into(), ..Default::default() };
         for index in 0..count {
             let name = format!("task-{index}");
-            state.graph.nodes.push(crate::model::Node { name: name.clone(), task: name.clone() });
+            state.graph.nodes.push(crate::model::Node { id: name.clone(), task: name.clone() });
             let blocked = index % 2 == 0;
             state.nodes.insert(name.clone(), crate::model::NodeState {
                 status: if blocked { "blocked" } else { "failed" }.into(),
@@ -644,7 +644,7 @@ mod tests {
         let draft = Graph {
             original_goal: "Draft a topology".into(),
             nodes: vec![crate::model::Node {
-                name: "one".into(),
+                id: "one".into(),
                 task: "Do one".into(),
             }],
             edges: vec![],

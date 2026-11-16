@@ -1485,8 +1485,8 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 fn planner_node_status(snapshot: &Snapshot) -> String {
     let mut text = String::from("Current graph node status:\n");
     for node in &snapshot.graph.nodes {
-        if let Some(state) = snapshot.nodes.get(&node.name) {
-            let status_desc = if snapshot.is_node_user_paused(&node.name) {
+        if let Some(state) = snapshot.nodes.get(&node.id) {
+            let status_desc = if snapshot.is_node_user_paused(&node.id) {
                 "paused (manually paused by user)".to_string()
             } else if state.status == "failed" {
                 if let Some(err) = &state.error {
@@ -1507,7 +1507,7 @@ fn planner_node_status(snapshot: &Snapshot) -> String {
             } else {
                 state.status.clone()
             };
-            text.push_str(&format!("- {}: {}\n", node.name, status_desc));
+            text.push_str(&format!("- {}: {}\n", node.id, status_desc));
         }
     }
     text
@@ -1532,7 +1532,7 @@ fn planner_followup_context_required(snapshot: &Snapshot) -> bool {
         && snapshot.graph.nodes.iter().any(|node| {
             snapshot
                 .nodes
-                .get(&node.name)
+                .get(&node.id)
                 .is_none_or(|state| state.status != "completed")
         })
 }
@@ -1579,9 +1579,7 @@ fn restrict_planner_workspace_targets(targets: &mut serde_json::Value, grants: &
 }
 
 fn planner_workspace_requested_id(result: &serde_json::Value) -> Option<&str> {
-    result["requestedId"]
-        .as_str()
-        .or_else(|| result["requestedNode"].as_str())
+    result["requestedId"].as_str()
 }
 
 fn planner_workspace_notice(
@@ -2547,7 +2545,7 @@ fn plan_goal_internal_with_options(
                         "serial" => Graph {
                             original_goal: goal.clone(),
                             nodes: vec![Node {
-                                name: "task".into(),
+                                id: "task".into(),
                                 task: goal.clone(),
                             }],
                             edges: Vec::new(),
@@ -2791,7 +2789,7 @@ fn plan_goal_internal_with_options(
                                     task: &task,
                                     session_dir: &planner_session_dir,
                                     extension: Some(&service.extension),
-                                    tools: Some("node,edge,read,bash,write,edit"),
+                                    tools: Some("edit_graph,read_graph,read,bash,write,edit"),
                                     session_id: Some(&planner_session_id),
                                     extra_args: planner_extra_args,
                                     environment: vec![
@@ -2879,9 +2877,7 @@ fn plan_goal_internal_with_options(
                                     {
                                         if revision_run_id.is_some()
                                             && event["type"] == "tool_execution_start"
-                                            && event["toolName"]
-                                                .as_str()
-                                                .is_some_and(|name| matches!(name, "node" | "edge"))
+                                            && event["toolName"] == "edit_graph"
                                         {
                                             if let Some(tool_call_id) = event["toolCallId"].as_str()
                                             {
@@ -2966,9 +2962,7 @@ fn plan_goal_internal_with_options(
                                         }
                                         // The Planner extension writes the graph file only after an edit validated, so an accepted tool end publishes the whole draft topology. Storing it durably lets a reload keep building the same preview, while the committed graph stays authoritative for execution.
                                         if event["type"] == "tool_execution_end"
-                                            && event["toolName"]
-                                                .as_str()
-                                                .is_some_and(|name| matches!(name, "node" | "edge"))
+                                            && event["toolName"] == "edit_graph"
                                         {
                                             project_planner_graph_preview(
                                                 &service,
@@ -5778,7 +5772,7 @@ fn get_merger_prompt(
                 .graph
                 .nodes
                 .iter()
-                .find(|n| n.name == target_node_name)
+                .find(|n| n.id == target_node_name)
                 .map(|n| n.task.clone())
                 .unwrap_or_else(|| runtime.state.graph.original_goal.clone())
         };

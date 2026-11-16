@@ -120,12 +120,22 @@ jobs:
           GRAPHER_ENV_PROBE_REQUIRE_UV: '1'
           GRAPHER_ENV_PROBE_REPORT: ${{ runner.temp }}/environment-baseline.json
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_project_baseline -- --ignored --nocapture --test-threads=1
+      # Cost comparison only on explicit/weekly runs; no release/publication
+      # dependency and no timing threshold. Correctness stays in the Rust suites.
+      - name: Compare immutable dependency sealing costs (component probe)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        timeout-minutes: 6
+        env:
+          GRAPHER_ENV_SEAL_PROBE_REPORT: ${{ runner.temp }}/dependency-sealing.json
+        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_dependency_sealing_benchmark -- --ignored --nocapture --test-threads=1
       - name: Retain native-host dependency cost evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: environment-baseline-${{ matrix.os }}
-          path: ${{ runner.temp }}/environment-baseline.json
+          path: |
+            ${{ runner.temp }}/environment-baseline.json
+            ${{ runner.temp }}/dependency-sealing.json
           if-no-files-found: warn
           retention-days: 7
       # Other matrix/event paths already run these in backend/environment
@@ -135,6 +145,18 @@ jobs:
         if: runner.os == 'Windows' && github.event_name == 'push'
         timeout-minutes: 4
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_ -- --test-threads=1
+      # The broader library suites cover protocol/legacy/runtime-input units
+      # elsewhere. Windows pushes need them explicitly beside real W/S recovery.
+      - name: Verify native runtime recovery evidence on Windows
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        timeout-minutes: 3
+        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime_evidence -- --test-threads=1
+      - name: Verify native runtime codeRef byte preflight on Windows
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        timeout-minutes: 3
+        run: |
+          node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime_project_code_proof -- --test-threads=1
+          node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib streaming_git_blob -- --test-threads=1
       # Linux/macOS and non-push Windows runs already cover these through the
       # backend/environment suites. Keep Windows push coverage focused as well.
       - name: Verify trusted Node bootstrap isolation on Windows
@@ -244,6 +266,9 @@ jobs:
       - name: Install Playwright Chromium
         if: matrix.os == 'macos-15'
         run: node node_modules/@playwright/test/cli.js install chromium
+      - name: Verify Graph task and Merger conversation identity
+        if: matrix.os == 'macos-15'
+        run: node --test --test-name-pattern="literal task IDs and colliding Merger cards|prototype-like and Unicode task IDs|Merger history stays separate" scripts/graph-planning-fit.test.mjs
       - name: Verify macOS browser Graph publication and persistent Serial follow-up
         if: matrix.os == 'macos-15'
         timeout-minutes: 10

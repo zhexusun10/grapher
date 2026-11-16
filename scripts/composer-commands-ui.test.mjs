@@ -39,7 +39,7 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
         result = {
           runId: body.runId,
           title: body.title,
-          graph: { originalGoal: "Original prompt", nodes: [{ name: "a", task: "t" }, { name: "b", task: "t" }], edges: [] },
+          graph: { originalGoal: "Original prompt", nodes: [{ id: "a", task: "t" }, { id: "b", task: "t" }], edges: [] },
           config: { repository: "/project", model: "test/one", thinkingLevel: "low", maxParallel: 2, maxFeedback: 2, autoApprove: true },
           plan: null,
           nodes: { a: { status: "running", revision: 1, head: null, instruction: "", error: null }, b: { status: "waiting", revision: 1, head: null, instruction: "", error: null } },

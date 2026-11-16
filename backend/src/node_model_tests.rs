@@ -475,7 +475,7 @@ fn blocked_composition_failure_uses_the_new_model_after_restart() {
         nodes: ["first", "after"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -553,7 +553,7 @@ fn an_upstream_block_does_not_rewrite_a_descendants_historical_override() {
         nodes: ["first", "after"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -679,7 +679,7 @@ fn newly_added_nodes_use_this_conversations_saved_settings() {
     runtime.update_node_models(&latest).unwrap();
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node {
-        name: "added".into(),
+        id: "added".into(),
         task: "added".into(),
     });
     runtime
@@ -717,7 +717,7 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_complet
         nodes: ["failed", "completed", "running", "after", "pending"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -1080,7 +1080,7 @@ fn conversation_settings_do_not_leak_into_another_run_or_global_defaults() {
     runtime.approve().unwrap();
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node {
-        name: "added".into(),
+        id: "added".into(),
         task: "added".into(),
     });
     runtime
@@ -1204,11 +1204,11 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
         original_goal: "reauth recovery".into(),
         nodes: vec![
             Node {
-                name: "first".into(),
+                id: "first".into(),
                 task: "first".into(),
             },
             Node {
-                name: "after".into(),
+                id: "after".into(),
                 task: "after".into(),
             },
         ],

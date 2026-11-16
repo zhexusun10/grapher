@@ -48,21 +48,21 @@ test('production Windows Planner/Graph: concurrent shared-source runs, dependenc
       const label = [...repositories.keys()].find(key => prompt.includes(key));
       assert.ok(label, `Missing test task marker: ${prompt}`);
       const repository = repositories.get(label)!;
-      const planner = body.tools?.some((tool: any) => tool.function.name === 'node');
+      const planner = body.tools?.some((tool: any) => tool.function.name === 'edit_graph');
       const results = messages.filter((message: any) => message.role === 'tool').length;
-      let tool: { name: string; arguments: any } | undefined;
+      let tools: { name: string; arguments: any }[] = [];
       let text = 'Completed';
       if (planner) {
-        if (results === 0) tool = { name: 'bash', arguments: { command: 'printf planned > planned.txt' } };
-        if (results === 1) tool = { name: 'node', arguments: { nodes: [
-          { name: 'alpha', task: `${label} LEAF_ALPHA: create a.txt containing alpha using Bash.` },
-          { name: 'beta', task: `${label} LEAF_BETA: create b.txt containing beta using Bash.` },
-          { name: 'join', task: `${label} JOIN_BRANCHES: verify a.txt and b.txt and create joined.txt containing alpha-beta.` },
-        ] } };
-        if (results === 2) tool = { name: 'edge', arguments: { edges: [
+        if (results === 0) tools = [{ name: 'bash', arguments: { command: 'printf planned > planned.txt' } }];
+        if (results === 1) tools = [
+          { id: 'alpha', task: `${label} LEAF_ALPHA: create a.txt containing alpha using Bash.` },
+          { id: 'beta', task: `${label} LEAF_BETA: create b.txt containing beta using Bash.` },
+          { id: 'join', task: `${label} JOIN_BRANCHES: verify a.txt and b.txt and create joined.txt containing alpha-beta.` },
+        ].map(arguments_ => ({ name: 'edit_graph', arguments: { nodes: [arguments_] } }));
+        if (results === 4) tools = [
           { from: 'alpha', to: 'join' },
           { from: 'beta', to: 'join' },
-        ] } };
+        ].map(arguments_ => ({ name: 'edit_graph', arguments: { edges: [arguments_] } }));
       } else if (results === 0) {
         let command;
         if (prompt.includes('LEAF_ALPHA')) command = `sleep 0.5; printf alpha > ${quote(join(repository, 'a.txt'))}`;
@@ -75,13 +75,15 @@ test('production Windows Planner/Graph: concurrent shared-source runs, dependenc
           const program = `const fs=require('node:fs');setInterval(()=>fs.appendFileSync(${JSON.stringify(marker.replaceAll('\\', '/'))},'x'),50)`;
           command = `${quote(process.execPath)} -e ${quote(program)} & wait`;
         } else throw new Error(`Unknown node task: ${prompt}`);
-        tool = { name: 'bash', arguments: { command } };
+        tools = [{ name: 'bash', arguments: { command } }];
       }
-      if (tool) toolRequests.push(`${label}:${planner ? 'planner' : 'node'}:${tool.name}`);
-      const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${toolRequests.length}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { role: 'assistant', content: text };
+      for (const tool of tools) toolRequests.push(`${label}:${planner ? 'planner' : 'node'}:${tool.name}`);
+      const delta = tools.length ? { role: 'assistant', tool_calls: tools.map((tool, index) => ({ index,
+        id: `call-${toolRequests.length}-${index}`, type: 'function',
+        function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } })) } : { role: 'assistant', content: text };
       const chunk = (delta: any, finish_reason: string | null) => ({ id: 'test', object: 'chat.completion.chunk', created: 1, model: 'native', choices: [{ index: 0, delta, finish_reason }] });
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tool ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
+      response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tools.length ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
     } catch (error) {
       failures.push(error);
       response.writeHead(500);
@@ -199,7 +201,7 @@ test('production Windows Planner/Graph: concurrent shared-source runs, dependenc
     progress('Both shared-source Graph runs completed; dependencies and direct source edits verified');
     const startWriter = async (label: string) => {
       progress(`Starting background writer ${label}`);
-      const snapshot = await api('save_graph', { graph: { originalGoal: label, nodes: [{ name: 'worker', task: `${label} LONG_RUNNING` }], edges: [] }, config: config(repositories.get(label)!) });
+      const snapshot = await api('save_graph', { graph: { originalGoal: label, nodes: [{ id: 'worker', task: `${label} LONG_RUNNING` }], edges: [] }, config: config(repositories.get(label)!) });
       await api('control', { action: 'approve', runId: snapshot.runId });
       const marker = join(directory, `writer-${label}.txt`);
       try {

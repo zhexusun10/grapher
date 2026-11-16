@@ -32,7 +32,7 @@ fn run(primary: &Arc<Service>, repo: &std::path::Path) -> (Arc<Service>, String)
             graph: Graph {
                 original_goal: "attachments".into(),
                 nodes: vec![Node {
-                    name: "worker".into(),
+                    id: "worker".into(),
                     task: "work".into(),
                 }],
                 edges: vec![],

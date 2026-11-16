@@ -14,7 +14,7 @@ fn graph() -> Graph {
         nodes: ["build", "review", "independent"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -27,7 +27,7 @@ fn graph() -> Graph {
 }
 
 #[test]
-fn plan_serializes_root_nodes_and_accepts_legacy_roots() {
+fn plan_uses_root_nodes_and_rejects_retired_roots() {
     let plan = compile(&graph(), true).unwrap();
     assert_eq!(plan.root_nodes, vec!["build", "independent"]);
     let canonical = serde_json::to_value(&plan).unwrap();
@@ -38,8 +38,11 @@ fn plan_serializes_root_nodes_and_accepts_legacy_roots() {
     let fields = legacy.as_object_mut().unwrap();
     let roots = fields.remove("rootNodes").unwrap();
     fields.insert("roots".into(), roots);
-    let restored: Plan = serde_json::from_value(legacy).unwrap();
-    assert_eq!(restored.root_nodes, plan.root_nodes);
+    assert!(serde_json::from_value::<Plan>(legacy).is_err());
+    let mut mixed = canonical.clone();
+    mixed["roots"] = json!(["build"]);
+    assert!(serde_json::from_value::<Plan>(mixed).is_err());
+    let restored: Plan = serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(serde_json::to_value(restored).unwrap(), canonical);
     assert!(serde_json::from_value::<Plan>(json!({
         "executionBatches": [], "terminals": [], "warnings": []
@@ -48,12 +51,12 @@ fn plan_serializes_root_nodes_and_accepts_legacy_roots() {
 }
 
 #[test]
-fn checkpoint_with_legacy_roots_loads_without_rewriting_events() {
+fn checkpoint_with_root_nodes_loads_without_rewriting_events() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.sqlite");
     let store = Store::open(&path).unwrap();
     let mut state = Snapshot {
-        run_id: "legacy-plan".into(),
+        run_id: "current-plan".into(),
         ..Default::default()
     };
     let config: Config = serde_json::from_value(json!({
@@ -76,9 +79,6 @@ fn checkpoint_with_legacy_roots_loads_without_rewriting_events() {
     checkpoint["nodeMessageQueueVersion"] = json!(1);
     checkpoint["events"] = json!([]);
     checkpoint["base"] = json!("loaded-from-checkpoint");
-    let fields = checkpoint["plan"].as_object_mut().unwrap();
-    let roots = fields.remove("rootNodes").unwrap();
-    fields.insert("roots".into(), roots);
     let decoded: Snapshot = serde_json::from_value(checkpoint.clone()).unwrap();
     assert_eq!(
         decoded.plan.unwrap().root_nodes,
@@ -126,6 +126,6 @@ fn checkpoint_with_legacy_roots_loads_without_rewriting_events() {
         .unwrap();
     assert_eq!(
         event_after, event_before,
-        "legacy reads must not rewrite business events"
+        "reads must not rewrite business events"
     );
 }

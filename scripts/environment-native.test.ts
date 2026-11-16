@@ -273,7 +273,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
       launch: { entry: windows ? (ml ? '{workspace}/.venv/python.exe' : '{workspace}/.venv/Scripts/python.exe') : '{workspace}/.venv/bin/python',
         path: [windows ? (ml ? '{workspace}/.venv' : '{workspace}/.venv/Scripts') : '{workspace}/.venv/bin', ...(windows && ml ? ['{workspace}/.venv/Scripts', '{workspace}/.venv/Library/bin'] : []), ...toolPaths], shell,
         variables: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', HOME: '{workspace}/.agent-home', USERPROFILE: '{workspace}/.agent-home', VIRTUAL_ENV: '{workspace}/.venv', PYTHONPYCACHEPREFIX: '{workspace}/.runtime-cache/pycache' }, inherit: [], hook } };
-    const graph = { originalGoal: 'native ML environment contract', nodes: [{ name: 'A', task: 'A_CREATE' }, { name: 'B', task: 'B_USE' }, { name: 'C', task: 'C_USE' }],
+    const graph = { originalGoal: 'native ML environment contract', nodes: [{ id: 'A', task: 'A_CREATE' }, { id: 'B', task: 'B_USE' }, { id: 'C', task: 'C_USE' }],
       edges: [{ from: 'A', to: 'B', feedback: false }, { from: 'B', to: 'C', feedback: false }] };
     // Normal acceptance exercises backend admission with no policy supplied by
     // the client. The ML profile additionally covers the saved-policy boundary;
@@ -378,7 +378,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     const retry = await api('launch_result', { runId, args: ['-c', "import pathlib; assert pathlib.Path('reports/result-started').read_text()=='partial'; print('RETRY_KEPT_PARTIAL')"] });
     assert.match(retry.output, /RETRY_KEPT_PARTIAL/); await settled();
     const backgroundRun = async (task: string) => {
-      const run = await legacyGraph(api, data, { graph: { originalGoal: 'native drain boundary', nodes: [{ name: 'writer', task }, { name: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
+      const run = await legacyGraph(api, data, { graph: { originalGoal: 'native drain boundary', nodes: [{ id: 'writer', task }, { id: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
       await api('control', { runId: run.runId, action: 'approve' });
       return run;
     };
@@ -472,7 +472,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
       await writeFile(join(plain, 'README.md'), 'An ordinary project without a business environment.\n');
       execFileSync('git', ['add', 'README.md'], { cwd: plain });
       execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'plain baseline'], { cwd: plain });
-      const empty = await legacyGraph(api, data, { graph: { originalGoal: 'No environment needed', nodes: [{ name: 'plain', task: 'NO_ENVIRONMENT' }], edges: [] }, config: { ...config, repository: plain } });
+      const empty = await legacyGraph(api, data, { graph: { originalGoal: 'No environment needed', nodes: [{ id: 'plain', task: 'NO_ENVIRONMENT' }], edges: [] }, config: { ...config, repository: plain } });
       await api('control', { runId: empty.runId, action: 'approve' });
       const completed = await until(async () => {
         const state = await api('snapshot', { runId: empty.runId });

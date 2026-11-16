@@ -106,7 +106,7 @@ fn execution_prefix_pages_stop_at_the_durable_edit_cursor_without_changing_the_o
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime.create(serde_json::from_value(serde_json::json!({"originalGoal":"test", "nodes":[{"name":"task","task":"test"}],"edges":[]})).unwrap(),
+    runtime.create(serde_json::from_value(serde_json::json!({"originalGoal":"test", "nodes":[{"id":"task","task":"test"}],"edges":[]})).unwrap(),
         serde_json::from_value(serde_json::json!({"repository":source,"model":"test","maxParallel":1})).unwrap()).unwrap();
     let execution: crate::model::Execution = serde_json::from_value(serde_json::json!({
         "id":"prefix-exec","node":"task","revision":1,"attempt":1,"sessionId":"prefix-session","worktree":source,

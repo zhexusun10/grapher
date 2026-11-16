@@ -89,7 +89,7 @@ impl Fixture {
                 graph: Graph {
                     original_goal: "combine both results".into(),
                     nodes: vec![Node {
-                        name: "join".into(),
+                        id: "join".into(),
                         task: "combine".into(),
                     }],
                     edges: vec![],

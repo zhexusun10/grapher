@@ -60,7 +60,7 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
                     nodes: ["one", "two"]
                         .iter()
                         .map(|name| Node {
-                            name: (*name).into(),
+                            id: (*name).into(),
                             task: "test".into(),
                         })
                         .collect(),

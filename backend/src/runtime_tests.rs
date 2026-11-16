@@ -78,7 +78,7 @@ fn single() -> Graph {
     Graph {
         original_goal: "test".into(),
         nodes: vec![Node {
-            name: "task".into(),
+            id: "task".into(),
             task: "self-contained task".into(),
         }],
         edges: vec![],
@@ -130,7 +130,7 @@ fn new_graph_runs_require_composite_evidence_and_retain_managed_workspaces() {
     config.max_parallel = 0;
     let mut graph = single();
     for name in ["parallel-a", "parallel-b"] {
-        graph.nodes.push(Node { name: name.into(), task: name.into() });
+        graph.nodes.push(Node { id: name.into(), task: name.into() });
     }
     runtime.create(graph, config).unwrap();
     assert_eq!(
@@ -539,7 +539,7 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
         original_goal: "parallel".into(),
         nodes: (0..45)
             .map(|i| Node {
-                name: format!("worker{i}"),
+                id: format!("worker{i}"),
                 task: "work".into(),
             })
             .collect(),
@@ -581,7 +581,7 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
         nodes: ["root", "owner", "review", "related", "fast", "after_fast"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -656,7 +656,7 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
         ]
         .into_iter()
         .map(|name| Node {
-            name: name.into(),
+            id: name.into(),
             task: name.into(),
         })
         .collect(),
@@ -744,7 +744,7 @@ fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
         nodes: ["04", "06", "08", "09", "10", "13", "11", "14", "15", "16"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -852,7 +852,7 @@ fn queued_feedback_keeps_scope_blocked_until_related_workers_drain() {
             ]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -955,7 +955,7 @@ fn resolved_feedback_barrier_reactivates_when_review_is_rerun() {
         nodes: ["owner", "review", "related", "after_related"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -1098,7 +1098,7 @@ fn messaging_completed_node_preserves_its_result_and_running_downstream() {
         nodes: ["parent", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2066,15 +2066,15 @@ fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() 
         original_goal: "interrupted graph".into(),
         nodes: vec![
             Node {
-                name: "first".into(),
+                id: "first".into(),
                 task: "first".into(),
             },
             Node {
-                name: "second".into(),
+                id: "second".into(),
                 task: "second".into(),
             },
             Node {
-                name: "after".into(),
+                id: "after".into(),
                 task: "after".into(),
             },
         ],
@@ -2160,7 +2160,7 @@ fn starting_an_upstream_node_returns_its_blocked_descendants_to_waiting() {
         nodes: ["first", "after", "last", "second", "other"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2226,7 +2226,7 @@ fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() 
         nodes: ["left", "right"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2500,7 +2500,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
         nodes: ["parent", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2621,7 +2621,7 @@ fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_te
         nodes: ["a", "b", "c"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2745,7 +2745,7 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
         nodes: ["root", "left", "right", "join"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2851,7 +2851,7 @@ fn graph_followup_on_terminal_workspace_updates_without_rerunning_descendants() 
         nodes: ["parent", "child", "independent"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -2970,7 +2970,7 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
             nodes: ["parent", "running", "child"]
                 .into_iter()
                 .map(|name| Node {
-                    name: name.into(),
+                    id: name.into(),
                     task: name.into(),
                 })
                 .collect(),
@@ -3021,7 +3021,7 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
         fs::remove_file(source.join("deleted.txt")).unwrap();
         let mut revised = graph;
         revised.nodes.push(Node {
-            name: "added".into(),
+            id: "added".into(),
             task: "new task".into(),
         });
         runtime
@@ -3272,7 +3272,7 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
         nodes: ["keep", "change", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3304,11 +3304,11 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "change")
+        .find(|node| node.id == "change")
         .unwrap()
         .task = "new task".into();
     revised.nodes.push(Node {
-        name: "added".into(),
+        id: "added".into(),
         task: "new node".into(),
     });
     let planning = PlanningSummary {
@@ -3341,7 +3341,7 @@ fn reworked_node_discards_its_previous_session_while_unaffected_nodes_keep_their
         nodes: ["keep", "change", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3389,7 +3389,7 @@ fn reworked_node_discards_its_previous_session_while_unaffected_nodes_keep_their
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "change")
+        .find(|node| node.id == "change")
         .unwrap()
         .task = "new task".into();
     runtime
@@ -3426,7 +3426,7 @@ fn planning_revision_defers_publication_but_not_ready_jobs() {
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![Node {
-            name: "first".into(),
+            id: "first".into(),
             task: "first".into(),
         }],
         edges: vec![],
@@ -3457,7 +3457,7 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
         nodes: ["running", "failed", "waiting"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3492,13 +3492,13 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "failed")
+        .find(|node| node.id == "failed")
         .unwrap()
         .task = "fix".into();
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "waiting")
+        .find(|node| node.id == "waiting")
         .unwrap()
         .task = "new task".into();
     runtime
@@ -3528,7 +3528,7 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "running")
+        .find(|node| node.id == "running")
         .unwrap()
         .task = "changed".into();
     assert!(runtime
@@ -3545,7 +3545,7 @@ fn planner_revision_warning_matches_runtime_invalidation() {
         nodes: ["build", "review", "consumer", "unrelated"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3597,6 +3597,29 @@ fn planner_revision_warning_matches_runtime_invalidation() {
         vec!["consumer", "review"]
     );
     assert!(context.invalidated_completed(&graph).is_empty());
+    let (updated, original) = context.invalidated_completed_by_task(&candidate);
+    assert!(updated.is_empty());
+    assert_eq!(original, vec!["consumer", "review"]);
+    let (updated, original) = context.invalidated_completed_by_task(&graph);
+    assert!(updated.is_empty() && original.is_empty());
+
+    let mut task_change = graph.clone();
+    task_change.nodes[0].task = "PRIVATE_UPDATED_TASK".into();
+    let (updated, original) = context.invalidated_completed_by_task(&task_change);
+    assert_eq!(updated, vec!["build"]);
+    assert_eq!(original, vec!["consumer", "review"]);
+    assert_eq!(updated.len() + original.len(), context.invalidated_completed(&task_change).len());
+    // A changed downstream task belongs to the updated-task group too.
+    task_change.nodes[1].task = "PRIVATE_REVIEW_TASK".into();
+    let (updated, original) = context.invalidated_completed_by_task(&task_change);
+    assert_eq!(updated, vec!["build", "review"]);
+    assert_eq!(original, vec!["consumer"]);
+    // Dependency-only changes retain the task, even when the node becomes a root.
+    let mut new_inputs = graph.clone();
+    new_inputs.edges.retain(|edge| edge.to != "consumer");
+    let (updated, original) = context.invalidated_completed_by_task(&new_inputs);
+    assert!(updated.is_empty());
+    assert_eq!(original, vec!["consumer"]);
 
     // A fresh Runtime snapshot reflects a node that finished after planning
     // began; unapproved draft edits do not run revision invalidation.
@@ -3605,6 +3628,8 @@ fn planner_revision_warning_matches_runtime_invalidation() {
     assert_eq!(earlier.invalidated_completed(&candidate), vec!["review"]);
     earlier.approved = false;
     assert!(earlier.invalidated_completed(&candidate).is_empty());
+    let (updated, original) = earlier.invalidated_completed_by_task(&candidate);
+    assert!(updated.is_empty() && original.is_empty());
 
     runtime
         .revise_graph(candidate, PlanningSummary::default())
@@ -3636,7 +3661,7 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
         nodes: ["source", "other", "consumer"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3759,11 +3784,11 @@ fn shadow_source_edits_do_not_block_downstream_handoff() {
         original_goal: "handoff".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent task".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child task".into(),
             },
         ],
@@ -3834,7 +3859,7 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
         nodes: ["owner", "review"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -3929,11 +3954,11 @@ fn completed_shadow_graph_intervention_accepts_source_changes() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent task".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child task".into(),
             },
         ],
@@ -3986,11 +4011,11 @@ fn child_inherits_parent_files_with_a_fresh_task_and_session() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent task".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child task".into(),
             },
         ],
@@ -4192,7 +4217,7 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
         nodes: ["left", "right", "join", "after"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -4522,7 +4547,7 @@ fn plain_directory_post_review_publication_delivers_only_undelivered_heads() {
         nodes: ["task", "more"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: "self-contained task".into(),
             })
             .collect(),
@@ -4651,7 +4676,7 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
         nodes: ["root", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -4705,11 +4730,11 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     revised
         .nodes
         .iter_mut()
-        .find(|node| node.name == "root")
+        .find(|node| node.id == "root")
         .unwrap()
         .task = "root v2".into();
     revised.nodes.push(Node {
-        name: "extra".into(),
+        id: "extra".into(),
         task: "extra".into(),
     });
     runtime
@@ -5063,11 +5088,11 @@ fn post_publication_direct_edit_keeps_downstream_and_publication() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent task".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child task".into(),
             },
         ],
@@ -5230,11 +5255,11 @@ fn post_publication_revision_with_completed_parent_ignores_stale_commit() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent task".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child task".into(),
             },
         ],
@@ -5279,7 +5304,7 @@ fn post_publication_revision_with_completed_parent_ignores_stale_commit() {
     // snapshot, so the stale parent commit must not be resolved or merged.
     let mut revised = graph;
     revised.nodes.push(Node {
-        name: "late".into(),
+        id: "late".into(),
         task: "late task".into(),
     });
     revised.edges.push(Edge {
@@ -5343,11 +5368,11 @@ fn mid_run_completed_node_message_keeps_worktree_semantics() {
         original_goal: "test".into(),
         nodes: vec![
             Node {
-                name: "parent".into(),
+                id: "parent".into(),
                 task: "parent".into(),
             },
             Node {
-                name: "child".into(),
+                id: "child".into(),
                 task: "child".into(),
             },
         ],

@@ -74,6 +74,16 @@ test("tool and reasoning cards never render native browser hover tooltips", () =
   assert.doesNotMatch(reasoning, /\stitle=/, "a reasoning card must not show browser title tooltips");
 });
 
+test("edit_graph cards reuse the edge tool's fork icon", () => {
+  const html = renderToStaticMarkup(createElement(ToolCallCard, { item: {
+    id: "graph-edit", type: "tool_call", toolName: "edit_graph", status: "success",
+    args: { nodes: [{ id: "build", task: "Build" }] }, result: 'Successfully created node "build".',
+  } }));
+  assert.match(html, /<svg[^>]*class="[^"]*lucide-git-fork[^"]*tool-icon edge/);
+  assert.doesNotMatch(html, /lucide-boxes/);
+  assert.match(html, /class="tool-badge">edit_graph<\/span>/);
+});
+
 test("background Planner replies stay separate across turns with no visible user bubble", () => {
   const events = [
     { type: "grapher_planning_source", planningId: "first" }, start(),

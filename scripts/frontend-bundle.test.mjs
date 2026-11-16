@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
-import { build, preview } from "vite";
+import { build, createServer, preview } from "vite";
 
 let directory, server, browser, chunks, origin;
 before(async () => {
@@ -68,7 +69,7 @@ test("production entry keeps the graph and Markdown engines out of the initial J
 async function setupPage({ planType = "graph", running = false, twoRuns = false } = {}) {
   const repository = "/mock/lazy-project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
-  const graph = { originalGoal: "Load a conversation", nodes: [{ name: "task", task: "Task" }], edges: [] };
+  const graph = { originalGoal: "Load a conversation", nodes: [{ id: "task", task: "Task" }], edges: [] };
   const snapshot = { runId: "lazy-run", config, planType, phase: running ? "running" : "completed", approved: true, paused: false,
     graph, nodes: { task: { status: running ? "running" : "completed" } }, plan: null, executions: [], events: [], base: "", feedbackCounts: {} };
   const snapshots = { [snapshot.runId]: snapshot, ...(twoRuns ? {
@@ -314,7 +315,7 @@ test("opening a running conversation keeps the loading composer disabled without
       if (planType === "graph") {
         assert.equal(await page.getByRole("button", { name: "Click to interrupt execution", exact: true }).count(), 0,
           "a running worker does not make the idle Planner composer active");
-        await page.locator('.task-node[data-node-name="task"]').click();
+        await page.locator('.task-node[data-node-id="task"]').click();
       }
       await page.locator(".pane-bottom-chat").getByRole("button", { name: "Click to interrupt execution", exact: true }).waitFor();
       assert.deepEqual(mutations, [], "opening a conversation must not submit or interrupt its work");
@@ -326,9 +327,13 @@ test("opening a running conversation keeps the loading composer disabled without
   }
 });
 
-test("a failed workbench load leaves the draft visible and offers a reload", { timeout: 30_000 }, async () => {
+test("a failed workbench load preserves the draft without a reload button and logs the cause", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await setupPage();
   await page.route(`**/${workbenchChunk().fileName}`, route => route.fulfill({ status: 503, body: "Unavailable" }));
+  const diagnostics = [];
+  page.on("console", message => {
+    if (message.type() === "error" && message.text().includes("Could not load conversation view")) diagnostics.push(message.text());
+  });
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
     const composer = page.locator(".landing-screen textarea");
@@ -337,7 +342,9 @@ test("a failed workbench load leaves the draft visible and offers a reload", { t
     const alert = page.locator(".workbench-module-status[role=alert]");
     await alert.waitFor();
     assert.match(await alert.innerText(), /background tasks are unaffected/i);
-    assert.equal(await alert.getByRole("button", { name: "Reload page" }).isVisible(), true);
+    assert.equal(await alert.getByRole("button").count(), 0, "the banner must not offer a destructive page reload");
+    assert.ok(diagnostics.some(message => message.includes(workbenchChunk().fileName)),
+      "the original failing module URL must remain available in the console");
     assert.equal(await composer.isVisible(), true);
     assert.equal(await composer.inputValue(), "Draft survives failure");
     assert.deepEqual(errors, [], "a failed dynamic import must not crash the app");
@@ -346,6 +353,46 @@ test("a failed workbench load leaves the draft visible and offers a reload", { t
     assert.equal(await composer.isDisabled(), false, "the user can leave the failed navigation without reloading");
     assert.equal(await composer.inputValue(), "Draft survives failure");
   } finally { await context.close(); }
+});
+
+test("development source saves do not cache a temporarily empty module", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "grapher-source-save-"));
+  const source = path.join(root, "NodeTaskCard.js");
+  let dev, watcherReady;
+  const ready = new Promise(resolve => { watcherReady = resolve; });
+  try {
+    await writeFile(source, 'export const NodeTaskCard = () => "Before save";');
+    dev = await createServer({
+      configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),
+      root, cacheDir: path.join(root, ".vite"), logLevel: "error",
+      server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
+      plugins: [{ name: "source-save-regression", configureServer(server) { server.watcher.once("ready", watcherReady); } }],
+    });
+    await dev.listen();
+    await ready;
+    const url = `http://127.0.0.1:${dev.httpServer.address().port}/NodeTaskCard.js`;
+    const readCard = async () => {
+      const response = await fetch(url);
+      assert.equal(response.status, 200);
+      const module = await import(`data:text/javascript,${encodeURIComponent(await response.text())}`);
+      return module.NodeTaskCard?.();
+    };
+    assert.equal(await readCard(), "Before save");
+    // Model an editor truncating then rewriting a file. Only disposable source
+    // is touched; the live checkout and its running dev server are left alone.
+    await writeFile(source, "");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(await readCard(), "Before save", "serve the last complete module while the write is unfinished");
+    await writeFile(source, 'export const NodeTaskCard = () => "After save";');
+    const deadline = Date.now() + 5000;
+    while (await readCard() !== "After save") {
+      assert.ok(Date.now() < deadline, "the completed save must eventually invalidate the old module");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  } finally {
+    await dev?.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a late module cannot reopen a conversation after returning home", { timeout: 30_000 }, async () => {

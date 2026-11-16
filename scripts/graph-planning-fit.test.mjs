@@ -31,7 +31,7 @@ before(async () => {
 });
 after(async () => { planningResponse?.destroy(); await browser?.close(); await server?.close(); });
 
-test("actual App: node results render before Planner completion; edges rearrange a visible, centered graph", { timeout: 30_000 }, async () => {
+test("actual App: node results render before Planner completion; edges rearrange a visible, centered graph", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/live-graph", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
@@ -66,28 +66,17 @@ test("actual App: node results render before Planner completion; edges rearrange
   page.on("pageerror", error => errors.push(String(error)));
   const send = (type, data) => planningResponse.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   const planner = event => send("planner", { event, raw: JSON.stringify(event) + "\n" });
-  const startTool = (id, toolName, args) => planner({ type: "tool_execution_start", toolCallId: id, toolName, args });
-  // Pi's end event intentionally has no args. The pairing must survive text updates and polls.
-  const endTool = (id, toolName, topology, isError = false, legacy = false, rootField = "rootNodes") => {
-    const projection = legacy ? topology : {
-      ...(rootField ? { [rootField]: topology.nodes.filter(name => !topology.edges.some(edge => !edge.feedback && edge.to === name)) } : {}),
-      ...(rootField === "roots" ? {
-        directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
-          topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
-      } : {
-        "from: [to]": Object.fromEntries(topology.nodes.map(name => [name,
-          topology.edges.filter(edge => !edge.feedback && edge.from === name).map(edge => edge.to)])),
-      }),
-      feedbackTo: Object.fromEntries(topology.edges.filter(edge => edge.feedback).map(edge => [edge.from, edge.to])),
-    };
-    planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,
-      result: { content: [{ type: "text", text: JSON.stringify({ applied: !isError, topology: projection }) }] } });
-  };
-  const tool = (id, toolName, args, topology, isError = false, legacy = false, rootField = "rootNodes") => {
-    startTool(id, toolName, args);
-    endTool(id, toolName, topology, isError, legacy, rootField);
-  };
-  const nodes = ["a", "b", "c"].map(name => ({ name, task: `Task ${name}` }));
+  const startTool = (id, args) => planner({ type: "tool_execution_start", toolCallId: id, toolName: "edit_graph", args });
+  // Pi's end event has neither args nor a compiler plan. Pair it with its start.
+  const endTool = (id, isError = false) => planner({
+    type: "tool_execution_end", toolCallId: id, toolName: "edit_graph", isError,
+    result: {
+      content: [{ type: "text", text: isError ? "Cannot apply this graph edit. The graph is unchanged." : "Successfully applied graph edit." }],
+      details: {}, ...(isError ? { isError: true } : {}),
+    },
+  });
+  const tool = (id, args, isError = false) => { startTool(id, args); endTool(id, isError); };
+  const nodes = ["a", "b", "c"].map(name => ({ id: name, task: `Task ${name}` }));
   const edges = [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }];
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
@@ -103,25 +92,23 @@ test("actual App: node results render before Planner completion; edges rearrange
     textTimer = setInterval(() => planner({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Still planning. " } }), 50);
 
     // A rejected first mutation must not open an empty topology pane.
-    // Older transcript events retain the previous topology shape.
-    tool("rejected-first", "node", { nodes: [{ name: "ghost", task: "Invalid edit" }] }, { nodes: [], edges: [] }, true, true);
+    tool("rejected-first", { nodes: [{ id: "ghost", task: "Invalid edit" }] }, true);
     await page.locator(".tool-call-card.error").first().waitFor();
     assert.equal(await page.locator(".graph-pane").count(), 0, "a failed node call does not open the pane");
 
-    startTool("node-a", "node", { nodes: nodes.slice(0, 1) });
+    startTool("node-a", { nodes: [{ id: "a", task: "Task a" }] });
     // Only an accepted mutation opens the pane; a pending node call would
     // otherwise show an empty topology that may still fail validation.
     await page.waitForTimeout(150);
     assert.equal(await page.locator(".graph-pane").count(), 0, "a pending node call does not open the pane");
-    // The initial node batch omits rootNodes; its accepted edit still opens the preview.
-    endTool("node-a", "node", { nodes: ["a"], edges: [] }, false, false, null);
+    // A plain-text acknowledgement opens the preview without returning graph state.
+    endTool("node-a");
     await page.waitForFunction(() => {
       const pane = document.querySelector(".graph-pane");
       return pane && +getComputedStyle(pane).opacity > 0.99;
     });
     await assertFitted(page, [["a"]]);
-    // Historical direct-dependency results used `roots` rather than `rootNodes`.
-    tool("node-bc", "node", { nodes: nodes.slice(1) }, { nodes: ["a", "b", "c"], edges: [] }, false, false, "roots");
+    tool("node-bc", { nodes: nodes.slice(1) });
     await assertFitted(page, [["a", "b", "c"]]);
     assert.equal(planningResponse.writableEnded, false, "cards appear while the response is still open");
     assert.equal(await page.getByRole("button", { name: "Approve", exact: true }).count(), 0, "preview is not approval");
@@ -148,7 +135,7 @@ test("actual App: node results render before Planner completion; edges rearrange
       };
       requestAnimationFrame(sample);
     });
-    tool("edges", "edge", { edges }, { nodes: ["a", "b", "c"], edges });
+    tool("edges", { nodes: [{ id: "c", task: "Task c" }], edges });
     await assertFitted(page, [["a"], ["b"], ["c"]]);
     assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "accepted edges render during planning");
     const frames = await page.evaluate(() => { window.sampleGraph = false; return window.graphFrames; });
@@ -157,13 +144,65 @@ test("actual App: node results render before Planner completion; edges rearrange
     assert.ok(new Set(frames.map(frame => JSON.stringify(frame.positions))).size > 3, "cards move through intermediate layouts, not a final-layout jump");
     assert.equal(planningResponse.writableEnded, false, "edge layout does not wait for Planner completion");
 
-    tool("rejected", "node", { nodes: [{ name: "phantom", task: "Invalid edit" }] }, { nodes: ["a", "b", "c"], edges }, true);
+    // Current tools reject redundant edges without changing the preview.
+    const errorsBeforeRedundant = await page.locator(".tool-call-card.error").count();
+    startTool("rejected-redundant-edge", { edges: [{ from: "a", to: "c" }] });
+    planner({ type: "tool_execution_end", toolCallId: "rejected-redundant-edge", toolName: "edit_graph", isError: true,
+      result: { isError: true, content: [{ type: "text", text: "No need to add dependency a → c: a → b → c already provides this dependency. Omit this edge.\nThe graph is unchanged." }],
+        details: { diagnosticCodes: ["E209"] } } });
+    await page.waitForFunction(count => document.querySelectorAll(".tool-call-card.error").length > count, errorsBeforeRedundant);
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "Rejected edges never enter the live preview");
+
+    // A business tool's JSON is not a compiler response and cannot set layout.
+    const successfulTools = await page.locator(".tool-call-card.success").count();
+    planner({ type: "tool_execution_start", toolCallId: "business-plan", toolName: "bash", args: { command: "inspect business plan" } });
+    planner({ type: "tool_execution_end", toolCallId: "business-plan", toolName: "bash", isError: false,
+      result: { content: [{ type: "text", text: JSON.stringify({ plan: {
+        executionBatches: [["c"], ["b"], ["a"]], rootNodes: ["c"], terminals: ["a"], warnings: [],
+      } }) }], details: { exitCode: 0 } } });
+    await page.waitForFunction(count => document.querySelectorAll(".tool-call-card.success").length > count, successfulTools);
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "Business output cannot change graph topology");
+
+    // Result hooks may finish out of order even when graph writes are sequential.
+    const successesBeforeReordered = await page.locator(".tool-call-card.success").count();
+    const errorsBeforeReordered = await page.locator(".tool-call-card.error").count();
+    startTool("failed-before-updates", { nodes: [{ id: "rejected-in-batch" }] });
+    startTool("older-task", { nodes: [{ id: "a", task: "ORDERED_OLD_TASK" }] });
+    startTool("newer-task", { nodes: [{ id: "a", task: "ORDERED_NEW_TASK" }] });
+    endTool("newer-task");
+    endTool("older-task");
+    endTool("failed-before-updates", true);
+    await page.waitForFunction(([successes, errors]) =>
+      document.querySelectorAll(".tool-call-card.success").length >= successes + 2
+      && document.querySelectorAll(".tool-call-card.error").length >= errors + 1,
+    [successesBeforeReordered, errorsBeforeReordered]);
+    assert.equal(await page.locator('.react-flow__node[data-id="a"] p').textContent(), "ORDERED_NEW_TASK",
+      "Late results (including a failed predecessor) must not hide or overwrite newer successful graph changes");
+    assert.equal(await page.locator('.react-flow__node[data-id="rejected-in-batch"]').count(), 0);
+    tool("restore-task", { nodes: [{ id: "a", task: "Task a" }] });
+
+    // Pi's validator coerces these raw arguments before execute, but SSE keeps
+    // their original values. The live preview must match the accepted graph.
+    tool("coerced-delete", { nodes: [{ id: "b", delete: "TRUE" }] });
+    await assertFitted(page, [["a", "c"]]);
+    assert.equal(await page.locator('.react-flow__node[data-id="b"]').count(), 0);
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 0);
+    tool("restore-b", { nodes: [{ id: "b", task: "Task b" }], edges });
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+    tool("coerced-id", { nodes: [{ id: null, task: "Literal null identity" }], edges: [{ from: "c", to: null }] });
+    await assertFitted(page, [["a"], ["b"], ["c"], ["null"]]);
+    tool("remove-coerced-id", { nodes: [{ id: null, delete: "1" }] });
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+
+    tool("rejected", { nodes: [{ id: "phantom", task: "Invalid edit" }], edges: [{ from: "phantom", to: "missing" }] }, true);
     await page.waitForTimeout(850); // At least one durable empty-graph poll must not erase the preview.
     await assertFitted(page, [["a"], ["b"], ["c"]]);
     assert.equal(await page.locator('.react-flow__node[data-id="phantom"]').count(), 0);
     clearInterval(textTimer);
     snapshot = { ...snapshot, phase: "awaiting_approval", graph: { originalGoal: goal, nodes, edges },
-      nodes: Object.fromEntries(nodes.map(node => [node.name, { status: "waiting" }])),
+      nodes: Object.fromEntries(nodes.map(node => [node.id, { status: "waiting" }])),
       plan: { executionBatches: [["a"], ["b"], ["c"]], rootNodes: ["a"], terminals: ["c"], warnings: [] } };
     planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
     await page.getByRole("button", { name: "Approve", exact: true }).waitFor();
@@ -177,7 +216,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(planningResponse, "revision stream started");
     send("run_started", { runId });
-    tool("remove-edges", "edge", { edges: edges.map(edge => ({ ...edge, delete: true })) }, { nodes: ["a", "b", "c"], edges: [] });
+    tool("remove-edges", { edges: edges.map(edge => ({ ...edge, delete: true })) });
     await assertFitted(page, [["a", "b", "c"]]);
     await page.waitForTimeout(850);
     await assertFitted(page, [["a", "b", "c"]]);
@@ -203,8 +242,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(planningResponse, "approved revision stream started");
     send("run_started", { runId });
-    tool("add-d", "node", { nodes: { name: "d", task: "Task d" } },
-      { nodes: ["a", "b", "c", "d"], edges: [] });
+    tool("add-d", { nodes: { id: "d", task: "Task d" } });
     await assertFitted(page, [["a", "b", "c", "d"]]);
     assert.equal(planningResponse.writableEnded, false, "approved revision previews before Planner completion");
     // Work can start after the turn's snapshot: once the run is live, further
@@ -219,8 +257,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     await livePoll;
     await page.waitForTimeout(100);
     allowSnapshotPoll = false;
-    tool("add-e", "node", { nodes: { name: "e", task: "Task e" } },
-      { nodes: ["a", "b", "c", "e"], edges: [] });
+    tool("add-e", { nodes: { id: "e", task: "Task e" } });
     await page.waitForTimeout(300);
     assert.equal(await page.locator('.react-flow__node[data-id="e"]').count(), 0,
       "a revision must not preview over work that started after it began");
@@ -307,6 +344,178 @@ function assertSameViewport(actual, expected) {
     `expected the same viewport: ${JSON.stringify({ actual, expected })}`);
 }
 
+test("literal task IDs and colliding Merger cards open separate conversations", { timeout: 35_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  const errors = [];
+  const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "MERGER_LOG" }] } }) + "\n";
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    let result;
+    if (command === "list_files") result = { files: [] };
+    else if (command === "list_skills") result = { skills: [] };
+    else if (command === "get_merger_prompt") result = { runId: body.runId, executionId: body.executionId, prompt: `PROMPT_${body.executionId}` };
+    else if (command === "get_execution_output") result = { runId: body.runId, executionId: body.executionId,
+      content: output, startOffset: 0, nextOffset: Buffer.byteLength(output), totalBytes: Buffer.byteLength(output), complete: true, status: "failed" };
+    else { errors.push(`Unexpected API: ${command}`); result = null; }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  const taskIds = ["join", "publication", "merger:join", "merger:publication", "merger · join"];
+  const graph = { originalGoal: "Literal identities", nodes: taskIds.map(id => ({ id, task: `TASK_${id}` })),
+    edges: [{ from: "join", to: "publication", feedback: false }] };
+  const mergers = [["join-helper", "merge:join"], ["publication-helper", "merge:publication"], ["publish-helper", "merger"]]
+    .map(([id, node]) => ({ id, node, status: "failed", revision: 1, attempt: 1, sessionId: id,
+      worktree: "/mock", before: "", after: null, output: "", outputBytes: Buffer.byteLength(output), startedAt: 1, completedAt: 2 }));
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await page.evaluate(patch => window.graphFixture.update(patch, false), { runId: "literal-identities", phase: "completed", approved: true,
+      graph, mergers, nodes: Object.fromEntries(taskIds.map(id => [id, { status: "waiting", revision: 1, head: null, instruction: "", error: null }])) });
+    await waitForSettledGraph(page, 8);
+    await page.getByRole("button", { name: "Fit View", exact: true }).click();
+    const renderedIds = await page.locator(".react-flow__node").evaluateAll(nodes => nodes.map(node => node.dataset.id));
+    assert.equal(new Set(renderedIds).size, renderedIds.length);
+    for (const id of ["merger:join", "merger:publication"]) {
+      await page.locator(`.react-flow__node[data-id="${id}"]`).click();
+      await page.locator(".node-task-card").getByText(`TASK_${id}`, { exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 1);
+      await page.locator(".back-to-query-btn").click();
+    }
+    for (const [label, executionId, cardId] of [["merger · join", "join-helper", "merger:join#"], ["merger · publication", "publication-helper", "merger:publication##"], ["publication merger", "publish-helper", "merger:publication#"]]) {
+      await page.locator(`.react-flow__node[data-id="${cardId}"]`).click();
+      await page.locator(".node-task-card").getByText(`PROMPT_${executionId}`, { exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 0);
+      await page.locator(".back-to-query-btn").click();
+    }
+    const literalAndHelper = page.locator(".react-flow__node").filter({ has: page.getByText("merger · join", { exact: true }) });
+    assert.equal(await literalAndHelper.count(), 2, "literal task label and helper label are both rendered");
+    assert.equal(await page.locator('.task-node[data-node-id="merger · join"]').count(), 1);
+    await page.locator('.task-node[data-node-id="merger · join"]').click();
+    await page.locator(".node-task-card").getByText("TASK_merger · join", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 1);
+    await page.locator(".back-to-query-btn").click();
+    const helper = page.locator('.react-flow__node[data-id="merger:join#"]');
+    assert.equal((await helper.locator('.task-node[data-node-kind="merger"] .node-kind-label').innerText()).toLowerCase(), "merger");
+    await helper.click();
+    await page.locator(".node-task-card").getByText("PROMPT_join-helper", { exact: true }).waitFor();
+    // Adding a task may reclaim a helper's old card ID. Keep the selected
+    // helper conversation by execution ID while moving its card.
+    const previousHelperId = await helper.getAttribute("data-id");
+    const nextGraph = { ...graph, nodes: [...graph.nodes, { id: previousHelperId, task: "TASK_CLAIMANT" }] };
+    await page.evaluate(patch => window.graphFixture.update(patch, false), { graph: nextGraph,
+      nodes: Object.fromEntries(nextGraph.nodes.map(node => [node.id, { status: "waiting", revision: 1, head: null, instruction: "", error: null }])) });
+    await waitForSettledGraph(page, 9);
+    const movedHelper = page.locator('.react-flow__node[data-id="merger:join##"]');
+    await movedHelper.waitFor();
+    await page.locator(".node-task-card").getByText("PROMPT_join-helper", { exact: true }).waitFor();
+    await page.locator(`.react-flow__node[data-id="${previousHelperId}"]`).click();
+    await page.locator(".node-task-card").getByText("TASK_CLAIMANT", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("prototype-like and Unicode task IDs remain literal in the graph UI", { timeout: 25_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
+    if (result === null) errors.push(`Unexpected API: ${command}`);
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  const ids = ["__proto__", "constructor", "toString", "阶段"];
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await page.evaluate(ids => {
+      const graph = { originalGoal: "Literal IDs", nodes: ids.map(id => ({ id, task: `TASK_${id}` })), edges: [] };
+      window.graphFixture.update({ runId: "prototype-identities", phase: "completed", approved: true, graph,
+        nodes: Object.fromEntries(ids.map(id => [id, { status: "waiting", revision: 1, head: null, instruction: "", error: null }])) }, false);
+    }, ids);
+    await waitForSettledGraph(page, ids.length);
+    const rendered = await page.locator(".react-flow__node").evaluateAll(nodes => nodes.map(node => node.dataset.id));
+    assert.deepEqual(new Set(rendered).size, ids.length);
+    for (const id of ids) assert.equal(await page.locator(`.task-node[data-node-id="${id}"]`).count(), 1);
+    await page.locator('.react-flow__node[data-id="__proto__"]').click();
+    await page.locator(".node-task-card").getByText("TASK___proto__", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const collision of [
+  { label: "publication", taskId: "merger", mergerNode: "merger", helperCard: "merger:publication", helperLabel: "publication merger" },
+  { label: "node-composition", taskId: "merge:join", mergerNode: "merge:join", helperCard: "merger:join", helperLabel: "merger · join" },
+]) {
+  test(`${collision.label} Merger history stays separate from task ${collision.taskId}`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    const errors = [];
+    const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\\n";
+    const executions = [
+      { id: "task-execution", node: collision.taskId, status: "completed", revision: 1, attempt: 1, sessionId: "task-session",
+        worktree: "/mock", before: "", after: "", startedAt: 1, completedAt: 2, output: "" },
+      { id: "merger-execution", node: collision.mergerNode, status: "completed", revision: 1, attempt: 1, sessionId: "merger-session",
+        worktree: "/mock", before: "", after: "", startedAt: 3, completedAt: 4, output: "" },
+    ];
+    const graphNodes = [{ id: collision.taskId, task: `TASK_${collision.taskId}` },
+      ...(collision.label === "node-composition" ? [{ id: "join", task: "TARGET_join" }] : [])];
+    const graph = { originalGoal: "Conversation identity", nodes: graphNodes, edges: [] };
+    const taskExecution = executions[0], mergerExecution = executions[1];
+    const events = [
+      { type: "started", sequence: 1, timestamp: 1, execution: taskExecution, message_sequences: [] },
+      { type: "merger_started", sequence: 2, timestamp: 3, execution: mergerExecution },
+      { type: "steered", sequence: 3, timestamp: 4, node: collision.taskId, execution_id: taskExecution.id, instruction: "TASK_ONLY_STEER" },
+      { type: "steered", sequence: 4, timestamp: 5, node: collision.mergerNode, execution_id: mergerExecution.id, instruction: "MERGER_ONLY_STEER" },
+    ];
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      if (command === "list_files") result = { files: [] };
+      else if (command === "list_skills") result = { skills: [] };
+      else if (command === "get_merger_prompt") result = { runId: body.runId, executionId: body.executionId, prompt: "MERGER_PROMPT" };
+      else if (command === "get_execution_output") {
+        const content = output(body.executionId === taskExecution.id ? "TASK_RESPONSE" : "MERGER_RESPONSE");
+        result = { runId: body.runId, executionId: body.executionId, content,
+          startOffset: 0, nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, status: "completed" };
+      }
+      else { errors.push(`Unexpected API: ${command}`); result = null; }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(5_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+      await page.waitForFunction(() => !!window.graphFixture);
+      await page.evaluate(({ graph, executions, mergers, events, taskId }) => window.graphFixture.update({
+        runId: "conversation-identity", phase: "completed", approved: true, graph,
+        nodes: { [taskId]: { status: "completed", revision: 1, head: "", instruction: "", error: null },
+          ...(graph.nodes.some(node => node.id === "join") ? { join: { status: "completed", revision: 1, head: "", instruction: "", error: null } } : {}) },
+        executions: [executions[0]], mergers: [mergers[0]], events,
+      }, false), { graph, executions, mergers: [mergerExecution], events, taskId: collision.taskId });
+      await waitForSettledGraph(page, graphNodes.length + 1);
+      await page.locator(`.react-flow__node[data-id="${collision.taskId}"]`).click();
+      const taskPane = page.locator(".chat-messages-stream");
+      await taskPane.getByText("TASK_ONLY_STEER", { exact: true }).waitFor();
+      assert.equal(await taskPane.getByText("MERGER_ONLY_STEER", { exact: true }).count(), 0,
+        "a Merger steer must not leak into the same-spelled task conversation");
+      await page.locator(".react-flow__node").filter({ has: page.getByText(collision.helperLabel, { exact: true }) }).click();
+      const mergerPane = page.locator(".chat-messages-stream");
+      await mergerPane.getByText("MERGER_ONLY_STEER", { exact: true }).waitFor();
+      assert.equal(await mergerPane.getByText("TASK_ONLY_STEER", { exact: true }).count(), 0,
+        "a task steer must not leak into the same-spelled Merger conversation");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("Fit View prioritizes current running cards only when the graph cannot fit", { timeout: 35_000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
@@ -322,7 +531,7 @@ test("Fit View prioritizes current running cards only when the graph cannot fit"
   const update = patch => page.evaluate(patch => window.graphFixture.update(patch, false), patch);
   const state = status => ({ status, revision: 1, head: null, instruction: "", error: null });
   const fit = () => page.getByRole("button", { name: "Fit View", exact: true }).click();
-  const nodes = Array.from({ length: 24 }, (_, i) => ({ name: `n${i}`, task: `Task ${i}` }));
+  const nodes = Array.from({ length: 24 }, (_, i) => ({ id: `n${i}`, task: `Task ${i}` }));
   const graph = edges => ({ originalGoal: "Large viewport regression", nodes, edges });
   try {
     await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
@@ -360,7 +569,7 @@ test("Fit View prioritizes current running cards only when the graph cannot fit"
     assertSameViewport(await viewport(page), wholeGraph);
 
     // Repeat with vertical overflow and an independently running publication Merger.
-    const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].name, to: node.name, feedback: false }));
+    const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].id, to: node.id, feedback: false }));
     await update({ runId: "vertical-fit", graph: graph(edges), nodes: { n23: state("running") } });
     await waitForSettledGraph(page, 24);
     await fit(); await assertFocused(page, ["n23"]);
@@ -394,8 +603,8 @@ test("manual Fit View follows running cards through an ongoing layout animation"
   });
   const page = await context.newPage();
   page.on("pageerror", error => errors.push(String(error)));
-  const nodes = Array.from({ length: 16 }, (_, i) => ({ name: `a${i}`, task: `Task ${i}` }));
-  const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].name, to: node.name, feedback: false }));
+  const nodes = Array.from({ length: 16 }, (_, i) => ({ id: `a${i}`, task: `Task ${i}` }));
+  const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].id, to: node.id, feedback: false }));
   try {
     await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
     await page.waitForFunction(() => !!window.graphFixture);
@@ -435,7 +644,7 @@ test("graph splitter preserves ordinary resizing, cancellation, keyboard control
     await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
     await page.waitForFunction(() => !!window.graphFixture);
     await page.evaluate(() => window.graphFixture.update({ phase: "awaiting_approval",
-      graph: { originalGoal: "Resize regression", nodes: [{ name: "worker", task: "Task" }], edges: [] } }, false));
+      graph: { originalGoal: "Resize regression", nodes: [{ id: "worker", task: "Task" }], edges: [] } }, false));
     const splitter = page.getByRole("separator", { name: "Resize execution graph", exact: true });
     await splitter.waitFor();
     const savedRatio = () => page.evaluate(() => Number(localStorage.getItem("grapher_workbench_split_ratio")));
@@ -493,7 +702,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     });
     const page = await context.newPage();
     page.on("pageerror", error => errors.push(String(error)));
-    const nodes = ["a", "b", "c", "d"].map((name, i) => ({ name, task: `Task ${name}. ` + "Unequal measured card content. ".repeat(i + 1) }));
+    const nodes = ["a", "b", "c", "d"].map((name, i) => ({ id: name, task: `Task ${name}. ` + "Unequal measured card content. ".repeat(i + 1) }));
     const graph = edges => ({ originalGoal: "Viewport regression", nodes, edges: edges.map(([from, to]) => ({ from, to, feedback: false })) });
     const update = (patch, planning) => page.evaluate(({ patch, planning }) => window.graphFixture.update(patch, planning), { patch, planning });
     try {

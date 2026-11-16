@@ -49,20 +49,20 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
         const results = messages.slice(userIndex + 1).filter(message => message.role === 'tool');
         assert.ok(results.every(result => !JSON.stringify(result.content).includes('exited with code')),
           `Native tool failed: ${JSON.stringify(results)}`);
-        const planner = body.tools?.some(tool => tool.function.name === 'node');
-        let tool, text = 'Planner ready';
+        const planner = body.tools?.some(tool => tool.function.name === 'edit_graph');
+        let tools = [], text = 'Planner ready';
         if (planner) {
-          if (results.length === 0) tool = { name: 'node', arguments: { nodes: [
-            { name: 'alpha', task: 'BROWSER_MAC_ALPHA' },
-            { name: 'beta', task: 'BROWSER_MAC_BETA' },
-            { name: 'gamma', task: 'BROWSER_MAC_GAMMA' },
-            { name: 'delta', task: 'BROWSER_MAC_DELTA' },
-            { name: 'join', task: 'BROWSER_MAC_JOIN' },
-          ] } };
-          if (results.length === 1) tool = { name: 'edge', arguments: { edges: [
+          if (results.length === 0) tools = [
+            { id: 'alpha', task: 'BROWSER_MAC_ALPHA' },
+            { id: 'beta', task: 'BROWSER_MAC_BETA' },
+            { id: 'gamma', task: 'BROWSER_MAC_GAMMA' },
+            { id: 'delta', task: 'BROWSER_MAC_DELTA' },
+            { id: 'join', task: 'BROWSER_MAC_JOIN' },
+          ].map(arguments_ => ({ name: 'edit_graph', arguments: { nodes: [arguments_] } }));
+          if (results.length === 5) tools = [
             { from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' },
             { from: 'gamma', to: 'join' }, { from: 'delta', to: 'join' },
-          ] } };
+          ].map(arguments_ => ({ name: 'edit_graph', arguments: { edges: [arguments_] } }));
         } else {
           const command = prompt.includes('BROWSER_MAC_ALPHA')
             ? 'test "$(cat input.txt)" = "unstaged latest" && test ! -e .DS_Store && printf alpha > alpha.txt'
@@ -75,19 +75,20 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
                   : prompt.includes('BROWSER_MAC_FOLLOWUP') ? 'test "$(cat serial.txt)" = first && printf continued > serial.txt'
                     : undefined;
           assert.ok(command, `Unexpected node prompt: ${prompt}`);
-          if (!results.length) tool = { name: 'bash', arguments: { command } };
+          if (!results.length) tools = [{ name: 'bash', arguments: { command } }];
           text = prompt.includes('BROWSER_MAC_JOIN') ? 'UI_JOIN_DONE'
             : prompt.includes('BROWSER_MAC_SERIAL') ? 'UI_SERIAL_DONE'
               : prompt.includes('BROWSER_MAC_FOLLOWUP') ? 'UI_FOLLOWUP_DONE' : 'UI_NODE_DONE';
         }
-        calls.push({ role: planner ? 'planner' : 'node', tool: tool?.name ?? null });
-        const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${calls.length}`,
-          type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] }
+        calls.push({ role: planner ? 'planner' : 'node', tool: tools[0]?.name ?? null });
+        const delta = tools.length ? { role: 'assistant', tool_calls: tools.map((tool, index) => ({ index,
+          id: `call-${calls.length}-${index}`, type: 'function',
+          function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } })) }
           : { role: 'assistant', content: text };
         const chunk = (value, reason) => ({ id: 'local-browser', object: 'chat.completion.chunk', created: 1,
           model: 'native', choices: [{ index: 0, delta: value, finish_reason: reason }] });
         response.writeHead(200, { 'content-type': 'text/event-stream' });
-        response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tool ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
+        response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, tools.length ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
       } catch (error) {
         errors.push(String(error));
         response.writeHead(500); response.end(String(error));
@@ -221,11 +222,11 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/grapher'), '');
       assert.equal(git('cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objecttype)'), objects,
         'private Graph objects must not enter the source repository');
-      await page.locator('[data-node-name="join"]').click();
+      await page.locator('[data-node-id="join"]').click();
       await page.getByText('UI_JOIN_DONE', { exact: true }).waitFor({ timeout: 30_000 });
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.locator(`[data-run-id="${runId}"]`).click({ timeout: 30_000 });
-      await page.locator('[data-node-name="join"]').click({ timeout: 30_000 });
+      await page.locator('[data-node-id="join"]').click({ timeout: 30_000 });
       await page.getByText('UI_JOIN_DONE', { exact: true }).waitFor({ timeout: 30_000 });
 
       // Serial uses the source project and must keep its Pi process/session for

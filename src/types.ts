@@ -1,9 +1,9 @@
 import { t } from "./i18n/index.ts";
 export type Status = "waiting" | "running" | "paused" | "blocked" | "completed" | "failed" | "dirty";
-export interface GraphNode { name: string; task: string }
+export interface GraphNode { id: string; task: string }
 export interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
-export interface ManualNodeConfirmation { name: string; revision: number; head: string | null }
+export interface ManualNodeConfirmation { id: string; revision: number; head: string | null }
 export interface ManualNodeRequest {
   node: GraphNode;
   from: string | null;
@@ -267,16 +267,16 @@ export const emptySnapshot: Snapshot = {
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
 };
 
-/** Synthetic topology-card identity for the publication (source write-back) Merger. */
+/** Preferred publication helper-card ID; projections disambiguate collisions with task IDs. */
 export const publicationMergerCardId = "merger:publication";
 
 export const example: Graph = {
   originalGoal: t("为当前项目实现工作图自动化编译与多节点协作执行"),
   nodes: [
-    { name: "api_spec", task: t("确定系统模块契约与核心数据结构规范") },
-    { name: "frontend", task: t("构建交互界面与可视化执行拓扑视图") },
-    { name: "backend", task: t("实现确定性状态机与沙箱运行时调度") },
-    { name: "qa_review", task: t("执行端到端自动化测试与缺陷复核") },
+    { id: "api_spec", task: t("确定系统模块契约与核心数据结构规范") },
+    { id: "frontend", task: t("构建交互界面与可视化执行拓扑视图") },
+    { id: "backend", task: t("实现确定性状态机与沙箱运行时调度") },
+    { id: "qa_review", task: t("执行端到端自动化测试与缺陷复核") },
   ],
   edges: [
     { from: "api_spec", to: "frontend", feedback: false },
@@ -324,6 +324,8 @@ export interface ChatMessage {
   timestamp?: number;
   runId?: string;
   node?: string;
+  /** Distinguishes optimistic task and Merger turns when their wire node tags collide. */
+  conversationKind?: "task" | "merger";
   executionId?: string;
   /** Absolute cursor in executionId's durable log, never a text-match index. */
   userTurnOffset?: number;

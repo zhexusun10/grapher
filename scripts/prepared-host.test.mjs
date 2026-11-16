@@ -232,9 +232,18 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       requests.push(value);
       const toolResults = value.messages.filter(message => message.role === 'tool');
       const editGraph = value.model === 'planner' && toolResults.length < 2;
-      const nodes = toolResults.length === 0 ? [{ id: 'published', delete: true }] : [{ id: 'A', task: 'Return completed' }];
-      const delta = editGraph ? { role: 'assistant', tool_calls: [{ index: 0, id: `edit-node-${toolResults.length}`, type: 'function',
-        function: { name: 'node', arguments: JSON.stringify({ nodes }) } }] }
+      const edits = toolResults.length === 0 ? [{ name: 'edit_graph', args: { nodes: [{ id: 'published', delete: true }] } }] : [
+        { name: 'read_graph', args: {} },
+        { name: 'edit_graph', args: { nodes: [{ id: 'A', task: 'Return completed' }] } },
+        { name: 'edit_graph', args: { nodes: [{ id: 'missing', task: {} }] } },
+        { name: 'edit_graph', args: { edges: [{ from: 'A', to: 'missing' }] } },
+        { name: 'edit_graph', args: { nodes: [{ id: 'B', task: 'Check completed work' }], edges: [{ from: 'A', to: 'B' }] } },
+        { name: 'edit_graph', args: { edges: [{ from: 'A', to: 'B' }] } },
+        { name: 'read_graph', args: {} },
+      ];
+      const delta = editGraph ? { role: 'assistant', tool_calls: edits.map((edit, index) => ({ index,
+        id: `edit-${toolResults.length}-${index}`, type: 'function',
+        function: { name: edit.name, arguments: JSON.stringify(edit.args) } })) }
         : { role: 'assistant', content: `completed-${value.model}` };
       const chunk = (delta, finish_reason) => ({ id: 'prepared-test', object: 'chat.completion.chunk', created: 1,
         model: value.model, choices: [{ index: 0, delta, finish_reason }] });
@@ -287,12 +296,13 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       sessionIds.push(sessionId);
       await mkdir(session);
       await writeFile(graph, JSON.stringify({ originalGoal: `goal-${role}`,
-        nodes: role === 'planner' ? [{ name: 'published', task: 'Already published' }] : [], edges: [] }));
+        nodes: role === 'planner' ? [{ id: 'published', task: 'Already published' }] : [], edges: [] }));
       const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
       const args = ['--mode', 'rpc', '--no-prompt-templates', '--no-themes', '--model', `prepared-test/${role}`,
         '--thinking', 'off', '--session-id', sessionId, '--session-dir', session];
       if (role === 'partition') args.push('--no-tools', '--no-extensions', '--no-skills', '--no-approve');
       else if (role === 'planner') args.push('--no-approve', '--exclude-tools', 'ls,find,grep', '--no-context-files',
+        '--system-prompt', join(root, 'backend/resources/prompts/planner.md'),
         '--extension', join(root, 'backend/resources/planner.ts'));
       else args.push('--approve');
       const binding = { type: 'grapher_bind', role, cwd: source, args, environment: {
@@ -344,26 +354,58 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
       if (role === 'partition') assert.deepEqual(tools, []);
       else if (role === 'planner') {
-        assert.ok(['node', 'edge', 'read', 'bash', 'write', 'edit'].every(tool => tools.includes(tool)));
+        assert.match(system, /You are (?:a|the) planner operating inside (?:Grapher, )?a graph-based coding agent harness/);
+        assert.ok(['edit_graph', 'read_graph', 'read', 'bash', 'write', 'edit'].every(tool => tools.includes(tool)));
+        assert.ok(['node', 'edge'].every(tool => !tools.includes(tool)), 'retired mutation tools are not advertised');
         assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
-        const edgeDescription = body.tools.find(tool => tool.function.name === 'edge').function.description;
+        const edgeDescription = body.tools.find(tool => tool.function.name === 'edit_graph').function.description;
+        assert.match(edgeDescription, /Create, replace, or delete one or more graph nodes, dependency edges, or both/,
+          'Custom prompts still receive the tool contract through the normal provider declaration');
         assert.doesNotMatch(edgeDescription, /feedback|ignored|non-Git|drain|fork/i);
-        const edgeSchema = body.tools.find(tool => tool.function.name === 'edge').function.parameters;
-        assert.deepEqual(Object.keys(edgeSchema.properties.edges.items.properties), ['from', 'to', 'delete']);
-        const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);
-        assert.equal(rejected.applied, false, 'the bound published-node constraint must reach the Planner compiler');
-        assert.deepEqual(rejected.topology, { "from: [to]": { published: [] } });
-        assert.match(rejected.diagnostics[0], /Cannot remove node 'published'.*already published/);
+        const graphSchema = body.tools.find(tool => tool.function.name === 'edit_graph').function.parameters;
+        assert.deepEqual(Object.keys(graphSchema.properties), ['nodes', 'edges']);
+        assert.deepEqual(Object.keys(graphSchema.properties.edges.items.properties), ['from', 'to', 'delete']);
+        assert.deepEqual(Object.keys(graphSchema.properties.nodes.items.properties), ['id', 'task', 'delete']);
+        const rejected = requests[before + 1].messages.find(message => message.role === 'tool').content;
+        assert.match(rejected, /Cannot remove node 'published'.*already published/);
+        assert.match(rejected, /The graph is unchanged/);
         const results = requests[before + 2].messages.filter(message => message.role === 'tool');
-        const accepted = JSON.parse(results[1].content);
-        assert.equal(accepted.applied, true, 'a rejected deletion must not prevent further valid edits');
-        assert.deepEqual(accepted.topology, {
-          rootNodes: ["A", "published"], "from: [to]": { published: [], A: [] },
-        });
-        assert.deepEqual(accepted.topology.rootNodes, ["A", "published"], "both nodes inherit nothing and are listed as roots");
-        assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);
+        assert.deepEqual(JSON.parse(results[1].content), {
+          nodes: [{ id: 'published', task: 'Already published' }], edges: [] }, 'read_graph returns only nodes and edges and observes the earlier rejection');
+        assert.match(results[2].content, /created node "A"/, 'a rejected deletion must not prevent later edits');
+        assert.match(results[3].content, /task/, 'Pi validates the malformed node call before execute');
+        assert.match(results[4].content, /Missing: missing/, 'a dependent failure must still be reported');
+        assert.match(results[4].content, /edit-1-2/, 'the dependent edge identifies the failed node call, including schema failures');
+        assert.match(results[5].content, /Successfully applied 1 node edit\(s\) and 1 edge edit\(s\)/, 'a mixed node/edge transaction succeeds after earlier failures');
+        assert.match(results[6].content, /"A" → "B"/, 'the final edge sees both earlier node calls');
+        const graphEvents = value.events.filter(event => event.type === 'tool_execution_end'
+          && event.toolName === 'edit_graph');
+        const graphEventsById = new Map(graphEvents.map(event => [event.toolCallId, event]));
+        const mutations = results.filter(result => graphEventsById.has(result.tool_call_id));
+        for (const result of mutations) {
+          assert.throws(() => JSON.parse(result.content), 'only explicit reads return snapshots');
+          assert.doesNotMatch(result.content, /"topology"|"rootNodes"|"from: \[to\]"/);
+        }
+        assert.deepEqual(mutations.map(result => graphEventsById.get(result.tool_call_id).isError !== true), [false, true, false, false, true, true]);
+        // Exercise the actual agent-loop schedule, not just the extension's
+        // direct-execute queue: each end precedes the next start in call order.
+        const scheduling = value.events.filter(event => ['tool_execution_start', 'tool_execution_end'].includes(event.type)
+          && ['edit_graph', 'read_graph'].includes(event.toolName));
+        assert.deepEqual(scheduling.map(event => [event.type, event.toolCallId]), results.flatMap(result => [
+          ['tool_execution_start', result.tool_call_id], ['tool_execution_end', result.tool_call_id],
+        ]));
+        assert.deepEqual(graphEvents.filter(event => event.isError).flatMap(event => event.result.details?.diagnosticCodes ?? []).sort(), ['E204', 'E210']);
+        assert.deepEqual(graphEventsById.get(results[4].tool_call_id).result.details.relatedFailures,
+          [{ nodeId: 'missing', toolCallId: 'edit-1-2' }]);
+        const savedGraph = JSON.parse(await readFile(graph, 'utf8'));
+        assert.deepEqual(savedGraph.nodes.map(node => node.id), ['published', 'A', 'B']);
+        assert.deepEqual(savedGraph.edges, [{ from: 'A', to: 'B', feedback: false }]);
+        assert.equal(savedGraph.originalGoal, 'goal-planner', 'Reads do not erase the stored goal');
+        assert.deepEqual(JSON.parse(results[7].content), { nodes: savedGraph.nodes, edges: savedGraph.edges },
+          'a read later in the same response sees only successful mutations without echoing the original goal');
       } else {
         assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));
+        assert.ok(!tools.includes('read_graph'), 'graph inspection is Planner-only');
         assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)), 'node tool surface excludes ls/find/grep for every project');
       }
       // Match Rust's Planner/Node steer handoff window before closing RPC.

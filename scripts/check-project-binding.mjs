@@ -56,7 +56,7 @@ try {
   await mkdir(plain);
   assert.equal((await api('repository_status', { repository: plain })).valid, true);
   assert.deepEqual(await readdir(plain), []);
-  const graph = { originalGoal: 'binding regression', nodes: [{ name: 'worker', task: 'unused' }], edges: [] };
+  const graph = { originalGoal: 'binding regression', nodes: [{ id: 'worker', task: 'unused' }], edges: [] };
   const config = { repository: source, model: 'unused', maxParallel: 2, maxFeedback: 1 };
   await api('save_graph', { graph, config });
   await writeFile(join(source, 'planner.txt'), 'planner must survive reject');

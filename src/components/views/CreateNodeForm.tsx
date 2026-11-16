@@ -23,7 +23,7 @@ export function completedDownstream(state: Snapshot, target: string): ManualNode
   if (!target) return [];
   return [...dependencyDescendants(state, target)].flatMap(name => {
     const node = state.nodes[name];
-    return node?.status === "completed" ? [{ name, revision: node.revision, head: node.head }] : [];
+    return node?.status === "completed" ? [{ id: name, revision: node.revision, head: node.head }] : [];
   });
 }
 
@@ -35,7 +35,7 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
   onSave: (request: ManualNodeRequest) => Promise<boolean>;
   onRequestConfirmation: (config: ConfirmModalState) => void;
 }) {
-  const [name, setName] = useState("");
+  const [id, setId] = useState("");
   const [task, setTask] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -45,13 +45,13 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
-    const cleanName = name.trim();
-    if (!cleanName || !task.trim()) {
-      setError(t("请填写节点名称和任务。"));
+    const cleanId = id.trim();
+    if (!cleanId || !task.trim()) {
+      setError(t("请填写节点 ID 和任务。"));
       return;
     }
-    if (state.graph.nodes.some(node => node.name.toLowerCase() === cleanName.toLowerCase())) {
-      setError(t("节点名称已存在，请使用其他名称。"));
+    if (state.graph.nodes.some(node => node.id.toLowerCase() === cleanId.toLowerCase())) {
+      setError(t("节点 ID 已存在，请使用其他 ID。"));
       return;
     }
     if (feedback && !to) {
@@ -71,7 +71,7 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
     setError("");
     const completed = completedDownstream(state, to);
     const request: ManualNodeRequest = {
-      node: { name: cleanName, task: task.trim() }, from: from || null, to: to || null,
+      node: { id: cleanId, task: task.trim() }, from: from || null, to: to || null,
       feedback, confirmedCompleted: completed,
     };
     const save = () => { void onSave(request); };
@@ -81,7 +81,7 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
         message: feedback
           ? t("如果新节点发送反馈，目标节点及其下游节点可能重新运行。")
           : t("连接到该节点会使其已完成的结果失效，并重新运行目标节点及其下游节点。"),
-        detail: t("受影响的已完成节点：{0}", completed.map(node => node.name).join(", ")),
+        detail: t("受影响的已完成节点：{0}", completed.map(node => node.id).join(", ")),
         confirmText: t("确认并保存"),
         danger: true,
         icon: <AlertTriangle size={18} />,
@@ -101,8 +101,8 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
     </div>
     <form className="create-node-form" onSubmit={submit}>
       <p className="create-node-description">{t("添加节点并选择它的前驱和后继；留空表示不连接。")}</p>
-      <label className="form-field"><span>{t("名称 (name)")}</span>
-        <input value={name} onChange={event => setName(event.target.value)} autoFocus required disabled={busy} />
+      <label className="form-field"><span>{t("标识 (id)")}</span>
+        <input value={id} onChange={event => setId(event.target.value)} autoFocus required disabled={busy} />
       </label>
       <label className="form-field"><span>{t("任务 (task)")}</span>
         <textarea value={task} onChange={event => setTask(event.target.value)} required disabled={busy} rows={6} />
@@ -110,13 +110,13 @@ export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedback
       <label className="form-field"><span>{t("前驱 (from)")}</span>
         <select value={from} onChange={event => setFrom(event.target.value)} disabled={busy}>
           <option value="">{t("无")}</option>
-          {state.graph.nodes.map(node => <option key={node.name} value={node.name}>{node.name}</option>)}
+          {state.graph.nodes.map(node => <option key={node.id} value={node.id}>{node.id}</option>)}
         </select>
       </label>
       <label className="form-field"><span>{t("目标 (to)")}</span>
         <select value={to} onChange={event => setTo(event.target.value)} disabled={busy}>
           <option value="">{t("无")}</option>
-          {state.graph.nodes.map(node => <option key={node.name} value={node.name}>{node.name}</option>)}
+          {state.graph.nodes.map(node => <option key={node.id} value={node.id}>{node.id}</option>)}
         </select>
       </label>
       {feedbackEnabled && <div className="form-field-group">

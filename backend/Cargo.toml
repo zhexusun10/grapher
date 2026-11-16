@@ -36,6 +36,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Preserve checked u64/usize SQL conversions, now opt-in in rusqlite 0.41.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache", "fallible_uint"] }
 git2 = { version = "0.21", default-features = false }
+# Incremental Git blob verification retains libgit2's collision detection.
+sha1-checked = { version = "0.10.0", default-features = false, features = ["std"] }
 libc = "0.2"
 tiny_http = "0.12"
 signal-hook = "0.3"

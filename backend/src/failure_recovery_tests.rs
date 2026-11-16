@@ -133,7 +133,7 @@ fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer(
         nodes: ["first", "other", "live", "child"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -238,7 +238,7 @@ fn targeted_continue_does_not_bypass_a_global_graph_pause() {
         nodes: ["first", "other"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -360,7 +360,7 @@ fn unknown_failure_unblocks_dependents_without_disturbing_completed_work() {
         nodes: ["first", "after", "other"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -629,7 +629,7 @@ fn missing_feedback_fork_uses_the_target_session_and_original_instruction() {
         nodes: ["owner", "review"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -830,7 +830,7 @@ fn unmanaged_composition_failure_can_retry_without_forking_a_missing_session() {
         nodes: ["first", "after", "other"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -922,7 +922,7 @@ fn upstream_block_does_not_turn_an_old_descendant_failure_into_a_recovery_root()
         nodes: ["first", "after"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),
@@ -975,7 +975,7 @@ fn check_implicit_unpause_after_intervention(error: &str) {
         nodes: ["interrupted", "unknown"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),

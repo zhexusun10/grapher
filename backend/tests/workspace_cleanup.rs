@@ -40,7 +40,7 @@ fn offline_cleanup_reclaims_completed_workspaces_but_keeps_the_conversation_and_
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "test".into(),
                 }],
                 edges: vec![],
@@ -170,7 +170,7 @@ fn offline_cleanup_requires_a_free_data_lease_and_explicit_apply() {
     let graph = Graph {
         original_goal: "cleanup test".into(),
         nodes: vec![Node {
-            name: "task".into(),
+            id: "task".into(),
             task: "not executed".into(),
         }],
         edges: vec![],

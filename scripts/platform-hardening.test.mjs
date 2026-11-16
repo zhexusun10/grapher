@@ -80,7 +80,7 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
       if (status !== 404) failures.push(`Static path escaped the web root (${status}): ${path}`);
     }
     const state = await api('save_graph', { graph: { originalGoal: 'hardening',
-      nodes: [{ name: 'worker', task: 'never executed' }], edges: [] },
+      nodes: [{ id: 'worker', task: 'never executed' }], edges: [] },
       config: { repository: source, model: 'unused', maxParallel: 1, maxFeedback: 0 } });
     const externalRun = join(external, state.runId);
     await mkdir(externalRun);

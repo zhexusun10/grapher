@@ -2085,6 +2085,87 @@ fn existing_immutable_view_refreshes_the_local_ready_gate_without_rewriting_evid
 }
 
 #[test]
+fn snapshot_readiness_recovery_refuses_unproven_or_changed_work_without_mutation() {
+    for damage in ["dirty", "dirty-recorded", "checksum", "missing-checksum", "missing-view",
+        "unknown-commit", "wrong-tree", "discarded-history", "missing-gate", "invalid-gate",
+        "binding", "git-binding", "merge"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source(&temp);
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = slot(&temp, "snapshot-recovery-refusal");
+        let prepared = workspace::prepare(&source, &node, &base, &[]).unwrap();
+        fs::write(node.join("tracked.txt"), "snapshot bytes\n").unwrap();
+        let identity = stage_node_snapshot(&node, &source, &[]).unwrap().unwrap();
+        let message = format!("snapshot\n\nworkspace-view:{identity}");
+        workspace::git(&node, &["commit", "-m", &message]).unwrap();
+        let snapshot = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
+        let immutable = record_path(&source, &snapshot).unwrap();
+        if matches!(damage, "dirty-recorded" | "checksum" | "missing-checksum" | "missing-view") {
+            capture_node_scoped(&node, &source, &snapshot, &[], None).unwrap();
+            fs::write(ready(&node).unwrap(), &prepared).unwrap();
+        }
+        match damage {
+            "dirty" | "dirty-recorded" => fs::write(node.join("tracked.txt"), "later unfinished work\n").unwrap(),
+            "checksum" => fs::write(immutable.join("checksum"), "damaged").unwrap(),
+            "missing-checksum" => fs::remove_file(immutable.join("checksum")).unwrap(),
+            "missing-view" => fs::remove_file(immutable.join("view.json")).unwrap(),
+            "unknown-commit" => { workspace::git(&node, &["commit", "--allow-empty", "-m", "not a host snapshot"]).unwrap(); }
+            "wrong-tree" | "discarded-history" => {
+                let tree = workspace::git(&node, &["rev-parse", &format!("{prepared}^{{tree}}")]).unwrap();
+                let head = if damage == "wrong-tree" {
+                    workspace::git(&node, &["commit-tree", &tree, "-p", &snapshot, "-m", &message]).unwrap()
+                } else {
+                    workspace::git(&node, &["commit-tree", &tree, "-m", &message]).unwrap()
+                };
+                workspace::git(&node, &["update-ref", "HEAD", &head]).unwrap();
+            }
+            "missing-gate" => fs::remove_file(ready(&node).unwrap()).unwrap(),
+            "invalid-gate" => fs::write(ready(&node).unwrap(), "invalid").unwrap(),
+            "binding" => fs::write(binding(&node).unwrap(), "another source").unwrap(),
+            "git-binding" => { workspace::project_git(&node, &["config", "core.worktree", source.to_str().unwrap()]).unwrap(); }
+            "merge" => fs::write(workspace::private_git_dir(&node).unwrap().join("MERGE_HEAD"), &prepared).unwrap(),
+            _ => unreachable!(),
+        }
+        let head = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
+        let gate = fs::read(ready(&node).unwrap()).ok();
+        let index = fs::read(workspace::private_git_dir(&node).unwrap().join("index")).unwrap();
+        let project = bytes(&node.join("tracked.txt"));
+        let evidence = fs::read(immutable.join("view.json")).ok();
+        let checksum = fs::read(immutable.join("checksum")).ok();
+        let error = workspace::recover_snapshot_readiness(&node, &source, &prepared, &[]).unwrap_err();
+        assert!(!error.is_empty(), "{damage}");
+        assert_eq!(fs::read(ready(&node).unwrap()).ok(), gate, "{damage}");
+        assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head, "{damage}");
+        assert_eq!(fs::read(workspace::private_git_dir(&node).unwrap().join("index")).unwrap(), index, "{damage}");
+        assert_eq!(bytes(&node.join("tracked.txt")), project, "{damage}");
+        assert_eq!(fs::read(immutable.join("view.json")).ok(), evidence, "{damage}");
+        assert_eq!(fs::read(immutable.join("checksum")).ok(), checksum, "{damage}");
+        assert_eq!(bytes(&source.join("tracked.txt")), b"committed\n", "{damage}");
+    }
+}
+
+#[test]
+fn snapshot_readiness_seal_reuse_finishes_only_the_local_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "seal-gate-reuse");
+    let prepared = workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("tracked.txt"), "snapshot bytes\n").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "seal-gate-reuse").unwrap();
+    let record = record_path(&source, &head).unwrap();
+    let original = bytes(&record.join("view.json"));
+    fs::write(ready(&node).unwrap(), &prepared).unwrap();
+    assert_eq!(seal_prepared_scoped(&node, &source, &[], None).unwrap(), head);
+    validate_ready(&node, &source).unwrap();
+    assert_eq!(bytes(&record.join("view.json")), original);
+    fs::write(ready(&node).unwrap(), &prepared).unwrap();
+    fs::write(record.join("checksum"), "damaged").unwrap();
+    assert!(seal_prepared_scoped(&node, &source, &[], None).is_err());
+    assert_eq!(fs::read_to_string(ready(&node).unwrap()).unwrap(), prepared);
+}
+
+#[test]
 fn prepared_reuse_rejects_corrupt_view_even_with_the_original_checksum() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);

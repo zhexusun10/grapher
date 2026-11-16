@@ -9,7 +9,7 @@ fn graph(names: &[&str], edges: &[(&str, &str)]) -> Graph {
         nodes: names
             .iter()
             .map(|name| Node {
-                name: (*name).into(),
+                id: (*name).into(),
                 task: (*name).into(),
             })
             .collect(),

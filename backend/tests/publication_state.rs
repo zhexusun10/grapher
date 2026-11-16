@@ -49,11 +49,11 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
                 original_goal: "Goal".into(),
                 nodes: vec![
                     Node {
-                        name: "merger".into(),
+                        id: "merger".into(),
                         task: "A real graph node with this name".into(),
                     },
                     Node {
-                        name: "other".into(),
+                        id: "other".into(),
                         task: "Another node".into(),
                     },
                 ],
@@ -157,7 +157,7 @@ fn load_run_recovers_publication_and_serial_has_no_publication_step() {
             Graph {
                 original_goal: "Serial".into(),
                 nodes: vec![Node {
-                    name: "task".into(),
+                    id: "task".into(),
                     task: "Work".into(),
                 }],
                 edges: Vec::new(),

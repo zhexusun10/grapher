@@ -107,7 +107,7 @@ fn node_message_queue_unstarted_waits_for_dependencies_and_survives_restart() {
     let graph = Graph {
         original_goal: "queued input".into(),
         nodes: ["parent", "child"].into_iter().map(|name| Node {
-            name: name.into(), task: format!("original {name}"),
+            id: name.into(), task: format!("original {name}"),
         }).collect(),
         edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
     };
@@ -388,7 +388,7 @@ fn node_input_recovery_existing_session_does_not_prepend_consumed_directive() {
 fn node_message_queue_blocked_input_does_not_retry_failed_dependencies() {
     let graph = Graph {
         original_goal: "blocked input".into(),
-        nodes: ["parent", "child"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        nodes: ["parent", "child"].into_iter().map(|name| Node { id: name.into(), task: name.into() }).collect(),
         edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
@@ -549,7 +549,7 @@ fn node_message_queue_waits_for_capacity_without_cross_node_claims() {
         nodes: ["task", "other"]
             .into_iter()
             .map(|name| Node {
-                name: name.into(),
+                id: name.into(),
                 task: name.into(),
             })
             .collect(),

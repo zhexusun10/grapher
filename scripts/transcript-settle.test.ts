@@ -99,10 +99,10 @@ test("a composed Planner replay settles older turns while the newest one is live
     { type: "grapher_planning_source", planningId: "review" },
     start(),
     // The killed review persisted only the start of its last tool call.
-    { type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "review-edge", toolName: "edge" } },
+    { type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "review-edge", toolName: "edit_graph" } },
     { type: "grapher_planning_source", planningId: "next" },
     start(),
-    { type: "tool_execution_start", toolCallId: "next-node", toolName: "node", args: { nodes: [] } },
+    { type: "tool_execution_start", toolCallId: "next-node", toolName: "edit_graph", args: { nodes: [] } },
   ].map(line).join("");
   const html = renderToStaticMarkup(createElement(VirtualizedTranscript, {
     output: composed, inline: true, liveSource: "next",

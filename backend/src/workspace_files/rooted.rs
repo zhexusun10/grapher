@@ -204,6 +204,7 @@ impl Files {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_roots(
         &self,
         paths: &BTreeMap<String, PathBuf>,
@@ -214,6 +215,45 @@ impl Files {
         for parent in parents {
             self.load(parent)?;
         }
+        let checked = RefCell::default();
+        let value = self.capture_roots_value(paths, layouts, parents, Collection::Capture(&checked))?;
+        self.save_version(version, value)
+    }
+
+    pub(crate) fn capture_roots_reusing(
+        &self,
+        paths: &BTreeMap<String, PathBuf>,
+        layouts: &BTreeMap<String, RootScope>,
+        parent: &str,
+    ) -> Result<String, String> {
+        let previous = self.load(parent)?;
+        let checked = RefCell::default();
+        self.validate_value(&previous, &checked)?;
+        let value = self.capture_roots_value(paths, layouts, &[parent.into()], Collection::Capture(&checked))?;
+        self.save_changed(value, parent, &previous)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_roots_unbatched(
+        &self,
+        paths: &BTreeMap<String, PathBuf>,
+        layouts: &BTreeMap<String, RootScope>,
+        parent: &str,
+    ) -> Result<String, String> {
+        self.load(parent)?;
+        let value = self.capture_roots_value(paths, layouts, &[parent.into()], Collection::CaptureUnbatched)?;
+        let version = Uuid::new_v4().to_string();
+        self.save_version(&version, value)?;
+        if self.same_contents(parent, &version)? { Ok(parent.into()) } else { Ok(version) }
+    }
+
+    fn capture_roots_value(
+        &self,
+        paths: &BTreeMap<String, PathBuf>,
+        layouts: &BTreeMap<String, RootScope>,
+        parents: &[String],
+        collection: Collection<'_>,
+    ) -> Result<Version, String> {
         self.check_root_targets(paths, layouts.keys().cloned())?;
         let mut snapshot = Snapshot {
             schema: 1,
@@ -227,7 +267,7 @@ impl Files {
                 .map_err(|error| error.to_string())?;
             let mut entries = Entries::new();
             for path in files.scoped_paths(&root)? {
-                files.collect(&root, &path, &mut entries, Collection::Capture)?;
+                files.collect(&root, &path, &mut entries, collection)?;
             }
             snapshot.roots.insert(
                 label.clone(),
@@ -239,16 +279,13 @@ impl Files {
         }
         self.validate_rooted_metadata(&snapshot)?;
         self.check_native_project_scopes(paths, &snapshot)?;
-        self.save_version(
-            version,
-            Version {
-                head: String::new(),
-                parents: parents.to_vec(),
-                entries: Entries::new(),
-                checksum: None,
-                rooted: Some(snapshot),
-            },
-        )
+        Ok(Version {
+            head: String::new(),
+            parents: parents.to_vec(),
+            entries: Entries::new(),
+            checksum: None,
+            rooted: Some(snapshot),
+        })
     }
 
     pub(crate) fn verify_roots(
@@ -261,9 +298,9 @@ impl Files {
             .rooted
             .ok_or("Missing root-qualified environment byte evidence")?;
         self.check_root_targets(paths, value.roots.keys().cloned())?;
-        // collect(Verify) hashes BOTH live and stored bytes for every file;
-        // exact entry equality below proves none were omitted. As with legacy
-        // verify(), do not hash the same stored tree twice on successful reuse.
+        // Hash every live file and each distinct immutable stored blob in this
+        // operation; exact entry equality below proves no live file was omitted.
+        let checked = RefCell::default();
         for (label, root) in &value.roots {
             let files = self.for_root(&root.layout);
             let path = paths[label]
@@ -271,7 +308,7 @@ impl Files {
                 .map_err(|error| error.to_string())?;
             let mut current = Entries::new();
             for child in files.scoped_paths(&path)? {
-                files.collect(&path, &child, &mut current, Collection::Verify(&root.entries))?;
+                files.collect(&path, &child, &mut current, Collection::Verify(&root.entries, &checked))?;
             }
             if current != root.entries {
                 return Err(format!(

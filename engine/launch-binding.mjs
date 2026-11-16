@@ -70,6 +70,61 @@ function bindBashPath(path) {
   }
   return `export PATH=${quote(path)}\n`;
 }
+// MSYS converts PATH on native process startup, but that transport cannot
+// quote ';' directories and can absolutize relative entries. Capture Bash's
+// list separately. Keep original native spellings, and convert only new
+// absolute entries in one trusted converter call; relative entries stay relative.
+const hookPathMarker = '\0GRAPHER_HOOK_PATH\0';
+const captureHookPath = process.platform !== 'win32' ? '' : `
+__grapher_hook_native=''
+__grapher_hook_absolute=()
+if [ "\${PATH+x}" = x ]; then
+  case "$PATH" in *$'\\n'*|*$'\\r'*) \\builtin printf '%s\\n' 'Invalid activation PATH entry' >&2; exit 1;; esac
+  __grapher_hook_remaining="$PATH:"
+  while [ -n "$__grapher_hook_remaining" ]; do
+    __grapher_hook_entry="\${__grapher_hook_remaining%%:*}"
+    __grapher_hook_remaining="\${__grapher_hook_remaining#*:}"
+    case "$__grapher_hook_entry" in
+      /*) case ":$__grapher_hook_initial_path:" in
+        *":$__grapher_hook_entry:"*) ;;
+        *) __grapher_hook_absolute+=("$__grapher_hook_entry");;
+      esac;;
+    esac
+  done
+  if [ "\${#__grapher_hook_absolute[@]}" -gt 0 ]; then
+    __grapher_hook_native=$(/usr/bin/cygpath -w -- "\${__grapher_hook_absolute[@]}") || exit $?
+  fi
+fi
+\\builtin printf '\\0GRAPHER_HOOK_PATH\\0%s\\0%s\\0%s\\0%s\\0' "$__grapher_hook_initial_path" "\${PATH+x}" "\${PATH-}" "$__grapher_hook_native"
+unset __grapher_hook_initial_path __grapher_hook_native __grapher_hook_absolute __grapher_hook_remaining __grapher_hook_entry
+`;
+function capturedHookPath(output, original) {
+  let offset = output.lastIndexOf(hookPathMarker);
+  if (offset < 0) throw new Error('Native hook did not produce a complete PATH');
+  offset += hookPathMarker.length;
+  const fields = [];
+  for (let index = 0; index < 4; index++) {
+    const end = output.indexOf('\0', offset);
+    if (end < 0) throw new Error('Native hook did not produce a complete PATH');
+    fields.push(output.slice(offset, end));
+    offset = end + 1;
+  }
+  const [initial, present, path, converted] = fields;
+  const entries = initial.split(':');
+  if (entries.length !== original.length || !['', 'x'].includes(present)) throw new Error('Invalid native hook PATH capture');
+  if (!present) return undefined;
+  if (path === initial) return joinNativePath(original);
+  const known = new Map();
+  entries.forEach((entry, index) => { if (!known.has(entry)) known.set(entry, original[index]); });
+  const paths = path.split(':');
+  const unknown = paths.filter(entry => entry.startsWith('/') && !known.has(entry));
+  const native = unknown.length ? converted.split('\n') : [];
+  if (native.length !== unknown.length || !unknown.length && converted !== ''
+      || native.some(entry => !isNativeAbsolute(entry))) throw new Error('Invalid converted hook PATH entries');
+  let index = 0;
+  return joinNativePath(paths.map(entry => known.has(entry) ? known.get(entry)
+    : entry.startsWith('/') ? native[index++] : entry));
+}
 function restoreBashCwd(workspaceCwd) {
   if (workspaceCwd === undefined) return '';
   if (typeof workspaceCwd !== 'string' || workspaceCwd.includes('\0') || !isAbsolute(workspaceCwd)) {
@@ -77,8 +132,10 @@ function restoreBashCwd(workspaceCwd) {
   }
   // BASH_ENV runs first. Retain its setup, but restore the selected directory
   // before path conversion and before any relative tool/activation-hook work.
+  // A redundant cd overwrites OLDPWD (and can fail when it is readonly).
+  // Compare physical directories so trusted root aliases need no extra cd.
   const path = process.platform === 'win32' ? toHostInput(workspaceCwd).replaceAll('\\', '/') : workspaceCwd;
-  return `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then\n\\builtin cd -- ${quote(path)} || exit $?\nelse\ncd -- ${quote(path)} || exit $?\nfi\n`;
+  return `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then\nif ! \\builtin test . -ef ${quote(path)}; then\n\\builtin cd -- ${quote(path)} || exit $?\nfi\nelse\nif ! [ . -ef ${quote(path)} ]; then\ncd -- ${quote(path)} || exit $?\nfi\nfi\n`;
 }
 export function managedBashCommand(command, workspaceCwd) {
   const restoreWorkspace = restoreBashCwd(workspaceCwd);
@@ -165,7 +222,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     const capture = `process.stdout.write('\\0GRAPHER_ENV\\0'+JSON.stringify(process.env)+'\\0')`;
     // Do not use an env/python/node found on the business PATH for capture.
     const output = spawnSync(launch.shell, ['--noprofile', '--norc', '-c',
-      `${restoreBashCwd(process.cwd())}${bindBashPath(process.env.PATH)}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${quote(node)} -e ${quote(capture)}`],
+      `${restoreBashCwd(process.cwd())}${bindBashPath(process.env.PATH)}${process.platform === 'win32' ? '__grapher_hook_initial_path=$PATH\n' : ''}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${captureHookPath}${quote(node)} -e ${quote(capture)}`],
     { cwd: process.cwd(), env: { ...process.env }, encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
     if (output.error || output.status !== 0) throw new Error('Declared native activation hook failed; no fallback');
     const marker = '\0GRAPHER_ENV\0';
@@ -173,6 +230,11 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     const end = output.stdout.indexOf('\0', start + marker.length);
     if (start < 0 || end < 0) throw new Error('Native hook did not produce a complete environment');
     const environment = JSON.parse(output.stdout.slice(start + marker.length, end));
+    if (process.platform === 'win32') {
+      const path = capturedHookPath(output.stdout.slice(0, start), launch.path);
+      for (const key of Object.keys(environment)) if (/^PATH$/i.test(key)) delete environment[key];
+      if (path !== undefined) environment.PATH = path;
+    }
     // A hook cannot change Runtime/Pi identity or install Node bootstrap code.
     const identityKey = key => protectedKeys(key) && key.toUpperCase() !== 'PATH';
     for (const key of Object.keys(process.env)) if (!identityKey(key)) delete process.env[key];

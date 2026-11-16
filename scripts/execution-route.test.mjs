@@ -3,20 +3,20 @@ import { test } from 'node:test';
 import { deduceRouteType, shouldShowRouteBadge } from '../src/services/executionRoute.ts';
 
 test('persisted graph route cannot auto-approve a single task node as serial', () => {
-  const graph = { nodes: [{ name: 'task', task: 'test' }], edges: [], originalGoal: 'test' };
+  const graph = { nodes: [{ id: 'task', task: 'test' }], edges: [], originalGoal: 'test' };
   assert.equal(deduceRouteType({ graph, planType: 'graph' }), 'graph');
   assert.equal(deduceRouteType({ graph, planType: 'serial' }), 'serial');
   assert.equal(deduceRouteType({ graph }), 'serial', 'legacy stores keep their existing interpretation');
-  assert.equal(deduceRouteType({ graph: { ...graph, nodes: [{ name: 'worker' }] } }), 'graph');
+  assert.equal(deduceRouteType({ graph: { ...graph, nodes: [{ id: 'worker' }] } }), 'graph');
   assert.equal(deduceRouteType({ graph: { ...graph, nodes: [] } }), 'undecided');
 });
 
 test('incomplete recovery uses committed route evidence before legacy node inference', () => {
-  const graph = { originalGoal: 'Existing graph', nodes: [{ name: 'task', task: 'Review' }], edges: [] };
+  const graph = { originalGoal: 'Existing graph', nodes: [{ id: 'task', task: 'Review' }], edges: [] };
   assert.equal(deduceRouteType({ graph, events: [{ type: 'routed', plan_type: 'graph' }] }), 'graph');
   assert.equal(deduceRouteType({ graph, planType: 'undecided', events: [{ type: 'routed', plan_type: 'graph' }] }), 'graph');
   assert.equal(deduceRouteType({ graph, planning: { planType: 'graph' } }), 'graph');
-  assert.equal(deduceRouteType({ graph: { ...graph, nodes: [{ name: 'a' }, { name: 'b' }] }, planType: 'undecided' }), 'graph');
+  assert.equal(deduceRouteType({ graph: { ...graph, nodes: [{ id: 'a' }, { id: 'b' }] }, planType: 'undecided' }), 'graph');
   assert.equal(deduceRouteType({ graph, planType: 'serial', events: [{ type: 'routed', plan_type: 'graph' }] }), 'serial',
     'the persisted route remains authoritative');
 });

@@ -11,6 +11,6 @@ export function loadWorkbench() {
 
 export function preloadWorkbench(): void {
   // Speculation must not create an unhandled rejection. The mount owns the
-  // visible error/reload UI if the user actually opens a conversation.
+  // visible error banner if the user actually opens a conversation.
   void loadWorkbench().catch(() => {});
 }

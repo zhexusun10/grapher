@@ -4,7 +4,7 @@ import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
-  defaultConfig, emptyGraph, emptySnapshot, normalizeMaxFeedback, normalizeMaxParallel, publicationMergerCardId,
+  defaultConfig, emptyGraph, emptySnapshot, normalizeMaxFeedback, normalizeMaxParallel,
   type Config, type Graph, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType,
   type RuntimeActivity,
@@ -45,7 +45,8 @@ import { useStableCallback } from "./hooks/useStableCallback";
 import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
-import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
+import { selectedMergerNode } from "./lib/graphNodeIdentity";
+import { PlannerGraphEditQueue, plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
 import { runHasActiveExecutions } from "./lib/runPhase";
 import { ComposerDrafts } from "./services/composerDrafts";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
@@ -588,7 +589,7 @@ export default function App() {
     if (generation !== foregroundGeneration.current) return;
     const isGlobalGraphAction = ["pause", "resume", "approve", "reject", "retry_publication"].includes(action);
     const defaultNode = !isGlobalGraphAction
-      ? (selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined))
+      ? (selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.id || "task") : undefined))
       : undefined;
     const targetNode = extra.node !== undefined ? extra.node : defaultNode;
     const payload: Record<string, unknown> = { runId: state.runId, ...extra };
@@ -610,13 +611,11 @@ export default function App() {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return false;
     }
-    const selectedNode = state.graph.nodes.find(item => item.name === selected);
-    const isNodeMerger = selected.startsWith("merger:") && selected !== publicationMergerCardId;
-    const nodeMergerTarget = isNodeMerger ? selected.slice(7) : "";
-    const mergerNodeName = isNodeMerger ? `merge:${nodeMergerTarget}` : (selected === publicationMergerCardId ? "merger" : undefined);
-    const targetNodeName = mergerNodeName || selectedNode?.name ||
-      (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
-    const selectedMerger = (isNodeMerger || selected === publicationMergerCardId)
+    const selectedNode = state.graph.nodes.find(item => item.id === selected);
+    const mergerNodeName = selectedMergerNode(state.graph, state.mergers, selected, selectedMergerId);
+    const targetNodeName = mergerNodeName || selectedNode?.id ||
+      (routeType === "serial" ? state.graph.nodes[0]?.id : undefined);
+    const selectedMerger = mergerNodeName
       ? ((state.mergers ?? []).find(item => item.id === selectedMergerId && item.node === mergerNodeName)
           ?? (state.mergers ?? []).filter(item => item.node === mergerNodeName).at(-1))
       : undefined;
@@ -643,6 +642,7 @@ export default function App() {
         // node happens to be selected; a node tag would hide it from the
         // pending area and from the Planner history it is sent to.
         node: plannerSteer ? undefined : targetNodeName,
+        conversationKind: plannerSteer ? undefined : selectedMerger ? "merger" : "task",
         delivery, executionId, animateAppear: true,
         ...(!plannerSteer ? { steerRequestId: id } : {}),
         ...(plannerSteer ? { plannerSteerId: id, plannerSteerStatus: "submitting" as const } : {}),
@@ -1906,6 +1906,7 @@ export default function App() {
         if (!planningRecovery.current(scope)) return;
         let partInTag = false;
         let planInTag = false;
+        const graphEditQueue = new PlannerGraphEditQueue();
 
         abortController = new AbortController();
         planningAbortControllerRef.current = abortController;
@@ -2030,6 +2031,7 @@ export default function App() {
                 const id = plannerContentSteerId(content);
                 if (id) setPlannerStream((prev) => applyPlannerUserMessageStart(prev, content, id));
               } else if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
+                graphEditQueue.clear();
                 setPlannerStream(prev => ({
                   ...prev, items: closeThinkingItems(prev.items), plannerMessageStart: prev.items.length,
                 }));
@@ -2059,6 +2061,7 @@ export default function App() {
                 if (pEvent.toolCallId || pEvent.toolName) {
                   pendingToolArgsRef.current.set(pEvent.toolCallId || pEvent.toolName, pEvent.args || {});
                 }
+                if (pEvent.toolName === "edit_graph") graphEditQueue.start(pEvent.toolCallId);
                 setPlannerStream((prev) => applyPlannerToolExecutionStart(prev, pEvent));
               } else if (pEvent?.type === "tool_execution_end") {
                 const resText = (pEvent.result?.content ?? [])
@@ -2080,21 +2083,27 @@ export default function App() {
                 if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
                 const args = pEvent.args || savedArgs;
 
+                const graphResult = { toolName: pEvent.toolName, args, isError: isErr };
+                const readyResults = pEvent.toolName === "edit_graph"
+                  ? graphEditQueue.finish(pEvent.toolCallId, graphResult) : [];
+
                 // A resume can start work after this turn began; the live ref
                 // keeps running revision topology authoritative even then. A new
                 // plan has no committed revision to protect.
                 const revisionBecameActive = isContinuing && state.approved && liveWorkRef.current;
-                if (!isErr && !liveRevision && !revisionBecameActive) {
-                  // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
-                  if (pEvent.toolName === "node") {
-                    const edits = plannerNodeEdits(args);
+                // Apply graph results in invocation order, not completion
+                // order. An earlier error drains the queue without mutating.
+                for (const result of readyResults) {
+                  if (result.isError || liveRevision || revisionBecameActive) continue;
+                  if (result.toolName === "edit_graph") {
+                    const edits = plannerNodeEdits(result.args);
                     if (edits.length > 0) {
                       previewApplied = true;
                       // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
-                      const existing = new Set(state.graph.nodes.map((item) => item.name));
+                      const existing = new Set(state.graph.nodes.map((item) => item.id));
                       const addedNodeNames = edits
-                        .filter((edit) => !edit.delete && !existing.has(edit.name))
-                        .map((edit) => edit.name);
+                        .filter((edit) => !edit.delete && !existing.has(edit.id))
+                        .map((edit) => edit.id);
                       setState((prev) => applyPlannerNodeEditsToState(prev, edits));
                       if (addedNodeNames.length > 0) {
                         setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
@@ -2107,8 +2116,9 @@ export default function App() {
                         }, 1200);
                       }
                     }
-                  } else if (pEvent.toolName === "edge") {
-                    const edits = plannerEdgeEdits(args);
+                  }
+                  if (result.toolName === "edit_graph") {
+                    const edits = plannerEdgeEdits(result.args);
                     if (edits.length > 0) {
                       previewApplied = true;
                       const addedIds = edits.filter((edit) => !edit.delete).map((edit) => graphEdgeId(edit));
@@ -2126,21 +2136,6 @@ export default function App() {
                     }
                   }
 
-                  // 尝试解析并同步编译计划（executionBatches），用于实时驱动拓扑卡片摆位
-                  try {
-                    if (resText) {
-                      const parsed = JSON.parse(resText);
-                      if (parsed?.plan?.executionBatches) {
-                        previewApplied = true;
-                        setState((prev) => ({
-                          ...prev,
-                          plan: parsed.plan,
-                        }));
-                      }
-                    }
-                  } catch {
-                    // 非 JSON 输出则忽略
-                  }
                 }
 
                 setPlannerStream((prev) => applyPlannerToolExecutionEnd(prev, pEvent, resText, exitCode, isErr, truncated, args));
@@ -2314,15 +2309,11 @@ export default function App() {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return;
     }
-    const isNodeMerger = selected.startsWith("merger:") && selected !== publicationMergerCardId;
-    const nodeMergerTarget = isNodeMerger ? selected.slice(7) : "";
-    const currentMergerNode = isNodeMerger ? `merge:${nodeMergerTarget}` : (selected === publicationMergerCardId ? "merger" : undefined);
+    const currentMergerNode = selectedMergerNode(state.graph, state.mergers, selected, selectedMergerId);
     const mergerExecutionById = targetMsg.executionId ? (state.mergers ?? []).find(m => m.id === targetMsg.executionId) : undefined;
     const isMergerMessage = Boolean(
-      targetMsg.node === "merger" ||
-      targetMsg.node?.startsWith("merge:") ||
       mergerExecutionById ||
-      (currentMergerNode && (targetMsg.node === currentMergerNode || !targetMsg.node))
+      (!targetMsg.executionId && currentMergerNode && (targetMsg.node === currentMergerNode || !targetMsg.node))
     );
 
     if (!isMergerMessage && (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed")) {
@@ -2417,9 +2408,9 @@ export default function App() {
         }
       }
 
-      const selectedNode = state.graph.nodes.find((item) => item.name === selected);
-      const selectedNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
-        routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
+      const selectedNode = state.graph.nodes.find((item) => item.id === selected);
+      const selectedNodeName = targetMsg.node || (selectedNode ? selectedNode.id : (
+        routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.id || "task") : undefined
       ));
       const selectedExecutionId = selectedVersionData.executionId ||
         (selectedNodeName ? executionIdForVersion(state, selectedNodeName, selectedText) : undefined);
@@ -2526,7 +2517,7 @@ export default function App() {
       // Serial's initial prompt is a Pi user turn too: branch before it in the
       // existing Run instead of pretending a new unrelated Run is a tree edit.
       if (routeType === "serial" && state.approved && state.graph.nodes.length > 0) {
-        const node = state.graph.nodes[0].name;
+        const node = state.graph.nodes[0].id;
         const first = nodeConversationExecutions(state, node)[0];
         if (!first || !["completed", "failed", "paused"].includes(first.status)) {
           setError(t("请等待当前执行结束后再修改初始消息。"));
@@ -2670,9 +2661,9 @@ export default function App() {
       })
     );
 
-    const selectedNode = state.graph.nodes.find((item) => item.name === selected);
-    const targetNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
-      routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
+    const selectedNode = state.graph.nodes.find((item) => item.id === selected);
+    const targetNodeName = targetMsg.node || (selectedNode ? selectedNode.id : (
+      routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.id || "task") : undefined
     ));
 
     if (!targetNodeName) {
@@ -2976,8 +2967,11 @@ export default function App() {
     setWorkbenchLoadFailed(false);
     void loadWorkbench().then(module => {
       if (active) setWorkbench(() => module.AppGraphWorkbench);
-    }).catch(() => {
-      if (active) setWorkbenchLoadFailed(true);
+    }).catch(error => {
+      if (active) {
+        console.error("Could not load conversation view", error);
+        setWorkbenchLoadFailed(true);
+      }
     });
     return () => { active = false; };
   }, [isLandingView, Workbench]);
@@ -3204,7 +3198,6 @@ export default function App() {
                   <span>{workbenchLoadFailed
                     ? t("无法加载对话界面。刷新页面可重试，但未发送的附件可能丢失；后台任务不受影响。")
                     : t("正在加载对话界面…")}</span>
-                  {workbenchLoadFailed && <button type="button" onClick={() => window.location.reload()}>{t("刷新页面")}</button>}
                 </div>
               )}
               <AnimatePresence>

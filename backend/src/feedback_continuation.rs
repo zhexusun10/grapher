@@ -98,12 +98,12 @@ impl Runtime {
         let mut events = Vec::new();
         let mut undelivered = BTreeSet::new();
         for node in ready {
-            let Some(mut continuation) = self.state.nodes[&node.name].feedback_continuation.clone() else {
+            let Some(mut continuation) = self.state.nodes[&node.id].feedback_continuation.clone() else {
                 continue;
             };
             if continuation.dispatched && continuation.delivery_id.is_some()
                 && !delivery::feedback_input_delivered(self, &continuation)? {
-                undelivered.insert(node.name.clone());
+                undelivered.insert(node.id.clone());
             }
             if continuation.instruction.is_some() {
                 continue;
@@ -136,11 +136,11 @@ impl Runtime {
             continuation.instruction = Some(
                 template
                     .trim()
-                    .replace("{{node}}", &node.name)
+                    .replace("{{node}}", &node.id)
                     .replace("{{target}}", &continuation.target),
             );
             events.push(EventKind::FeedbackContinuationQueued {
-                node: node.name.clone(),
+                node: node.id.clone(),
                 continuation,
             });
         }
