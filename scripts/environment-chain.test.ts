@@ -66,7 +66,7 @@ const reportProbe = verifyProbe
   .replace("pathlib.Path('reports/verify.json')", "pathlib.Path('reports/report.json')")
   .replace('PROBE_VERIFIED', 'PROBE_REPORTED');
 
-test('legacy environment discovery binds one private venv across a parallel Graph and isolates Runs', { timeout: 900000 }, async t => {
+test('native environment discovery binds one private venv across a parallel Graph and isolates Runs', { timeout: 900000 }, async t => {
   const started = Date.now();
   const directory = await mkdtemp(join(tmpdir(), 'ge-chain-中 space-'));
   const source = join(directory, 'source 中文 space');
@@ -295,8 +295,8 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     assert.ok(Object.values(isolatedManifest.rooted.roots).every((frame: any) =>
       !Object.keys(frame.entries).some(name => name.startsWith('.venv/'))),
       'neither root in a new Run sees the previous environment');
-    // Reuse the existing business tasks, with no new prompt or reconciliation
-    // session: a bound parent forks into a local bound and a fresh unbound task.
+    // A fixed-layout parent cannot be relocated into either fresh fan-out slot.
+    // Both ordinary business tasks remain runnable with unbound launches.
     const fork = await privateGraph(api, data, { graph: { originalGoal: graph.originalGoal,
       nodes: [{ id: 'create', task: 'CREATE_PROBE' }, { id: 'left', task: 'PREP_BRANCH left' }, { id: 'right', task: 'PREP_BRANCH right' }],
       edges: [{ from: 'create', to: 'left', feedback: false }, { from: 'create', to: 'right', feedback: false }] }, config });
@@ -313,20 +313,21 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     assert.equal(forked.mergers.length, 0, 'environment differences do not dispatch a Merger');
     assert.notEqual(forkNodes.left.worktree, forkNodes.right.worktree);
     assert.ok(Math.min(forkNodes.left.completedAt, forkNodes.right.completedAt) >= Math.max(forkNodes.left.startedAt, forkNodes.right.startedAt), 'bound fan-out remains parallel');
-    assert.equal((await forkLaunch(forkNodes.left.input.launchRef)).environment.kind, 'venv');
-    assert.equal((await forkLaunch(forkNodes.right.input.launchRef)).environment, undefined);
-    assert.equal(forkNodes.right.input.inheritance.reason, 'fixed-layout-not-reusable');
-    await assert.rejects(stat(join(forkNodes.right.worktree, '.venv')), /ENOENT/, 'Runtime does not copy an unportable environment');
+    for (const name of ['left', 'right']) {
+      assert.notEqual(forkNodes[name].worktree, forkNodes.create.worktree);
+      assert.equal((await forkLaunch(forkNodes[name].input.launchRef)).environment, undefined);
+      assert.equal(forkNodes[name].input.inheritance.reason, 'fixed-layout-not-reusable');
+      await assert.rejects(stat(join(forkNodes[name].worktree, '.venv')), /ENOENT/, 'Runtime does not copy an unportable environment');
+    }
     const descriptor = await api('result_descriptor', { runId: fork.runId });
     assert.equal(descriptor.schema, 2);
     assert.deepEqual(descriptor.entries.map((entry: any) => entry.name), ['left', 'right']);
-    assert.equal(descriptor.defaultEntry, undefined, 'different environments have no guessed default');
+    assert.equal(descriptor.defaultEntry, 'left', 'equivalent unbound business launches permit a default');
     assert.ok(descriptor.entries.every((entry: any) => entry.result.codeRef === forked.publication.head));
-    await assert.rejects(api('launch_result', { runId: fork.runId, args: [] }), /entryId/);
     const callsBeforeLaunch = modelCalls;
-    const expectedProbe = JSON.parse(await readFile(join(source, 'environment-probe.json'), 'utf8'));
-    const launched = await api('launch_result', { runId: fork.runId, entryId: 'left', args: ['-c', 'import grapher_probe; print(grapher_probe.MARKER)'] });
-    assert.equal(launched.output.trim(), expectedProbe.marker);
+    const command = 'node -e ' + quote("const fs=require('node:fs');console.log(fs.readFileSync('reports/left.txt','utf8').trim()+'+'+fs.readFileSync('reports/right.txt','utf8').trim())");
+    const launched = await api('launch_result', { runId: fork.runId, entryId: 'left', args: ['-c', command] });
+    assert.equal(launched.output.trim(), 'left+right');
     const republished = await forkSettled();
     assert.equal(republished.publishedResult.entries.length, 2);
     assert.equal(modelCalls, callsBeforeLaunch, 'entry launch and republication do not call a model');

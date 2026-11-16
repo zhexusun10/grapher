@@ -2804,19 +2804,13 @@ fn approval_is_filesystem_only_and_native_admission_waits_for_a_private_batch() 
     assert!(jobs.iter().all(|job| job.environment_sources.is_empty()));
 }
 
-#[cfg(not(feature = "fixture"))]
 #[test]
 fn restored_private_selection_initializes_native_inputs_before_dispatch() {
-    let (_temp, _source, mut runtime) = adaptive(true, graph(&["a"], &[]), true, 1);
+    let (_temp, _source, mut runtime) = setup(true, graph(&["a"], &[]));
+    #[cfg(feature = "fixture")]
+    runtime.emit(EventKind::EnvironmentPolicyRequested).unwrap();
+    runtime.approve().unwrap();
     assert!(runtime.state.environment_baseline.is_none());
-    runtime
-        .emit_outputs(vec![
-            EventKind::WorkspaceIsolationSelected { isolated: true },
-            EventKind::PrivateBatchSelected {
-                nodes: vec!["a".into()],
-            },
-        ])
-        .unwrap();
     let root = runtime.root.clone();
     drop(runtime);
     let mut restored = Runtime::open(&root).unwrap();
