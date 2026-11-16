@@ -237,10 +237,14 @@ fn planning_history_refuses_linked_directories_and_preserves_external_summaries(
         fs::write(outside.join("request.json"), r#"{"goal":"outside secret"}"#).unwrap();
         std::os::unix::fs::symlink(outside.join("request.json"), real.join("request.json"))
             .unwrap();
-        assert!(get_planning("real-history".into(), &service)
-            .unwrap()
-            .goal
-            .is_none());
+        assert_eq!(
+            get_planning("real-history".into(), &service)
+                .unwrap()
+                .goal
+                .as_deref(),
+            Some("test"),
+            "the recorded summary remains authoritative over a linked request"
+        );
         fs::remove_file(real.join("summary.json")).unwrap();
         std::os::unix::fs::symlink(outside.join("summary.json"), real.join("summary.json"))
             .unwrap();

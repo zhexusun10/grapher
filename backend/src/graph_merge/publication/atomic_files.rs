@@ -962,8 +962,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn retry_skips_deleted_children_below_an_already_installed_symlink() {
-        let (temp, source, _node, journal, _) = fixture();
-        let node = temp.path().join("link-node");
+        let (_temp, source, node, journal, _) = fixture();
+        let node = node.with_file_name("link-node");
         fs::create_dir(source.join("dir")).unwrap();
         fs::write(source.join("dir/child"), "old child").unwrap();
         let input = workspace::snapshot_repository(&source).unwrap();

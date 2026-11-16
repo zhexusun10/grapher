@@ -1117,14 +1117,14 @@ fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
 
 #[cfg(unix)]
 #[test]
-fn legacy_unix_ownership_is_normalized_only_after_checksum_validation() {
+fn current_unix_ownership_is_normalized_only_after_checksum_validation() {
     let temp = tempfile::tempdir().unwrap();
     let extra = serde_json::json!({
         "attributes": [], "security": [], "protected": false, "flags": 0,
         "owner": [123456, 654321], "efs": false
     });
     let view = serde_json::json!({
-        "schema": 5,
+        "schema": VIEW_SCHEMA,
         "source": "/legacy/source",
         "root_mode": 0o750,
         "root_extra": extra,
@@ -1142,11 +1142,11 @@ fn legacy_unix_ownership_is_normalized_only_after_checksum_validation() {
     });
     let raw = serde_json::to_vec(&view).unwrap();
     fs::write(temp.path().join("view.json"), &raw).unwrap();
-    // Independently calculated Git blob SHA-1 of the sorted legacy JSON with
-    // security fields removed. Do not generate it with the production saver.
+    // Independently calculated Git blob SHA-1 of the sorted schema-6 JSON,
+    // including security fields. Do not generate it with the production saver.
     fs::write(
         temp.path().join("checksum"),
-        "22c14182eed10e6958d7e3b96819f4b7e7d266ac",
+        "75823a1797798d79147e76c20cf95ecf620b6b74",
     )
     .unwrap();
     let loaded = load(temp.path()).unwrap();
@@ -1173,7 +1173,7 @@ fn legacy_unix_ownership_is_normalized_only_after_checksum_validation() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn legacy_provenance_metadata_is_ignored_after_load() {
+fn current_provenance_metadata_is_ignored_after_load() {
     let temp = tempfile::tempdir().unwrap();
     let legacy_extra: crate::workspace_metadata::Extra =
         serde_json::from_value(serde_json::json!({
@@ -1182,7 +1182,7 @@ fn legacy_provenance_metadata_is_ignored_after_load() {
         }))
         .unwrap();
     let view = View {
-        schema: 5,
+        schema: VIEW_SCHEMA,
         source: "/legacy/source".into(),
         root_mode: 0o755,
         root_extra: legacy_extra.clone(),
