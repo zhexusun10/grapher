@@ -66,6 +66,8 @@ import { SettingsModal } from "./components/modals/SettingsModal";
 import { EditorModal } from "./components/modals/EditorModal";
 
 type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
+type WorkbenchLoadKind = "initial" | "navigation";
+const WORKBENCH_LOAD_NOTICE_DELAY_MS = 500;
 
 // A conversation without an explicit override keeps the model composition it
 // was created with. Snapshots always describe their own Run, never whichever
@@ -2961,9 +2963,14 @@ export default function App() {
     state.phase !== "planning_failed";
   const [Workbench, setWorkbench] = useState<WorkbenchComponent | null>(null);
   const [workbenchLoadFailed, setWorkbenchLoadFailed] = useState(false);
+  const [workbenchLoadKind, setWorkbenchLoadKind] = useState<WorkbenchLoadKind>("initial");
   useEffect(() => {
     if (isLandingView || Workbench) return;
     let active = true;
+    // Starting a new conversation loads the workbench behind the retained
+    // landing composer. That handoff is expected and should not announce a
+    // global loading banner; navigation to an existing conversation still does.
+    setWorkbenchLoadKind(loadingRunId !== null ? "navigation" : "initial");
     setWorkbenchLoadFailed(false);
     void loadWorkbench().then(module => {
       if (active) setWorkbench(() => module.AppGraphWorkbench);
@@ -2989,9 +2996,12 @@ export default function App() {
       setShowLoadNotice(false);
       return;
     }
-    const timer = setTimeout(() => setShowLoadNotice(true), 150);
+    const timer = setTimeout(() => setShowLoadNotice(true), WORKBENCH_LOAD_NOTICE_DELAY_MS);
     return () => clearTimeout(timer);
   }, [waitingForConversation]);
+
+  const showWorkbenchLoadStatus = workbenchLoadFailed ||
+    (showLoadNotice && workbenchLoadKind === "navigation");
 
   const handleCopyRunPrompt = async (runId: string, provisionalPrompt?: string) => {
     const request = ++copyPromptRequestRef.current;
@@ -3192,7 +3202,7 @@ export default function App() {
           <main className="main">
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
-              {waitingForConversation && (showLoadNotice || workbenchLoadFailed) && modal !== "settings" && (
+              {waitingForConversation && showWorkbenchLoadStatus && modal !== "settings" && (
                 <div className={`workbench-module-status${workbenchLoadFailed ? " is-error" : ""}`}
                   role={workbenchLoadFailed ? "alert" : "status"}>
                   <span>{workbenchLoadFailed
