@@ -383,8 +383,8 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
         required: false, enabled: false },
       disabled: false, onToggle() {},
     }));
-    assert.ok(webSearch.includes(t('开启前请确认你的所有 Provider 中有支持 web_search API 的 Provider；注册由可用模型 Provider 提供的 web_search 工具，当没有 Provider 可搜索时不注册。')),
-      'web search describes its provider-gated tool registration and opt-in prerequisite');
+    assert.ok(webSearch.includes(t('支持已配置的专用搜索 API 和已认证的兼容 Provider；仅在有可用搜索接口时注册 web_search 工具。')),
+      'web search describes its configured API and provider-gated tool registration');
     assert.ok(!webSearch.includes('extensions/index.ts'), 'bundled web search describes its purpose instead of exposing a local path');
   } finally { await vite.close(); }
 });
