@@ -327,12 +327,10 @@ test('workspace cwd restoration works in Bash and Pi fallback POSIX sh', { skip:
   const workspace = join(directory, 'workspace');
   const startupCwd = join(directory, 'startup cwd');
   const startup = join(directory, 'bash-env');
-  const oldpwdStartup = join(directory, 'oldpwd-bash-env');
   try {
     mkdirSync(workspace);
     mkdirSync(startupCwd);
     writeFileSync(startup, `cd '${startupCwd.replaceAll("'", "'\\''")}'\ncd() { return 91; }\nshopt -s expand_aliases\nalias builtin='false'\n`);
-    writeFileSync(oldpwdStartup, `export OLDPWD='${startupCwd.replaceAll("'", "'\\''")}'\n`);
     const command = managedBashCommand('pwd -P', workspace);
     for (const executable of ['/bin/bash', '/bin/sh']) {
       const result = execFileSync(executable, ['-c', command], {
@@ -341,9 +339,9 @@ test('workspace cwd restoration works in Bash and Pi fallback POSIX sh', { skip:
         encoding: 'utf8',
       }).trim();
       assert.equal(realpathSync(result), realpathSync(workspace), executable);
-      const previous = execFileSync(executable, ['-c', managedBashCommand('cd - >/dev/null && pwd -P', workspace)], {
+      const previous = execFileSync(executable, ['-c', managedBashCommand(`export OLDPWD='${startupCwd.replaceAll("'", "'\\''")}'; cd - >/dev/null && pwd -P`, workspace)], {
         cwd: workspace,
-        env: { ...process.env, BASH_ENV: oldpwdStartup },
+        env: { ...process.env, BASH_ENV: '' },
         encoding: 'utf8',
       }).trim();
       assert.equal(realpathSync(previous), realpathSync(startupCwd), `${executable} must preserve cd -`);
