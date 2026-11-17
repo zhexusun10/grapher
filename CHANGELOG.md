@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Workspace removal animations no longer expose a transient sidebar scrollbar while the exiting card closes; the list remains scrollable when it actually contains overflow (`src/components/layout/Sidebar.tsx`, `src/styles.css`, `scripts/workspace-ui.test.mjs`).
 - Source Planner background services now keep running after the Planner worker exits, with Run-owned process boundaries reclaimed on Run/workspace deletion, workspace reset, history clearing and backend shutdown. Output pipes keep draining after the turn ends so services that continue logging do not exit on a broken pipe; the next Planner turn uses a separate worker and graph binding (`backend/src/engine.rs`, `backend/src/engine/lingering.rs`, `backend/src/server.rs`).
 - Rejected Run/workspace deletions now preserve retained services; their Serial shells and Planner service boundaries are retired only after the database deletion commits (`backend/src/server.rs`, `backend/src/service_cache_tests.rs`).
 - Equal-text Node/Serial follow-ups now match their durable request IDs, keeping attachments and responses with the accepted input. Edit pruning follows durable origins and preserves earlier identical messages plus later/unacknowledged requests; text from discarded versions cannot hide new active-branch turns (`src/services/conversationBranch.ts`, `src/components/views/GraphWorkbench.tsx`).

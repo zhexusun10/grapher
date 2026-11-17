@@ -406,7 +406,7 @@ test('manual continuation preserves tool history and uses Pi native missing-resu
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
       const entries = [
-        { type: 'session', version: 3, id, timestamp: now, cwd: savedCwd },
+        { type: 'session', version: 3, grapherFormat: 1, grapherRunId: null, id, timestamp: now, cwd: savedCwd },
         entry('user', null, { role: 'user', content: [{ type: 'text', text: 'ORIGINAL_TASK_ONLY' }], timestamp: 1 }),
         entry('assistant', 'user', { role: 'assistant', content: [call('call_alpha', 'bash'), call('call_beta', 'bash')],
           api: 'openai-completions', provider: 'context-audit', model: 'local', usage, stopReason, timestamp: 2 }),

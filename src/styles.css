@@ -632,6 +632,12 @@ a,
   box-sizing: border-box;
 }
 
+.projects-list.is-removing {
+  /* AnimatePresence keeps the removed card in flow while its box closes. Do
+     not expose a one-frame scrollbar when that temporary box is measured. */
+  overflow-y: hidden;
+}
+
 .project-workspace-item {
   text-align: left;
   display: flex;

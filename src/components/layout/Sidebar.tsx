@@ -184,6 +184,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [projectContextMenu, setProjectContextMenu] = useState<(ContextMenuAnchor & { project: ProjectItem }) | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<(ContextMenuAnchor & { runId: string; provisionalPrompt?: string }) | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
+  const [projectExitActive, setProjectExitActive] = useState(false);
+  const previousProjectKeysRef = React.useRef(new Set(projects.map(project => workspaceKey(project.path))));
+  React.useLayoutEffect(() => {
+    const nextKeys = new Set(projects.map(project => workspaceKey(project.path)));
+    const removed = [...previousProjectKeysRef.current].some(key => !nextKeys.has(key));
+    if (!reduceMotion && removed) setProjectExitActive(true);
+    previousProjectKeysRef.current = nextKeys;
+  }, [projects, reduceMotion]);
   // The caller may remember current cache IDs solely for motion. Cards still
   // render only from the authoritative runs prop after bootstrap.
   const restoredKeysRef = React.useRef<{ projects: Set<string>; runs: Set<string> } | null>(null);
@@ -336,8 +344,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className="projects-list" inert={isCollapsed}>
-        {reduceMotion ? projectCards : <AnimatePresence>{projectCards}</AnimatePresence>}
+      <div className={`projects-list${projectExitActive ? " is-removing" : ""}`} inert={isCollapsed}>
+        {reduceMotion ? projectCards : <AnimatePresence onExitComplete={() => setProjectExitActive(false)}>{projectCards}</AnimatePresence>}
         {projects.length === 0 && (
           <div className="projects-placeholder">
             <span>{t("暂无工作区")}</span>

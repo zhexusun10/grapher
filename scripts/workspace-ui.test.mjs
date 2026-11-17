@@ -395,7 +395,7 @@ test("workspace removal commits backend deletion before pruning indexes and surv
     await server.listen();
     const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
     browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
-    const context = await browser.newContext({ locale: "en-US", reducedMotion: "reduce" });
+    const context = await browser.newContext({ locale: "en-US", reducedMotion: "no-preference" });
     await context.addInitScript(({ repositoryA, repositoryB, config }) => {
       if (localStorage.getItem("deletion-fixture-seeded")) return;
       localStorage.setItem("deletion-fixture-seeded", "true");
@@ -480,8 +480,32 @@ test("workspace removal commits backend deletion before pruning indexes and surv
       assert.deepEqual(Object.keys(saved), ["run-b"]);
     }
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"))), { "c:/projects/beta": ["run-b"] });
+    await page.evaluate(() => {
+      window.workspaceScrollbarFrames = [];
+      window.sampleWorkspaceScrollbar = true;
+      const sample = () => {
+        const list = document.querySelector(".projects-list");
+        if (list) window.workspaceScrollbarFrames.push({
+          scrollable: list.scrollHeight > list.clientHeight,
+          scrollHeight: list.scrollHeight,
+          clientHeight: list.clientHeight,
+          overflowY: getComputedStyle(list).overflowY,
+          removing: list.classList.contains("is-removing"),
+        });
+        if (window.sampleWorkspaceScrollbar) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
     await remove("Beta");
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_projects")).length === 0);
+    await page.waitForTimeout(300);
+    const workspaceScrollbarFrames = await page.evaluate(() => {
+      window.sampleWorkspaceScrollbar = false;
+      return window.workspaceScrollbarFrames;
+    });
+    assert.ok(workspaceScrollbarFrames.length > 0);
+    assert.ok(workspaceScrollbarFrames.every(frame => !frame.scrollable || frame.overflowY === "hidden"),
+      `workspace removal must not flash a scrollbar: ${JSON.stringify(workspaceScrollbarFrames)}`);
     await page.reload({ waitUntil: "networkidle" });
     assert.equal(await page.locator(".project-workspace-item").count(), 0);
     assert.equal(await page.locator(".runs-list [data-run-id]").count(), 0);
