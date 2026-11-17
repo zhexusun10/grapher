@@ -993,6 +993,42 @@ for (const mode of ["serial", "graph", "merger", "node-merger"]) {
   });
 }
 
+test("Planner virtualized Markdown code blocks have no transformed row layer during scrollback", { timeout: 30_000 }, async () => {
+  const content = Array.from({ length: 48 }, (_, index) => assistant(index === 30
+    ? "PLANNER_CODE_ROW_" + index + "\n\n```sh\nprintf 'terminal output\\n'\n```"
+    : `PLANNER_SCROLL_ROW_${index}`)).join("");
+  const bytes = Buffer.from(content);
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command !== "get_planning_output") return route.fulfill({ json: { result: {} } });
+    const start = body.offset ?? 0, end = body.before ?? bytes.length;
+    return route.fulfill({ json: { result: { runId: body.runId, planningId: body.planningId, role: "planner",
+      content: bytes.subarray(start, end).toString(), startOffset: start, nextOffset: end, totalBytes: bytes.length,
+      complete: end === bytes.length, running: false } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => {
+      window.audit.setRunning(false);
+      window.audit.setPlanningIds(["planner-latest"]);
+      window.audit.selectHistory("planner");
+    });
+    const scroller = page.locator("[data-shared-scroll]");
+    await page.waitForFunction(() => document.querySelector("[data-shared-scroll]")?.scrollHeight > 2000);
+    await scroller.evaluate(element => { element.scrollTop = element.scrollHeight * 0.62; });
+    const code = page.locator(".markdown-content pre code");
+    await code.waitFor();
+    const transform = await code.evaluate(element => {
+      const row = element.closest(".chat-message-row");
+      return row ? getComputedStyle(row).transform : null;
+    });
+    assert.equal(transform, "none", "virtualized Markdown rows should not promote nested terminal blocks into transformed layers");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("live Planner history preserves upward wheel progress", { timeout: 60_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   try {

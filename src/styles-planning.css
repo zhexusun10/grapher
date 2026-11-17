@@ -1991,7 +1991,7 @@ button.transcript-error-toggle {
 }
 
 .confirm-delete-target-card {
-  background: var(--bg-surface, #f9f9fa);
+  background: var(--bg-surface);
   border: 1px solid var(--border-default, #e2e8f0);
   border-radius: 8px;
   padding: 10px 14px;
@@ -2059,7 +2059,7 @@ button.transcript-error-toggle {
   justify-content: flex-end;
   gap: 10px;
   border-top: 1px solid var(--border-subtle, #f1f5f9);
-  background: var(--bg-surface, #f9f9fa);
+  background: var(--bg-surface);
 }
 
 .confirm-cancel-btn {

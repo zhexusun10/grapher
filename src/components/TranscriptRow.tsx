@@ -5,7 +5,6 @@ import { ThinkingCard } from "./ThinkingCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
-import { motion } from "motion/react";
 
 export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExpandedChange, editing, draft,
   onDraftChange, onStartEdit, onCancelEdit, onEditUser, steerAttachments }: {
@@ -41,16 +40,17 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
         return accepted === false ? false : true;
       });
     } : () => {}} /></AnimatedUserTurn>;
+  // Keep virtualized Markdown rows out of Motion's transform layer: fenced code
+  // contains its own horizontal scroller, and transformed scrollable descendants
+  // can leave a stale compositor copy at the viewport edge during scrollback.
   if (item.isError || item.status === "error") {
-    return <motion.div className="chat-message-row assistant" initial={false}
-      animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
+    return <div className="chat-message-row assistant">
       <div className="node-error" style={{ margin: "4px 0" }}>{item.content || ""}</div>
-    </motion.div>;
+    </div>;
   }
-  return <motion.div className="chat-message-row assistant" initial={false}
-    animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
+  return <div className="chat-message-row assistant">
     <div className="chat-bubble-assistant chat-message-assistant">
       <StreamingAssistantBubble content={item.content || ""} isStreaming={item.status === "running"} />
     </div>
-  </motion.div>;
+  </div>;
 });
