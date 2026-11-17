@@ -108,16 +108,23 @@ export const suites = {
     description: 'Cross-platform Planner Bash semantics with the real host shell.',
     steps: [sourceTests('planner-bash.test.ts')],
   },
+  'environment:acceptance': {
+    description: 'Native environment fixtures, binary build and real-Pi lifecycle acceptance (without repeating backend unit tests).',
+    steps: [
+      verifyPi,
+      nodeTests('environment-native-fixtures.test.mjs'),
+      ['scripts/environment-build.mjs'],
+      sourceTests('environment-native.test.ts'),
+    ],
+  },
   environment: {
     description: 'Native environment admission/lifecycle; builds Rust, needs Python/Git/Bash/platform boundary.',
     steps: [
-      verifyPi,
-      nodeTests('environment-launch.test.mjs', 'environment-native-fixtures.test.mjs'),
+      nodeTests('environment-launch.test.mjs'),
       cargo('test', '--no-default-features', '--features', 'fixture', '--lib', 'environment', '--', '--test-threads=1'),
       cargo('test', '--no-default-features', '--lib', 'process_control::tests::managed_drain', '--', '--nocapture'),
       cargo('test', '--no-default-features', '--lib', 'native_copy::tests', '--', '--test-threads=1', '--nocapture'),
-      ['scripts/environment-build.mjs'],
-      sourceTests('environment-native.test.ts'),
+      { suite: 'environment:acceptance' },
     ],
   },
   'environment-chain': {

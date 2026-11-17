@@ -12,15 +12,11 @@ use std::{
 mod blob;
 pub(crate) use blob::verify_git_blob;
 
-static HOST_REF_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
-    OnceLock::new();
-static HOST_INDEX_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
-    OnceLock::new();
+type HostRepoLocks = OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>>;
+static HOST_REF_LOCKS: HostRepoLocks = OnceLock::new();
+static HOST_INDEX_LOCKS: HostRepoLocks = OnceLock::new();
 
-fn host_lock(
-    locks: &'static OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>>,
-    repository: &Path,
-) -> Result<Arc<Mutex<()>>, String> {
+fn host_lock(locks: &'static HostRepoLocks, repository: &Path) -> Result<Arc<Mutex<()>>, String> {
     let key = PathBuf::from(crate::path_identity::path_key(repository));
     let mut locks = locks
         .get_or_init(Default::default)
@@ -440,7 +436,8 @@ pub(crate) fn cached_check_workspace_size(root: &Path) -> Result<(), String> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    static CACHE: Mutex<Option<HashMap<PathBuf, (Instant, Result<(), String>)>>> = Mutex::new(None);
+    type WorkspaceSizeCache = Mutex<Option<HashMap<PathBuf, (Instant, Result<(), String>)>>>;
+    static CACHE: WorkspaceSizeCache = Mutex::new(None);
 
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let now = Instant::now();
@@ -2192,7 +2189,7 @@ pub(crate) fn git_file_url(path: &Path) -> Result<String, String> {
         if let Some(unc) = local.strip_prefix(r"\\") {
             return Ok(format!("file://{}", unc.replace('\\', "/")));
         }
-        return Err(format!("Unsupported Windows Git repository path: {value}"));
+        Err(format!("Unsupported Windows Git repository path: {value}"))
     }
     #[cfg(not(windows))]
     Ok(format!("file://{value}"))
@@ -2269,6 +2266,7 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     repository: &Path,
     path: &Path,

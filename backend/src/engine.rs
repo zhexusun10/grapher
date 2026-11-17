@@ -304,10 +304,12 @@ fn claim_warm_node(
     })
 }
 
+type PendingRpcReplies = Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>;
+
 #[derive(Clone)]
 struct NodeRpc {
     sender: mpsc::Sender<String>,
-    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>,
+    pending: PendingRpcReplies,
     instance: String,
     ui: Arc<Mutex<composer::CommandUi>>,
     revision_run_id: Option<String>,
@@ -1611,7 +1613,7 @@ struct SessionChannels {
     receiver: mpsc::Receiver<(bool, String)>,
     input_receiver: mpsc::Receiver<Result<(), std::io::Error>>,
     rpc_sender: Option<mpsc::Sender<String>>,
-    rpc_pending: Option<Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>>,
+    rpc_pending: Option<PendingRpcReplies>,
     rpc_ui: Arc<Mutex<composer::CommandUi>>,
 }
 
@@ -2513,6 +2515,7 @@ fn is_source_native_agent(request: &PiRequest<'_>) -> bool {
 
 /// Serial Agent and source-direct Graph Node Agent each use a source-native
 /// shell. Keep them separate from Pi's shared NodeAgent model/settings role.
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     config: &Config,
     execution: &Execution,

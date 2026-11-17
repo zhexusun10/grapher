@@ -100,7 +100,7 @@ pub(crate) fn path_key(path: &Path) -> String {
             .or_else(|| text.strip_prefix(r"\\?\").map(str::to_owned))
             .unwrap_or(text);
         let text = text.replace('/', "\\");
-        return text.trim_end_matches('\\').to_ascii_lowercase();
+        text.trim_end_matches('\\').to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
@@ -157,10 +157,9 @@ pub(crate) fn lexical_key(path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
     #[cfg(windows)]
     {
-        return text
-            .replace('/', "\\")
+        text.replace('/', "\\")
             .trim_end_matches('\\')
-            .to_ascii_lowercase();
+            .to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {

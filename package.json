@@ -25,6 +25,7 @@
     "test:planner-bash": "node scripts/test.mjs planner-bash",
     "test:macos-browser": "node scripts/test.mjs macos-browser",
     "test:environment": "node scripts/test.mjs environment",
+    "test:environment:acceptance": "node scripts/test.mjs environment:acceptance",
     "test:environment-chain": "node scripts/test.mjs environment-chain",
     "test:hardening": "node scripts/test.mjs hardening",
     "test:windows-native": "node scripts/test.mjs windows-native",

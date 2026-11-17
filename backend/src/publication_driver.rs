@@ -170,7 +170,6 @@ pub(super) fn publish_batch(
     }
     events.push(EventKind::PublicationCompleted { head });
     runtime.emit_outputs(events)?;
-    let batch_workspaces = runtime.batch_workspaces();
     if let Err(error) = runtime.defer_cleanup_worktrees() {
         eprintln!("Cannot retire completed run worktrees: {error}");
     }
@@ -182,42 +181,6 @@ pub(super) fn publish_batch(
         &published_commit,
     );
     reclaim_source_snapshot(service, &repository);
-    if !batch_workspaces {
-        let review = {
-            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            runtime
-                .state
-                .effective_config()
-                .filter(|config| config.post_task_review)
-                .filter(|_| {
-                    runtime.state.plan_type.as_deref() == Some("graph")
-                        && runtime.state.phase == "completed"
-                        && !runtime.state.stop_requested
-                        && runtime
-                            .state
-                            .nodes
-                            .values()
-                            .all(|node| node.status == "completed")
-                })
-        };
-        if let Some(config) = review {
-            if let Err((error, _)) = plan_goal_internal_with_started(
-                POST_TASK_REVIEW_PROMPT.into(),
-                config,
-                Some("graph"),
-                None,
-                Some(run_id.to_string()),
-                service,
-                true,
-                |_| {},
-                |_| {},
-                |_| {},
-                |_| {},
-            ) {
-                eprintln!("Post-task Planner review failed: {error}");
-            }
-        }
-    }
     Ok(())
 }
 

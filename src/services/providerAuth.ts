@@ -173,8 +173,8 @@ export const providerAuth = {
   setCachedCatalog,
   catalog: async (refresh = false): Promise<ProviderCatalog> => {
     if (!refresh && cachedCatalog) {
-      // New backends expose global visibility. Re-read that small file rather
-      // than reloading provider/model runtimes on every picker opening.
+      // Re-read the global visibility list rather than reloading provider/model
+      // runtimes on every picker opening.
       if (cachedCatalog.hiddenModels !== undefined) await refreshModelVisibility();
       if (cachedCatalog) return cachedCatalog;
     }

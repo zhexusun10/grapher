@@ -58,8 +58,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      # Explicit CI prerequisite only; the runtime never installs a project tool.
+      # Explicit CI prerequisite only for weekly/manual baseline probes; the runtime never installs a project tool.
       - uses: astral-sh/setup-uv@v6
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         with:
           version: '0.9.5'
           enable-cache: false
@@ -98,10 +99,16 @@ jobs:
         run: npm run test:hardening
       - name: Verify the same unmodified Planner Bash on every host
         run: npm run test:planner-bash
+      # `test:backend` already runs native::tests and native_runtime_storage::tests
+      # with fixture features; only linux_sandbox::tests is non-fixture-only.
       - name: Verify production native launchers and filesystem boundaries
         if: runner.os != 'Windows'
         timeout-minutes: 6
-        run: npm run test:native
+        run: npm run test:native:scripts
+      - name: Verify Linux sandbox boundary unit tests
+        if: runner.os == 'Linux'
+        timeout-minutes: 4
+        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --lib linux_sandbox::tests
       - name: Verify Windows native launcher scripts
         if: runner.os == 'Windows'
         timeout-minutes: 6
@@ -116,9 +123,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: '"GRAPHER_ENV_TEST_PARENT=C:\g-env-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
-      # Component cost evidence is separate from the real boundary suites above
-      # and below. Missing uv is a gap/failure here, never a synthetic pass.
+      # Component cost evidence only on explicit/weekly runs; no release/publication
+      # dependency and no timing threshold. Correctness stays in the Rust suites,
+      # and missing uv fails the probe rather than falling back to a synthetic pass.
       - name: Measure offline project dependency snapshots (model-free, not sandbox acceptance)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         timeout-minutes: 6
         env:
           GRAPHER_ENV_PROBE_REQUIRE_UV: '1'
@@ -133,7 +142,7 @@ jobs:
           GRAPHER_ENV_SEAL_PROBE_REPORT: ${{ runner.temp }}/dependency-sealing.json
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_dependency_sealing_benchmark -- --ignored --nocapture --test-threads=1
       - name: Retain native-host dependency cost evidence
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@v6
         with:
           name: environment-baseline-${{ matrix.os }}
@@ -173,17 +182,21 @@ jobs:
       # admission, Graph chain discovery, merger/publication) and Linux already
       # runs them for every push on the same commit. macOS keeps them for pull
       # requests, the weekly schedule and manual dispatch, where a host-specific
-      # drift would show up, instead of adding ~11 minutes to every push.
+      # drift would show up, instead of adding ~11 minutes to every push; Windows
+      # skips them because `test:backend` / Windows library + acceptance runs
+      # cover its native surface without hitting the 45-minute job limit.
+      # `test:backend` and `environment-launch.test.mjs` already cover the Rust
+      # and launch-binding units, so CI invokes `test:environment:acceptance`.
       - name: Verify managed E/L with real native Python, editable package and lifecycle
-        if: runner.os == 'Linux' || github.event_name != 'push'
-        timeout-minutes: 25
-        run: npm run test:environment
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && github.event_name != 'push')
+        timeout-minutes: 10
+        run: npm run test:environment:acceptance
       - name: Verify default environment discovery across a Graph chain (local model)
-        if: runner.os == 'Linux' || github.event_name != 'push'
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && github.event_name != 'push')
         timeout-minutes: 10
         run: npm run test:environment-chain
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
-        if: runner.os == 'Linux' || github.event_name != 'push'
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && github.event_name != 'push')
         timeout-minutes: 10
         run: npm run test:merger
       # The Windows library suite is the same host-neutral Rust suite Linux and

@@ -315,7 +315,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "read_graph", label: "Read graph",
     promptSnippet: "Read the current planning candidate",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: "Read the current graph as JSON.",
+    description: "Read the graph you have planned as JSON containing nodes and edges.",
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_id, _parameters, signal) {
       return withFileMutationQueue(graphPath, async () => {

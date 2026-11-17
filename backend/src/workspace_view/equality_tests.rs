@@ -265,15 +265,13 @@ fn current_view_identity_tracks_acl_changes_and_security_named_paths() {
 
 #[test]
 fn nested_comparisons_follow_the_records_checksum_version() {
-    for schema in [super::super::VIEW_SCHEMA] {
-        let mut original = fixture(true);
-        original.schema = schema;
-        let mut changed = serde_json::to_value(&original).unwrap();
-        changed["repositories"]["child"]["root_extra"]["security"] = json!([9, 8, 7]);
-        let other: View = serde_json::from_value(changed).unwrap();
-        check(&original, &other);
-        assert_ne!(original, other);
-    }
+    let mut original = fixture(true);
+    original.schema = super::super::VIEW_SCHEMA;
+    let mut changed = serde_json::to_value(&original).unwrap();
+    changed["repositories"]["child"]["root_extra"]["security"] = json!([9, 8, 7]);
+    let other: View = serde_json::from_value(changed).unwrap();
+    check(&original, &other);
+    assert_ne!(original, other);
 }
 
 #[test]
@@ -379,7 +377,7 @@ fn normalization_matches_legacy_for_generated_nested_views_without_mutating_evid
     fn entries(seed: &mut u64) -> BTreeMap<String, Entry> {
         let mut entries = BTreeMap::new();
         for path in NAMES {
-            if next(seed) % 3 == 0 {
+            if next(seed).is_multiple_of(3) {
                 continue;
             }
             let extra = extra(seed);
@@ -420,7 +418,7 @@ fn normalization_matches_legacy_for_generated_nested_views_without_mutating_evid
         view.root_mode = next(seed) as u32;
         view.root_extra = extra(seed);
         view.entries = entries(seed);
-        view.git_entries = (next(seed) % 3 != 0).then(|| entries(seed));
+        view.git_entries = (!next(seed).is_multiple_of(3)).then(|| entries(seed));
         view.git_file = next(seed) & 1 != 0;
         view.git_link = next(seed) & 1 != 0;
         view.git_file_metadata = (next(seed) & 1 != 0).then(|| (next(seed) as u32, extra(seed)));

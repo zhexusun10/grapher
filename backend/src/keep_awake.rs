@@ -37,11 +37,10 @@ pub fn enabled(value: Option<&str>) -> bool {
 
 /// Start the guard. Failure is non-fatal: Grapher still runs.
 pub fn install() {
-    if !enabled(std::env::var(KEEP_AWAKE_ENV).ok().as_deref()) {
-        return;
+    if enabled(std::env::var(KEEP_AWAKE_ENV).ok().as_deref()) {
+        #[cfg(target_os = "macos")]
+        install_macos();
     }
-    #[cfg(target_os = "macos")]
-    install_macos();
 }
 
 #[cfg(target_os = "macos")]

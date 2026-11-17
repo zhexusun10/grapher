@@ -517,8 +517,10 @@ mod tests {
     fn file_change_metadata_exposes_counts_for_the_browser() {
         use crate::model::{Event, EventKind};
 
-        let mut state = Snapshot::default();
-        state.run_id = "changes-run".into();
+        let mut state = Snapshot {
+            run_id: "changes-run".into(),
+            ..Snapshot::default()
+        };
         state.events.push(Event {
             sequence: 1,
             timestamp: 1,
@@ -645,8 +647,10 @@ mod tests {
 
     #[test]
     fn metadata_events_drop_durable_payloads_but_keep_conversation_fields() {
-        let mut state = Snapshot::default();
-        state.run_id = "trim-run".into();
+        let mut state = Snapshot {
+            run_id: "trim-run".into(),
+            ..Snapshot::default()
+        };
         state.events.push(Event {
             sequence: 1,
             timestamp: 1,

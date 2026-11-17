@@ -97,7 +97,7 @@ fn rooted_sealing_noop_keeps_store_constant_but_records_patch_mode_and_coverage_
         .capture_roots_reusing(&paths, &layouts, &base)
         .unwrap();
     assert_ne!(patched, base);
-    assert_eq!(files.load(&patched).unwrap().parents, [base.clone()]);
+    assert_eq!(files.load(&patched).unwrap().parents, std::slice::from_ref(&base));
     files.verify_roots(&paths, &patched).unwrap();
     let before_scope = stored_files(&files);
     layouts
@@ -267,7 +267,10 @@ fn rooted_sealing_concurrent_writers_keep_independent_views_and_append_only_pare
     });
     assert_ne!(refs[0], refs[1]);
     for ((_, branch), reference) in branches.iter().zip(&refs) {
-        assert_eq!(files.load(reference).unwrap().parents, [base.clone()]);
+        assert_eq!(
+            files.load(reference).unwrap().parents,
+            std::slice::from_ref(&base)
+        );
         files.verify_roots(branch, reference).unwrap();
         assert_eq!(
             files

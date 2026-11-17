@@ -329,6 +329,7 @@ pub fn resolve_with_merger(
 }
 
 /// Resolve an in-progress Git merge in either the publication checkout or a DAG node checkout.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_with_merger_for_node(
     repository: &Path,
     query: &str,

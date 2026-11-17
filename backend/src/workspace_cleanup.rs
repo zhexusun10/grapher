@@ -182,6 +182,7 @@ fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()>
                     )
                 })?;
             let mut permissions = directory.metadata()?.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             directory
                 .set_permissions(permissions)
@@ -207,7 +208,7 @@ fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false
@@ -231,14 +232,22 @@ fn remove_link(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
     fs::remove_file(path)
 }
 
-/// A read-only attribute blocks `remove_file` on Windows.
-fn clear_readonly(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
-    #[cfg(windows)]
+/// Clear the Windows read-only file attribute so unlinking or replacement succeeds.
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
+pub(crate) fn clear_readonly_attribute(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
     if metadata.permissions().readonly() {
         let mut permissions = metadata.permissions();
         permissions.set_readonly(false);
         fs::set_permissions(path, permissions)?;
     }
+    Ok(())
+}
+
+/// A read-only attribute blocks `remove_file` on Windows.
+fn clear_readonly(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    clear_readonly_attribute(path, metadata)?;
     let _ = (path, metadata);
     Ok(())
 }

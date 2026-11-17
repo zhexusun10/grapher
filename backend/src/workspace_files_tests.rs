@@ -116,7 +116,7 @@ fn legacy_sealing_reuses_only_fully_verified_unchanged_bytes() {
     fs::write(workspace.join(".venv/package"), "explicit dependency edit").unwrap();
     let changed = files.capture_reusing(&workspace, &base).unwrap();
     assert_ne!(changed, base);
-    assert_eq!(files.load(&changed).unwrap().parents, [base.clone()]);
+    assert_eq!(files.load(&changed).unwrap().parents, std::slice::from_ref(&base));
     files.verify(&workspace, &changed, "").unwrap();
     let Entry::File { blob, .. } = &files.load(&base).unwrap().entries[".venv/package"] else {
         panic!()

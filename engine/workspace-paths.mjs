@@ -41,9 +41,11 @@ function gitCygpath() {
   const known = candidates.find(candidate => existsSync(candidate));
   if (known) return known;
   try {
-    const execPath = execFileSync(trustedGit(), ['--exec-path'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
+    const execPath = execFileSync(trustedGit(), ['--exec-path'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim();
     candidates.push(resolve(execPath, '../../../usr/bin/cygpath.exe'));
-  } catch {
+  } catch (error) {
+    // Do not permanently poison the converter cache on transient load timeouts.
+    if (error?.code === 'ETIMEDOUT') return undefined;
     // Fall through to the drive-letter spelling; no replacement shell starts.
   }
   return candidates.find(candidate => existsSync(candidate)) ?? null;
@@ -60,12 +62,11 @@ function prefetchMsysPaths(values) {
   const pending = [...new Set(values)].filter(value =>
     !msysPaths.has(value) && !value.includes(';'));
   if (!pending.length) return;
-  for (const value of pending) msysPaths.set(value, driveFallback(value));
   if (cygpath === undefined) cygpath = gitCygpath();
   if (!cygpath) return;
   try {
     const output = execFileSync(cygpath, ['-u', '-p', pending.join(';')],
-      { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim();
     const converted = output.split(':');
     if (converted.length === pending.length) {
       pending.forEach((value, index) => msysPaths.set(value, converted[index]));
@@ -74,7 +75,7 @@ function prefetchMsysPaths(values) {
       for (const value of pending) msysPaths.delete(value);
     }
   } catch {
-    // Keep the drive-letter fallback; no replacement shell is started.
+    // Leave entries uncached so msysPath can convert or retry per value.
   }
 }
 
@@ -85,8 +86,12 @@ function msysPath(value) {
   if (cygpath === undefined) cygpath = gitCygpath();
   let result = driveFallback(value);
   if (cygpath) {
-    try { result = execFileSync(cygpath, ['-u', value], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim(); }
-    catch { /* Keep the ordinary drive spelling when Git has no converter. */ }
+    try {
+      result = execFileSync(cygpath, ['-u', value], { encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim();
+    } catch (error) {
+      if (error?.code === 'ETIMEDOUT') return result;
+      /* Keep the ordinary drive spelling when Git has no converter. */
+    }
   }
   msysPaths.set(value, result);
   return result;

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Cleaned up outdated legacy-format and backend-fallback comments across frontend types, services, hooks and components, removed the unused `initialWidth` property from `useWorkbenchResizer`, and replaced the hardcoded 5-retry feedback notice in the Graph approval modal with the configured `maxFeedback` limit and active feedback state (`src/components/modals/ApprovalModal.tsx`, `src/i18n/en.ts`, `src/hooks/useWorkbenchResizer.ts`, `src/types.ts`).
+- Aligned browser UI test fixtures and mocks with current wire contracts: added required `provider_auth` model metadata fields, added `startOffset` to mocked execution-output pages, removed retired `"done"` node-status expectations, kept settled `LatestScrollFixture` transcripts polling after appended test events, and tightened CoT wheel-scroll setup timing (`scripts/composer-commands-ui.test.mjs`, `scripts/frontend-performance-ui.test.mjs`, `scripts/fixtures/frontend-audit.tsx`, `scripts/frontend-audit.test.mjs`).
+- Removed unreachable post-task review code in `publish_batch` for non-batch Graph runs, aligned unsupported saved-result resource errors with the current format message, and deleted outdated legacy-format and cleanup comments across backend modules (`backend/src/publication_driver.rs`, `backend/src/runtime.rs`, `backend/src/cleanup.rs`, `backend/src/cleanup/detached.rs`).
+- Resolved all remaining `cargo clippy --all-targets -- -D warnings` lints across default, `--features fixture`, and `--features acceptance` builds: shared Windows read-only clearing via `workspace_cleanup::clear_readonly_attribute`, boxed oversized `DriverCompletion::Node` and `PlanningSummary` error payloads, introduced local type aliases and `StreamPlanRequest`, simplified control flow and literal escapes, and added `#[allow(clippy::too_many_arguments)]` on retained multi-parameter APIs (`backend/src/`, `backend/tests/store_optimization.rs`).
+
+### Fixed
+
+- Moved synchronous repository-status, required-model and cached-provider preflight validation in `startPlanGoal` ahead of provisional-run and composer state mutations so rejected landing submissions and follow-ups retain drafts and conversation state without flashing into the workbench, and removed the duplicate `dataPath` write in `load()` (`src/App.tsx`, `scripts/bootstrap-settings-ui.test.mjs`).
+- Assigned the slash-command popover refresh button its own `.suggestions-header-refresh-btn` class instead of reusing `.suggestions-header-close-btn`, preventing DOM and test-selector collisions with the close button while preserving shared header button styling (`src/components/ui/chatgpt-prompt-input.tsx`, `src/styles-workbench.css`).
+- Propagated busy state to `SettingsModal` in the same batch when `ProviderSettings` initiates a catalog refresh, login, credential submission or logout so the Save control disables immediately alongside the refresh spinner (`src/components/ProviderSettings.tsx`).
+- Promoted Git Bash's own `bin` and `usr/bin` directories ahead of Windows OS/Store directories (`System32`, `Sysnative`, `SysWOW64`, `WindowsApps`) when exporting `PATH` inside Git Bash while leaving earlier host/environment entries, `entryFirst` index `0`, and Win32 process `PATH` order untouched, preventing `#!/usr/bin/env bash` scripts such as Windows `npm` from resolving to WSL `bash.exe` (`engine/launch-binding.mjs`, `scripts/environment-launch.test.mjs`).
+- Raised Windows `cygpath` / `git --exec-path` timeouts to 15 seconds, stopped pre-populating drive-letter fallbacks ahead of `cygpath` conversion, and avoided caching `null` or drive-letter fallbacks on `ETIMEDOUT` so `/tmp/...` MSYS mount conversions recover across transient load (`engine/workspace-paths.mjs`).
+- Shared `Runtime::is_run_active` across `Runtime::clear_history` and `Runtime::delete_runs` so history clearing also rejects persisted Runs in `launching_result` or with running mergers or result executions (`backend/src/runtime.rs`, `backend/src/runtime_tests.rs`).
+
 ## [1.9.9] - 2026-11-17
 
 **Release highlights:** Planner now has a unified `edit_graph`/`read_graph` workflow with atomic node-and-edge edits, final-graph validation, structured diagnostics, safe overflow reports and revision-impact warnings. The bundled Planner tools and prompts were refined to produce more complete, dependency-aware workstreams and clearer workspace handoffs—better than ever for complex coding tasks.

@@ -25,7 +25,7 @@ interface ExecutionMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
-  /** Last measured context and its high-water mark (legacy snapshots may omit output). */
+  /** Last measured context and its high-water mark. */
   contextTokens?: number;
   contextPeak?: number;
   /** Pi's projected context, including trailing messages and the actual model window. */
@@ -106,7 +106,7 @@ export interface TokenUsage {
   cacheWrite: number;
   reasoning: number;
   totalTokens: number;
-  /** Uncached input + cache writes + output; absent on legacy snapshots. */
+  /** Uncached input + cache writes + output. */
   consumedTokens?: number;
 }
 
@@ -218,13 +218,12 @@ export interface ConversationSummary {
   repository: string;
   title: string;
   planType?: string | null;
-  /** Older summary-capable backends may not supply status yet. */
   phase?: string;
   hasActiveExecutions?: boolean;
 }
 
 export interface Bootstrap {
-  /** Omitted by older backends, settings saves, or when the index is unavailable. */
+  /** Omitted on settings saves or when the index is unavailable. */
   conversations?: ConversationSummary[];
   unavailableConversationIds?: string[];
   snapshot: Snapshot;
@@ -332,7 +331,7 @@ export interface ChatMessage {
   /** A durable turn that has not yet been claimed by an execution. */
   pendingExecution?: boolean;
   delivery?: "node_messaged" | "steered";
-  /** Stable transport identity for Node/Merger steers (legacy turns omit it). */
+  /** Stable transport identity for Node/Merger steers. */
   steerRequestId?: string;
   steerOrdinal?: number;
   /** Display identity across attachment and text steers with the same text. */

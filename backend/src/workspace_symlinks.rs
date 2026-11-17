@@ -164,11 +164,8 @@ pub(crate) fn remove(path: &Path) -> Result<(), String> {
         ));
     }
     #[cfg(windows)]
-    if metadata.permissions().readonly() {
-        let mut p = metadata.permissions();
-        p.set_readonly(false);
-        fs::set_permissions(path, p).map_err(|e| e.to_string())?;
-    }
+    crate::workspace_cleanup::clear_readonly_attribute(path, &metadata)
+        .map_err(|e| e.to_string())?;
     fs::remove_file(path).map_err(|e| e.to_string())
 }
 pub(crate) fn materialize(root: &Path, path: &Path, link: &Link) -> Result<(), String> {

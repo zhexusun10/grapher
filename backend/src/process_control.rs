@@ -39,7 +39,8 @@ unsafe impl Sync for ProcessTreeInner {}
 #[derive(Clone)]
 pub struct ProcessTree(Arc<ProcessTreeInner>);
 
-static PROCESSES: OnceLock<Mutex<Vec<(String, Weak<ProcessTreeInner>)>>> = OnceLock::new();
+type ProcessRegistry = OnceLock<Mutex<Vec<(String, Weak<ProcessTreeInner>)>>>;
+static PROCESSES: ProcessRegistry = OnceLock::new();
 thread_local! {
     static OWNER: RefCell<String> = const { RefCell::new(String::new()) };
     static LIMITS: RefCell<NativeLimits> = const { RefCell::new(NativeLimits { memory_bytes: None, cpu_rate: None }) };
@@ -159,7 +160,8 @@ pub(crate) fn check_current_owner_stop() -> Result<(), String> {
 // Multi-turn operations remain cancellable while no child process exists.
 // Weak, scoped entries retire with the operation, so a later explicit retry
 // under the same Run owner does not inherit its predecessor's cancellation.
-static OPERATIONS: OnceLock<Mutex<Vec<(String, Weak<AtomicBool>)>>> = OnceLock::new();
+type OperationRegistry = OnceLock<Mutex<Vec<(String, Weak<AtomicBool>)>>>;
+static OPERATIONS: OperationRegistry = OnceLock::new();
 fn operations() -> &'static Mutex<Vec<(String, Weak<AtomicBool>)>> {
     OPERATIONS.get_or_init(Default::default)
 }

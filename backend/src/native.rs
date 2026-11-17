@@ -74,11 +74,11 @@ pub fn require_graph_execution() -> Result<(), String> {
     {
         // Windows deliberately uses the caller's ordinary host permissions.
         // Independent Git repositories isolate snapshots, not filesystem access.
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
-        return crate::linux_sandbox::require_supported();
+        crate::linux_sandbox::require_supported()
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
@@ -714,7 +714,7 @@ pub(crate) fn execution_command_scoped(
         let mut command = unsandboxed_command(&engine, &current)?;
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
-        return Ok(command);
+        Ok(command)
     }
     #[cfg(target_os = "linux")]
     {

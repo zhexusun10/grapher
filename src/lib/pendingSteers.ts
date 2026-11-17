@@ -36,7 +36,7 @@ export function projectWithdrawnSteers(source: Snapshot, messages: readonly Chat
     const identity = message.steerRequestId ? `${message.executionId}\u0000${message.steerRequestId}` : undefined;
     if (identity ? removedIds.has(identity) : message.id.startsWith("event-") && removed.has(Number(message.id.slice(6)))) return [];
     // Text/ordinal counts remain display positions, never withdrawal identity.
-    // An unacknowledged or legacy local card is retained rather than guessed.
+    // An unacknowledged local card is retained rather than guessed.
     const recorded = identity ? byId.get(identity) : undefined;
     const ordinal = recorded?.ordinal ?? message.inlineSteerOrdinal!;
     const textOrdinal = recorded?.textOrdinal ?? message.steerOrdinal;

@@ -173,7 +173,6 @@ export function useWorkbenchResizer({ onCollapse, collapsed = false }: { onColla
     workbenchRef,
     isResizing,
     splitRatio,
-    initialWidth: Math.round(splitRatio * 1200),
     handleStartResize,
     handleResizeKeyDown,
     handleResetResizer,

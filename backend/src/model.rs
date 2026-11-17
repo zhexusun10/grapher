@@ -503,6 +503,7 @@ pub struct SessionContext {
 
 /// Newer turns describe the session's current context; older ones only raise
 /// the peak. `stamp` orders turns so a resumed session keeps the latest value.
+#[allow(clippy::too_many_arguments)]
 fn record_session_context(
     contexts: &mut BTreeMap<String, SessionContext>,
     stamps: &mut BTreeMap<String, u64>,
@@ -4041,13 +4042,15 @@ mod metrics_tests {
 
     #[test]
     fn session_usage_accumulates_across_a_resumed_session() {
-        let mut state = Snapshot::default();
         // A follow-up resumes the same Pi session; an edit forks a new one.
-        state.executions = vec![
-            session_execution("first", "session-a", 100, 10, (900, 900)),
-            session_execution("follow-up", "session-a", 200, 20, (2_500, 2_500)),
-            session_execution("forked", "session-b", 300, 30, (700, 700)),
-        ];
+        let mut state = Snapshot {
+            executions: vec![
+                session_execution("first", "session-a", 100, 10, (900, 900)),
+                session_execution("follow-up", "session-a", 200, 20, (2_500, 2_500)),
+                session_execution("forked", "session-b", 300, 30, (700, 700)),
+            ],
+            ..Snapshot::default()
+        };
         for (id, input, stamp) in [("initial", 40, 1_000), ("review", 60, 2_000)] {
             state.planning_turns.insert(
                 id.into(),

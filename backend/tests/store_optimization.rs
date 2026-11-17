@@ -1116,15 +1116,16 @@ fn terminal_cache_settlement_matches_single_and_batch_event_commits() {
             let db = Connection::open(&path).unwrap();
             db.execute_batch("CREATE TRIGGER reject_terminal BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected terminal failure'); END;").unwrap();
             let before = state.events.len();
-            let mut append = |kind| {
-                if batched {
-                    store.append_batch(&mut state, vec![EventKind::Paused { paused: true }, kind])
-                } else {
-                    store.append(&mut state, kind)
-                }
-            };
-            assert!(append(kind.clone()).is_err());
-            drop(append);
+            {
+                let mut append = |kind| {
+                    if batched {
+                        store.append_batch(&mut state, vec![EventKind::Paused { paused: true }, kind])
+                    } else {
+                        store.append(&mut state, kind)
+                    }
+                };
+                assert!(append(kind.clone()).is_err());
+            }
             assert_eq!(state.events.len(), before);
             assert!(!state.paused);
             let pending = grapher::file_changes::get_cached_execution_changes(&run, &exec).unwrap();

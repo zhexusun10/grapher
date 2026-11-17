@@ -1642,56 +1642,66 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
 
 #[test]
 fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
-    let mut snapshot = Snapshot::default();
-    snapshot.run_id = "test-run".into();
-    snapshot.approved = true;
-    snapshot.plan_type = Some("graph".into());
-    snapshot.graph = Graph {
-        original_goal: "test goal".into(),
-        nodes: vec![
-            Node {
-                id: "completed_task".into(),
-                task: "finished task".into(),
-            },
-            Node {
-                id: "paused_task".into(),
-                task: "manually stopped task".into(),
-            },
-            Node {
-                id: "app_interrupted_task".into(),
-                task: "interrupted task".into(),
-            },
-            Node {
-                id: "failed_task".into(),
-                task: "broken task".into(),
-            },
-            Node {
-                id: "waiting_task".into(),
-                task: "pending task".into(),
-            },
-        ],
-        edges: vec![],
+    let mut snapshot = Snapshot {
+        run_id: "test-run".into(),
+        approved: true,
+        plan_type: Some("graph".into()),
+        graph: Graph {
+            original_goal: "test goal".into(),
+            nodes: vec![
+                Node {
+                    id: "completed_task".into(),
+                    task: "finished task".into(),
+                },
+                Node {
+                    id: "paused_task".into(),
+                    task: "manually stopped task".into(),
+                },
+                Node {
+                    id: "app_interrupted_task".into(),
+                    task: "interrupted task".into(),
+                },
+                Node {
+                    id: "failed_task".into(),
+                    task: "broken task".into(),
+                },
+                Node {
+                    id: "waiting_task".into(),
+                    task: "pending task".into(),
+                },
+            ],
+            edges: vec![],
+        },
+        ..Snapshot::default()
     };
 
-    let mut completed_node = NodeState::default();
-    completed_node.status = "completed".into();
+    let completed_node = NodeState {
+        status: "completed".into(),
+        ..NodeState::default()
+    };
 
-    let mut paused_node = NodeState::default();
-    paused_node.status = "failed".into();
-    paused_node.error = Some("用户已停止本次执行；可以修改消息或重新运行。".into());
+    let paused_node = NodeState {
+        status: "failed".into(),
+        error: Some("用户已停止本次执行；可以修改消息或重新运行。".into()),
+        ..NodeState::default()
+    };
 
-    let mut interrupted_node = NodeState::default();
-    interrupted_node.status = "failed".into();
-    interrupted_node.error =
-        Some("Application stopped during this execution. Inspect and rerun.".into());
+    let interrupted_node = NodeState {
+        status: "failed".into(),
+        error: Some("Application stopped during this execution. Inspect and rerun.".into()),
+        ..NodeState::default()
+    };
 
-    let mut failed_node = NodeState::default();
-    failed_node.status = "failed".into();
-    failed_node.error =
-        Some("TypeError: unsupported operand type(s)\nadditional traceback details".into());
+    let failed_node = NodeState {
+        status: "failed".into(),
+        error: Some("TypeError: unsupported operand type(s)\nadditional traceback details".into()),
+        ..NodeState::default()
+    };
 
-    let mut waiting_node = NodeState::default();
-    waiting_node.status = "waiting".into();
+    let waiting_node = NodeState {
+        status: "waiting".into(),
+        ..NodeState::default()
+    };
 
     snapshot
         .nodes
@@ -1748,28 +1758,32 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
 
 #[test]
 fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
-    let mut snapshot = Snapshot::default();
-    snapshot.run_id = "test-run".into();
-    snapshot.approved = true;
-    snapshot.plan_type = Some("graph".into());
-    snapshot.phase = "completed".into();
-    snapshot.graph = Graph {
-        original_goal: "test goal".into(),
-        nodes: vec![
-            Node {
-                id: "first".into(),
-                task: "first".into(),
-            },
-            Node {
-                id: "second".into(),
-                task: "second".into(),
-            },
-        ],
-        edges: vec![],
+    let mut snapshot = Snapshot {
+        run_id: "test-run".into(),
+        approved: true,
+        plan_type: Some("graph".into()),
+        phase: "completed".into(),
+        graph: Graph {
+            original_goal: "test goal".into(),
+            nodes: vec![
+                Node {
+                    id: "first".into(),
+                    task: "first".into(),
+                },
+                Node {
+                    id: "second".into(),
+                    task: "second".into(),
+                },
+            ],
+            edges: vec![],
+        },
+        ..Snapshot::default()
     };
     for name in ["first", "second"] {
-        let mut node = NodeState::default();
-        node.status = "completed".into();
+        let node = NodeState {
+            status: "completed".into(),
+            ..NodeState::default()
+        };
         snapshot.nodes.insert(name.into(), node);
     }
     assert_eq!(
@@ -1817,21 +1831,25 @@ fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
 
 #[test]
 fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
-    let mut snapshot = Snapshot::default();
-    snapshot.approved = true;
-    snapshot.phase = "running".into();
-    snapshot.graph = Graph {
-        original_goal: "test goal".into(),
-        nodes: vec![Node {
-            id: "stopped_worker".into(),
-            task: "do work".into(),
-        }],
-        edges: vec![],
+    let mut snapshot = Snapshot {
+        approved: true,
+        phase: "running".into(),
+        graph: Graph {
+            original_goal: "test goal".into(),
+            nodes: vec![Node {
+                id: "stopped_worker".into(),
+                task: "do work".into(),
+            }],
+            edges: vec![],
+        },
+        ..Snapshot::default()
     };
 
-    let mut node_state = NodeState::default();
-    node_state.status = "failed".into();
-    node_state.error = Some("用户已停止本次执行；可以修改消息或重新运行。".into());
+    let node_state = NodeState {
+        status: "failed".into(),
+        error: Some("用户已停止本次执行；可以修改消息或重新运行。".into()),
+        ..NodeState::default()
+    };
     snapshot.nodes.insert("stopped_worker".into(), node_state);
 
     snapshot.executions.push(Execution {

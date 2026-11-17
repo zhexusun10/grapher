@@ -612,19 +612,16 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
         .map_err(|e| e.to_string())?;
     Ok(Some((common, current, metadata.is_file(), link)))
 }
-fn inspect_git(
-    project: &Path,
-) -> Result<
-    (
-        Option<BTreeMap<String, Entry>>,
-        bool,
-        bool,
-        Vec<(String, String)>,
-        BTreeMap<String, (String, bool)>,
-        Vec<u8>,
-    ),
-    String,
-> {
+type InspectedGit = (
+    Option<BTreeMap<String, Entry>>,
+    bool,
+    bool,
+    Vec<(String, String)>,
+    BTreeMap<String, (String, bool)>,
+    Vec<u8>,
+);
+
+fn inspect_git(project: &Path) -> Result<InspectedGit, String> {
     let Some((common, current, git_file, git_link)) = git_roots(project)? else {
         return Ok((None, false, false, vec![], BTreeMap::new(), vec![]));
     };

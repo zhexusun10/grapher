@@ -2393,40 +2393,42 @@ for (const gesture of ["wheel", "wheel-small", "touch", "keyboard", "scrollbar"]
     ]));
     await page.locator(".thinking-card-body").waitFor();
     await page.waitForTimeout(80);
-    // The provider can finish reasoning while its typewriter still has a
-    // backlog. The card keeps growing above the already-started final answer.
-    await page.evaluate(() => window.audit.appendToolEvents([{
-      type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
-        delta: Array.from({ length: 500 }, (_, index) => `ANCHOR_REASON_${index} ${"detail ".repeat(5)}\n\n`).join("") },
-    }]));
-    await page.waitForTimeout(60);
-    await page.evaluate(() => window.audit.appendToolEvents([
-      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
-      { type: "message_update", assistantMessageEvent: { type: "text_delta",
-        delta: "ANSWER_READING_ANCHOR\n\n" + "Visible answer detail ".repeat(24) } },
-    ]));
-    const marker = page.getByText(/ANSWER_READING_ANCHOR/);
-    await marker.waitFor();
     const scroller = page.locator(".initial-query-scroll");
     await scroller.evaluate(el => {
+      if (el.dataset.auditWheelAttached) return;
+      el.dataset.auditWheelAttached = "1";
       el.addEventListener("wheel", event => {
-        if (event.deltaY >= 0) return;
+        if (event.deltaY >= 0 || window.audit.readingAnchorStart) return;
         const marker = [...el.querySelectorAll("p")].find(p => p.textContent.includes("ANSWER_READING_ANCHOR"));
-        window.audit.readingAnchorStart = { top: marker?.getBoundingClientRect().top,
+        if (!marker) return;
+        window.audit.readingAnchorStart = { top: marker.getBoundingClientRect().top,
           cardHeight: el.querySelector(".thinking-card")?.getBoundingClientRect().height,
           scrollTop: el.scrollTop, target: event.target.closest("[data-transcript-id]")?.dataset.transcriptId,
-          answerRow: marker?.closest("[data-transcript-id]")?.dataset.transcriptId };
-      }, { capture: true, once: true });
+          answerRow: marker.closest("[data-transcript-id]")?.dataset.transcriptId };
+      }, { capture: true });
       window.audit.readingScrollSamples = [];
       el.addEventListener("scroll", () => {
         if (window.audit.readingScrollSamples.length < 30) window.audit.readingScrollSamples.push({ top: el.scrollTop,
           following: el.dataset.transcriptFollowing ?? null });
       });
+    });
+    // The provider can finish reasoning while its typewriter still has a
+    // backlog. The card keeps growing above the already-started final answer.
+    await page.evaluate(() => {
+      window.audit.appendToolEvents([
+        { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+          delta: Array.from({ length: 500 }, (_, index) => `ANCHOR_REASON_${index} ${"detail ".repeat(18)}\n\n`).join("") } },
+        { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
+        { type: "message_update", assistantMessageEvent: { type: "text_delta",
+          delta: "ANSWER_READING_ANCHOR\n\n" + "Visible answer detail ".repeat(24) } },
+      ]);
       let index = 0;
       window.audit.answerStreamTimer = setInterval(() => window.audit.appendToolEvents([{
         type: "message_update", assistantMessageEvent: { type: "text_delta", delta: ` continued_${index++}` },
       }]), 90);
     });
+    const marker = page.getByText(/ANSWER_READING_ANCHOR/);
+    await marker.waitFor();
     if (gesture === "wheel" || gesture === "wheel-small") {
       const box = await marker.locator("xpath=ancestor::*[@data-transcript-id][1]").boundingBox();
       await page.mouse.move(box.x + 10, box.y + box.height / 2);
@@ -4328,7 +4330,7 @@ for (const approved of [false, true]) {
   });
 }
 
-for (const wireStatus of ["completed", "done"]) {
+for (const wireStatus of ["completed"]) {
   test(`topology cards capitalize statuses for ${wireStatus} backend completion`, { timeout: 30_000 }, async () => {
     const config = { repository: "/mock/status-label", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
     const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},

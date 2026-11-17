@@ -182,9 +182,9 @@ mod tests {
             ":100644 100644 a b M\0file\0",
             ":100644 100644 a b R100\0old\0",
             "1\t0\tmissing-raw-record\0",
-            ":100644 100644 a b M\0file\01\t0\tother\0",
+            ":100644 100644 a b M\0file\x001\t0\tother\0",
             ":100644 100644 a b M\0file\0invalid\t0\tfile\0",
-            ":100644 100644 a b R100\0old\0new\01\t0\t\0wrong-old\0new\0",
+            ":100644 100644 a b R100\0old\0new\x001\t0\t\0wrong-old\0new\0",
         ] {
             assert!(parse(invalid, "", "").is_none(), "{invalid:?}");
         }

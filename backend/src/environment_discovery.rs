@@ -1120,7 +1120,7 @@ fn verify(
     root_paths: &[(&str, &Path)],
     runtime_schema: Option<u32>,
 ) -> Result<Binding, String> {
-    if !matches!(runtime_schema, Some(1 | 2 | 3)) {
+    if !matches!(runtime_schema, Some(1..=3)) {
         return Err("Unsupported native runtime evidence schema".into());
     }
     let path = root.join(prefix);

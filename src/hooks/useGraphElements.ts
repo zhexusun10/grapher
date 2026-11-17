@@ -170,7 +170,7 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
   return batches.length > 0 ? batches : [nodeNames];
 }
 
-/** A saved Run owns its display capability; legacy active routes always win. */
+/** A saved Run owns its display capability; existing feedback edges remain visible. */
 export function graphFeedbackEnabled(state: Pick<Snapshot, "graph" | "config">, draftEnabled = false): boolean {
   return state.graph.edges.some(edge => edge.feedback)
     || (state.config ? (state.config.feedbackEnabled ?? false) : draftEnabled);

@@ -285,7 +285,7 @@ function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
   const pagedLive = layout === "live-paged";
   const live = layout === "live-tool" || layout === "live-empty" || pagedLive;
-  const streaming = live || layout === "long" || layout === "virtualized";
+  const initialStreaming = live || layout === "long" || layout === "virtualized";
   const nodeView = (live || layout === "thinking-card") && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
@@ -302,8 +302,10 @@ function LatestScrollFixture() {
     return Array.from({ length: 500 }, (_, index) => assistant(`Virtualized message ${index}`)).join("");
   });
   const [mounted, setMounted] = useState(true);
-  audit.appendLatest = () => setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING"));
-  audit.appendToolEvents = (events: unknown[]) => setOutput(previous => previous + events.map(event => JSON.stringify(event) + "\n").join(""));
+  const [appended, setAppended] = useState(false);
+  const streaming = initialStreaming || appended;
+  audit.appendLatest = () => { setAppended(true); setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING")); };
+  audit.appendToolEvents = (events: unknown[]) => { setAppended(true); setOutput(previous => previous + events.map(event => JSON.stringify(event) + "\n").join("")); };
   audit.unmountConversation = () => setMounted(false);
   const state = { ...emptySnapshot, runId: "latest-run", config, phase: streaming ? "running" : "paused", paused: !streaming, approved: true, planType: nodeView ? "graph" : "serial",
     graph: { originalGoal: "Latest-scroll regression", nodes: [{ id: "task", task: "Inspect the long conversation" }], edges: [] },

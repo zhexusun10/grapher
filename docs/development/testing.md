@@ -409,7 +409,7 @@ are no timing assertions.
 | `test:native`, `test:native:scripts`, `test:planner-bash` | Native paths, launchers, Planner workspace rebinding and Bash semantics. `test:native:scripts` omits Rust tests; it still needs pinned Pi and Git/Bash. |
 | `test:filesystem` | Native ACLs, path identity, links and versioned snapshot integrity; Rust/Git, no browser or model calls. |
 | `test:prewarm` | Separate prewarm tests, production build and HTTP/native acceptance. |
-| `test:environment`, `test:environment-chain` | Environment admission/lifecycle; needs Python 3.11+, Git, Bash and the platform boundary. |
+| `test:environment`, `test:environment:acceptance`, `test:environment-chain` | Environment admission/lifecycle; `test:environment:acceptance` omits the Rust unit checks already covered by `test:backend`. Needs Python 3.11+, Git, Bash and the platform boundary. |
 | `test:merger`, `test:bindings` | Git composition/publication and project binding/routing. |
 | `test:hardening`, `test:windows-native`, `test:macos-browser` | Production HTTP/filesystem or host-specific acceptance; macOS browser acceptance also needs a browser. |
 | `test:concurrent` | Fixture HTTP concurrency; needs `/bin/sh`, skipped on Windows. |
@@ -449,7 +449,7 @@ is used. Requiring these checks for merging remains a branch-protection setting.
 
 Windows pushes run the focused filesystem suite; PR/scheduled/manual runs retain
 the full Windows library suite. The Linux/macOS backend suites also execute the
-applicable POSIX-link and snapshot regressions. The matrix also explicitly provisions pinned uv and retains the model-free
+applicable POSIX-link and snapshot regressions. Weekly scheduled and manual CI runs also explicitly provision pinned uv and retain the model-free
 [dependency-cost report](environment-baselines.md) for seven days; this is a
 component measurement, not a replacement for its real native-boundary checks.
 Windows pushes additionally run focused `rooted_` capture/recovery regressions,

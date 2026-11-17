@@ -1393,7 +1393,7 @@ fn offline_dependencies_and_runnable_output_survive_snapshots_forks_and_source_d
             .unwrap();
             verify_result(&node, &source, &result).unwrap();
             let child = slot(&temp, "offline-fork");
-            workspace::prepare(&source, &child, &base, &[result.clone()]).unwrap();
+            workspace::prepare(&source, &child, &base, std::slice::from_ref(&result)).unwrap();
             assert_eq!(run(&child), "node-patch:build");
             verify_result(&child, &source, &result).unwrap();
             fs::write(

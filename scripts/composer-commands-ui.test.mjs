@@ -34,7 +34,7 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
       let result = [];
       if (request.url().endsWith("/list_files")) result = { files: ["docs/app-notes.md", "src/App.tsx", "package.json", "README.md"] };
       if (request.url().endsWith("/list_skills")) result = { skills: [{ name: "demo", description: "Demo", path: "/demo", scope: "workspace" }] };
-      if (request.url().endsWith("/provider_auth")) result = { providers: [], warning: null, models: ["one", "two"].map(id => ({ provider: "test", id, name: id, available: true, thinkingLevels: ["off", "minimal", "low", "high"] })) };
+      if (request.url().endsWith("/provider_auth")) result = { providers: [], warning: null, models: ["one", "two"].map(id => ({ provider: "test", id, name: id, api: "mock", contextWindow: 1000, available: true, thinkingLevels: ["off", "minimal", "low", "high"], thinkingLevelFallbacks: {} })) };
       if (request.url().endsWith("/composer_rename")) {
         renames.push(body);
         result = {
@@ -466,7 +466,7 @@ test("a delayed model command cannot overwrite newer settings in the same conver
       await expect(input).toBeDisabled();
       await page.getByRole("button", { name: "Apply newer settings", exact: true }).click();
       await catalogRequest.fulfill({ json: { result: { providers: [], warning: null, models: ["one", "two"].map(id => ({
-        provider: "test", id, name: id, available: true, thinkingLevels: ["off", "low", "high"],
+        provider: "test", id, name: id, api: "mock", contextWindow: 1000, available: true, thinkingLevels: ["off", "low", "high"], thinkingLevelFallbacks: {},
       })) } } });
       await expect(input).toBeEnabled();
       await expect(input, "an obsolete command remains a retryable draft").toHaveValue(command);

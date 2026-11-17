@@ -112,7 +112,10 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 
   async function load(refresh = false) {
     const generation = ++catalogGeneration.current;
-    if (refresh || !catalog) setBusy(true);
+    if (refresh || !catalog) {
+      onBusyChange(true);
+      setBusy(true);
+    }
     setError("");
     try {
       const result = await providerAuth.catalog(refresh);
@@ -222,6 +225,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     activeId.current = undefined;
     setAnswer("");
     setShowKey(false);
+    onBusyChange(true);
     setBusy(true);
     setError("");
     setLogin(undefined);
@@ -258,6 +262,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     actionInFlight.current = true;
     const value = answer;
     setAnswer("");
+    onBusyChange(true);
     setBusy(true);
     setError("");
     try {
@@ -283,6 +288,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   });
 
   async function logout(p: ProviderInfo) {
+    onBusyChange(true);
     setBusy(true);
     setError("");
     setActionSuccess("");

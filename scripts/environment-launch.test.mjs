@@ -408,3 +408,32 @@ test('unmanaged compatibility process has no binding or additional PATH processi
   assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), { env: { PATH: 'legacy' } });
   assert.ok(delimiter);
 });
+
+test('Windows Git Bash promotes shell bins ahead of System32 without beating earlier host tools', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-win-bash-order-'));
+  try {
+    const customFirst = join(directory, 'custom-first');
+    const customScripts = join(directory, 'scripts');
+    mkdirSync(customFirst);
+    mkdirSync(customScripts);
+    writeFileSync(join(customFirst, 'bash-precedence-probe'), "#!/bin/sh\nprintf 'custom-first\\n'\n", { mode: 0o755 });
+    writeFileSync(join(customScripts, 'env-bash-probe'), "#!/usr/bin/env bash\nprintf 'bash:%s\\n' \"$0\"\n", { mode: 0o755 });
+    const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+    const shellDir = dirname(shell);
+    const usrBin = resolve(shellDir, '../usr/bin');
+    const path = [customFirst, system32, customScripts, shellDir, usrBin];
+    const launch = { ...base(), inheritAmbient: true, entry: shell, path, unboundPath: path };
+    const bashResult = run(launch, `console.log(execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('bash-precedence-probe && command -v bash && env-bash-probe')],{env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'}).trim())`);
+    assert.equal(bashResult.status, 0, bashResult.stderr);
+    const lines = bashResult.stdout.trim().replaceAll('\r', '').split('\n');
+    assert.equal(lines[0], 'custom-first');
+    assert.doesNotMatch(lines[1], /system32/i);
+    assert.match(lines[2], /^bash:/);
+    // An unmodified hook keeps exact native PATH order for Win32 callers.
+    const hookEntry = join(customFirst, 'custom-entry');
+    writeFileSync(hookEntry, 'entry');
+    const hooked = run({ ...launch, entry: hookEntry, hook: 'env-bash-probe >/dev/null' }, 'console.log(process.env.PATH)');
+    assert.equal(hooked.status, 0, hooked.stderr);
+    assert.equal(hooked.stdout.trim(), path.join(';'));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

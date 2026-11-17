@@ -3,11 +3,12 @@
 // not a frontend/user environment-selection surface.
 import { readFileSync, existsSync, statSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { delimiter, isAbsolute, dirname } from 'node:path';
+import { delimiter, isAbsolute, dirname, resolve } from 'node:path';
 import { samePath, toHostInput } from './path-identity.mjs';
 
 let active;
 let activePath;
+const initialLocalAppData = process.env.LOCALAPPDATA;
 let deviceEnvironment = {};
 let businessNodeEnvironment = {};
 const runtimePathKey = key => /^(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR|npm_config_cache|PIP_CACHE_DIR|CONDA_ENVS_PATH|CONDA_PKGS_DIRS)$/i.test(key);
@@ -58,12 +59,47 @@ function joinNativePath(paths) {
     return entry;
   }).join(delimiter);
 }
-function bindBashPath(path) {
+const isEntryFirst = launch => !launch.inheritAmbient || launch.environment != null || launch.hook != null;
+const windowsSystemDirs = process.platform !== 'win32' ? [] : [
+  ...[process.env.SystemRoot, process.env.WINDIR]
+    .filter(Boolean)
+    .flatMap(root => ['System32', 'Sysnative', 'SysWOW64'].map(sub => resolve(root, sub))),
+  ...(initialLocalAppData ? [resolve(initialLocalAppData, 'Microsoft/WindowsApps')] : []),
+];
+function isWindowsSystemToolDir(entry) {
+  return isNativeAbsolute(entry) && (
+    windowsSystemDirs.some(dir => samePath(entry, dir))
+    || /[\\/]appdata[\\/]local[\\/]microsoft[\\/]windowsapps[\\/]*$/i.test(entry)
+  );
+}
+// Git Bash disables its own /mingw64/bin:/usr/bin startup prepend here so
+// business PATH entries win, yet System32 / WindowsApps carry WSL bash.exe
+// plus Windows find/sort; keep the shell's own bins ahead of those OS dirs.
+function bashPathEntries(path, launch = active) {
+  const entries = splitNativePath(path).map(entry => entry || '.');
+  if (process.platform !== 'win32') return entries;
+  if (entries.some(entry => /[\r\n]/.test(entry))) throw new Error('Invalid native PATH entry');
+  if (!launch?.shell) return entries;
+  const start = isEntryFirst(launch) ? 1 : 0;
+  const osIndex = entries.findIndex((entry, index) => index >= start && isWindowsSystemToolDir(entry));
+  if (osIndex < 0) return entries;
+  const shellDir = dirname(launch.shell);
+  const shellBins = [shellDir, resolve(shellDir, '../usr/bin')];
+  const promoted = [];
+  const rest = [];
+  entries.forEach((entry, index) => {
+    if (index > osIndex && isNativeAbsolute(entry) && shellBins.some(bin => samePath(entry, bin))) {
+      promoted.push(entry);
+    } else {
+      rest.push(entry);
+    }
+  });
+  return promoted.length ? [...rest.slice(0, osIndex), ...promoted, ...rest.slice(osIndex)] : entries;
+}
+function bindBashPath(path, { launch = active, entries = bashPathEntries(path, launch) } = {}) {
   // Native Git Bash's MSYS startup prepends host bins even with --noprofile.
   // Reset PATH INSIDE Bash, using the trusted shell installation's converter.
   if (process.platform === 'win32') {
-    const entries = splitNativePath(path).map(entry => entry || '.');
-    if (entries.some(entry => /[\r\n]/.test(entry))) throw new Error('Invalid native PATH entry');
     // Convert separate arguments in ONE process. cygpath -p does not honor
     // native PATH quotes and drops empty entries; '.' retains cwd semantics.
     return `__grapher_path=$(/usr/bin/cygpath -u -- ${entries.map(quote).join(' ')}) || exit $?\ncase "$__grapher_path" in *:*) printf '%s\\n' 'Native PATH entry cannot be represented in Bash' >&2; exit 1;; esac\nexport PATH="\${__grapher_path//$'\\n'/:}"\nunset __grapher_path\n`;
@@ -98,7 +134,7 @@ fi
 \\builtin printf '\\0GRAPHER_HOOK_PATH\\0%s\\0%s\\0%s\\0%s\\0' "$__grapher_hook_initial_path" "\${PATH+x}" "\${PATH-}" "$__grapher_hook_native"
 unset __grapher_hook_initial_path __grapher_hook_native __grapher_hook_absolute __grapher_hook_remaining __grapher_hook_entry
 `;
-function capturedHookPath(output, original) {
+function capturedHookPath(output, original, initialNative = original) {
   let offset = output.lastIndexOf(hookPathMarker);
   if (offset < 0) throw new Error('Native hook did not produce a complete PATH');
   offset += hookPathMarker.length;
@@ -111,11 +147,11 @@ function capturedHookPath(output, original) {
   }
   const [initial, present, path, converted] = fields;
   const entries = initial.split(':');
-  if (entries.length !== original.length || !['', 'x'].includes(present)) throw new Error('Invalid native hook PATH capture');
+  if (entries.length !== initialNative.length || !['', 'x'].includes(present)) throw new Error('Invalid native hook PATH capture');
   if (!present) return undefined;
   if (path === initial) return joinNativePath(original);
   const known = new Map();
-  entries.forEach((entry, index) => { if (!known.has(entry)) known.set(entry, original[index]); });
+  entries.forEach((entry, index) => { if (!known.has(entry)) known.set(entry, initialNative[index]); });
   const paths = path.split(':');
   const unknown = paths.filter(entry => entry.startsWith('/') && !known.has(entry));
   const native = unknown.length ? converted.split('\n') : [];
@@ -220,9 +256,10 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   if (launch.hook) {
     const node = process.execPath.replaceAll('\\', '/');
     const capture = `process.stdout.write('\\0GRAPHER_ENV\\0'+JSON.stringify(process.env)+'\\0')`;
+    const hookEntries = bashPathEntries(process.env.PATH, launch);
     // Do not use an env/python/node found on the business PATH for capture.
     const output = spawnSync(launch.shell, ['--noprofile', '--norc', '-c',
-      `${restoreBashCwd(process.cwd())}${bindBashPath(process.env.PATH)}${process.platform === 'win32' ? '__grapher_hook_initial_path=$PATH\n' : ''}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${captureHookPath}${quote(node)} -e ${quote(capture)}`],
+      `${restoreBashCwd(process.cwd())}${bindBashPath(process.env.PATH, { launch, entries: hookEntries })}${process.platform === 'win32' ? '__grapher_hook_initial_path=$PATH\n' : ''}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${captureHookPath}${quote(node)} -e ${quote(capture)}`],
     { cwd: process.cwd(), env: { ...process.env }, encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
     if (output.error || output.status !== 0) throw new Error('Declared native activation hook failed; no fallback');
     const marker = '\0GRAPHER_ENV\0';
@@ -231,7 +268,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     if (start < 0 || end < 0) throw new Error('Native hook did not produce a complete environment');
     const environment = JSON.parse(output.stdout.slice(start + marker.length, end));
     if (process.platform === 'win32') {
-      const path = capturedHookPath(output.stdout.slice(0, start), launch.path);
+      const path = capturedHookPath(output.stdout.slice(0, start), launch.path, hookEntries);
       for (const key of Object.keys(environment)) if (/^PATH$/i.test(key)) delete environment[key];
       if (path !== undefined) environment.PATH = path;
     }
@@ -246,7 +283,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 
   // The unbound automatic entry is an absolute Bash, not a reason to put
   // Git/Bash's bundled tools ahead of the user's business executables.
-  const entryFirst = !launch.inheritAmbient || launch.environment != null || launch.hook != null;
+  const entryFirst = isEntryFirst(launch);
   const firstPath = typeof process.env.PATH === 'string' ? splitNativePath(process.env.PATH)[0] : undefined;
   if (!existsSync(launch.entry) || !statSync(launch.entry).isFile() || typeof process.env.PATH !== 'string' ||
       entryFirst && (!isNativeAbsolute(firstPath) || !samePath(firstPath, dirname(launch.entry)))) {

@@ -14,8 +14,7 @@ function getStorage(storage?: Storage): Storage | null {
   return null;
 }
 
-// Browser data is only a hint. A malformed/older value must not permanently
-// disable future saves, and non-string entries must not become legacy drafts.
+// Browser data is only a hint; malformed or non-string entries must not block future saves.
 function readDrafts(raw: string | null): Record<string, string> {
   try {
     const value: unknown = JSON.parse(raw ?? "null");

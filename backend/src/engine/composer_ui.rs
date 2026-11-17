@@ -89,7 +89,7 @@ impl CommandUi {
             return Vec::new();
         };
         owner.last_seen = Instant::now();
-        self.events.drain(..).collect()
+        std::mem::take(&mut self.events)
     }
 
     pub(crate) fn respond(

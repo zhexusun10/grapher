@@ -630,17 +630,16 @@ fn missing_source_prefers_recorded_physical_parent_over_a_dangling_alias_parent(
 
 #[test]
 fn missing_source_refuses_redirected_recorded_workspace_roots_before_deletion() {
-    for bucket in [".grapher-worktrees"] {
-        let (temp, source, mut runtime) = setup();
-        fs::remove_dir_all(source).unwrap();
-        let id = runtime.state.run_id.clone();
-        let outside = temp.path().join("outside");
-        directory(&outside.join(&id));
-        crate::path_safety::directory_link(&outside, &temp.path().join(bucket));
-        assert!(runtime.delete_run(&id).unwrap_err().contains("Refusing"));
-        assert!(runtime.store.contains_run(&id).unwrap());
-        assert!(outside.join(&id).join("nested/dependencies/file").is_file());
-    }
+    let bucket = ".grapher-worktrees";
+    let (temp, source, mut runtime) = setup();
+    fs::remove_dir_all(source).unwrap();
+    let id = runtime.state.run_id.clone();
+    let outside = temp.path().join("outside");
+    directory(&outside.join(&id));
+    crate::path_safety::directory_link(&outside, &temp.path().join(bucket));
+    assert!(runtime.delete_run(&id).unwrap_err().contains("Refusing"));
+    assert!(runtime.store.contains_run(&id).unwrap());
+    assert!(outside.join(&id).join("nested/dependencies/file").is_file());
 }
 
 #[test]

@@ -287,23 +287,22 @@ fn cached_graph_workspaces_keep_durable_cleanup_when_the_source_moves() {
 
 #[test]
 fn cleanup_refuses_linked_workspace_roots_without_deleting_external_data() {
-    for name in [".grapher-worktrees"] {
-        let (temp, _source, mut runtime) = setup(true, single());
-        runtime.set_route("serial").unwrap();
-        let outside = temp.path().join("external");
-        let retained = outside.join(&runtime.state.run_id);
-        fs::create_dir_all(&retained).unwrap();
-        fs::write(retained.join("marker"), "external data").unwrap();
-        crate::path_safety::directory_link(&outside, &temp.path().join(name));
-        assert!(runtime
-            .cleanup_worktrees()
-            .unwrap_err()
-            .contains("Refusing"));
-        assert_eq!(
-            fs::read_to_string(retained.join("marker")).unwrap(),
-            "external data"
-        );
-    }
+    let name = ".grapher-worktrees";
+    let (temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    let outside = temp.path().join("external");
+    let retained = outside.join(&runtime.state.run_id);
+    fs::create_dir_all(&retained).unwrap();
+    fs::write(retained.join("marker"), "external data").unwrap();
+    crate::path_safety::directory_link(&outside, &temp.path().join(name));
+    assert!(runtime
+        .cleanup_worktrees()
+        .unwrap_err()
+        .contains("Refusing"));
+    assert_eq!(
+        fs::read_to_string(retained.join("marker")).unwrap(),
+        "external data"
+    );
 }
 
 #[test]
@@ -5646,4 +5645,96 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
         })
         .unwrap();
     assert_eq!(runtime.state.phase, "running");
+}
+
+#[test]
+fn clear_history_rejects_active_merger_and_launching_result_runs() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    let config = runtime.state.config.clone().unwrap();
+    let other_id = runtime.state.run_id.clone();
+    runtime.create(single(), config).unwrap();
+
+    let result_input = crate::environment::CompositeResult {
+        domain: crate::environment::Domain {
+            platform: "test".into(),
+            arch: "test".into(),
+            baseline: "base".into(),
+            policy: "test".into(),
+            contract: "test".into(),
+        },
+        code_ref: "code".into(),
+        environment_ref: "env".into(),
+        launch_ref: "launch".into(),
+        resource_refs: vec![],
+        layout: None,
+        generation: "generation".into(),
+        selected_from: vec![],
+        inheritance: None,
+    };
+    let mut other = runtime.store.load(&other_id).unwrap();
+    runtime
+        .store
+        .append(
+            &mut other,
+            EventKind::ResultExecutionStarted {
+                input: result_input,
+                args: vec![],
+            },
+        )
+        .unwrap();
+    assert_eq!(other.phase, "launching_result");
+
+    let error = runtime.clear_history().unwrap_err();
+    assert!(error.contains("another Run is active"), "{error}");
+
+    runtime
+        .store
+        .append(
+            &mut other,
+            EventKind::ResultExecutionFailed {
+                generation: "generation".into(),
+                error: "stopped".into(),
+            },
+        )
+        .unwrap();
+    runtime
+        .store
+        .append(
+            &mut other,
+            EventKind::MergerStarted {
+                execution: Execution {
+                    id: "merger-active".into(),
+                    node: "merge:task".into(),
+                    revision: 1,
+                    attempt: 1,
+                    session_id: "s1".into(),
+                    worktree: "w1".into(),
+                    before: String::new(),
+                    workspace_lineage: vec![],
+                    after: None,
+                    input: None,
+                    result: None,
+                    status: "running".into(),
+                    output: String::new(),
+                    output_bytes: 0,
+                    pid: None,
+                    started_at: 0,
+                    completed_at: None,
+                    metrics: None,
+                },
+            },
+        )
+        .unwrap();
+    // Simulate a running merger when phase itself is not planning/publishing/merging/launching_result.
+    assert!(!matches!(
+        other.phase.as_str(),
+        "planning" | "publishing" | "merging" | "launching_result"
+    ));
+    assert!(other
+        .mergers
+        .iter()
+        .any(|merger| merger.status == "running"));
+
+    let error = runtime.clear_history().unwrap_err();
+    assert!(error.contains("another Run is active"), "{error}");
 }

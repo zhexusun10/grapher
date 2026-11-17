@@ -16,7 +16,6 @@ export function SessionTokenUsage({ usage, context, showTokens = true }: {
   // only reuse the prompt and are shown separately. `context
   // window` is the model's capacity, while `current context` is Pi's estimate
   // of the retained conversation, including trailing messages and compaction.
-  // Legacy logs only supply the latest model call's reported token total.
   if (!showTokens && !context) return null;
   return <>
     {showTokens && <>

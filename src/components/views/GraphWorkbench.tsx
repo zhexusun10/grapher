@@ -788,8 +788,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const executionUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, execution),
     [allExecutions, execution]);
   const executionUsage = executionUsageThrough.latest
-    // The backend's session total is authoritative; a complete per-attempt
-    // prefix covers snapshots that predate it.
+    // The backend's session total is authoritative when present; otherwise
+    // use a complete per-attempt prefix.
     ? (sessionTokenUsage(state.runMetrics?.sessionUsage, execution?.sessionId)
       ?? (executionUsageThrough.complete ? executionUsageThrough.usage : undefined))
     : executionUsageThrough.usage;
@@ -810,9 +810,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isMerger,
       state.config || config,
       envOverrides,
-      // Parsed metrics always win. Legacy attempts that recorded no model still
-      // belong to this node's override; the conversation-wide Node Agent
-      // setting would misreport nodes that used a different model.
+      // Recorded metrics identify finished attempts; live attempts fall back to
+      // this node's override so per-node models do not appear as the default.
       state.nodes[execution.node]?.modelConfig
     );
   }, [execution, isMerger, state.nodes, state.config, config, envOverrides]);

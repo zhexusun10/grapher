@@ -171,7 +171,7 @@ function splitPlanningSegments(output: string): PlanningSegment[] | null {
 
 /** Annotate parsed items with appear/expand state. `live` appends register
  * streaming liveness; prepend/fresh parses only consult it (history stays
- * collapsed exactly like the legacy full-reparse path). */
+ * collapsed across full and prepended parses). */
 function annotateSegmentItems(
   items: TranscriptItem[], previousItems: TranscriptItem[],
   mode: "live" | "prepend" | "fresh", settled: boolean, inline: boolean,
@@ -1076,8 +1076,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const totalCount = items.length;
   const isVirtual = !sharedViewport && totalCount > 35;
 
-  // Inline rows have their own shared-viewport window; do not also build the
-  // legacy private-viewport offsets or read geometry during their render.
+  // Inline rows have their own shared-viewport window; do not also build
+  // private-viewport offsets or read geometry during their render.
   const offsets = useMemo(() => sharedViewport ? [0] : rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion, sharedViewport]);
   const totalOffsetsHeight = offsets[offsets.length - 1] ?? 0;
 

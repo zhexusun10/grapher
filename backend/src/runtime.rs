@@ -253,7 +253,6 @@ impl Runtime {
         } else {
             Snapshot::default()
         };
-        // Production serde discards legacy engine fields automatically.
         #[cfg(feature = "fixture")]
         if let Some(config) = state.config.as_mut() {
             if !known_engine(&config.engine) {
@@ -1082,6 +1081,21 @@ impl Runtime {
         Ok(self.state.clone())
     }
 
+    fn is_run_active(state: &Snapshot) -> bool {
+        matches!(
+            state.phase.as_str(),
+            "planning" | "publishing" | "merging" | "launching_result"
+        ) || state.nodes.values().any(|node| node.status == "running")
+            || state
+                .mergers
+                .iter()
+                .any(|merger| merger.status == "running")
+            || state
+                .result_execution
+                .as_ref()
+                .is_some_and(|result| result.status == "running")
+    }
+
     pub fn clear_history(&mut self) -> Result<(), String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
@@ -1095,9 +1109,7 @@ impl Runtime {
                 stored = self.store.load(&run_id)?;
                 &stored
             };
-            if matches!(state.phase.as_str(), "planning" | "publishing" | "merging")
-                || state.nodes.values().any(|node| node.status == "running")
-            {
+            if Self::is_run_active(state) {
                 return Err("Cannot clear history while another Run is active; reopen interrupted Runs first".into());
             }
             cleanups.push((
@@ -1134,19 +1146,7 @@ impl Runtime {
                 stored = self.store.load(run_id)?;
                 &stored
             };
-            if matches!(
-                target.phase.as_str(),
-                "planning" | "publishing" | "merging" | "launching_result"
-            ) || target.nodes.values().any(|node| node.status == "running")
-                || target
-                    .mergers
-                    .iter()
-                    .any(|merger| merger.status == "running")
-                || target
-                    .result_execution
-                    .as_ref()
-                    .is_some_and(|result| result.status == "running")
-            {
+            if Self::is_run_active(target) {
                 return Err("Cannot delete a running execution".into());
             }
             cleanups.push((
@@ -3071,6 +3071,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_node_message_at(
         &mut self,
         node: &str,
@@ -3593,10 +3594,9 @@ impl Runtime {
         if matches!(
             self.state.phase.as_str(),
             "publishing" | "merging" | "publication_failed"
-        ) {
-            if !allow_disjoint_publication || !self.private_continuation_during_publication(node) {
-                return Err("This node shares publication inputs or has no retained private workspace; wait for delivery or retry failed publication".into());
-            }
+        ) && (!allow_disjoint_publication || !self.private_continuation_during_publication(node))
+        {
+            return Err("This node shares publication inputs or has no retained private workspace; wait for delivery or retry failed publication".into());
         }
         if !self.state.approved {
             return Err("Approve the graph before updating a node".into());
@@ -6525,7 +6525,7 @@ impl Runtime {
         }
         let config = self.state.config.clone().ok_or("Missing config")?;
         if !descriptor.result.resource_refs.is_empty() {
-            return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before launching it".into());
+            return Err("Unsupported result resource format; publish a new Run".into());
         }
         config
             .environment
@@ -6816,7 +6816,7 @@ pub(crate) fn perform_result(
                 let store = crate::environment::Environments::new(&job.root, &job.run_id, policy)?;
                 store.validate_result(&job.descriptor.result)?;
                 if !job.descriptor.result.resource_refs.is_empty() {
-                    return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before launching it".into());
+                    return Err("Unsupported result resource format; publish a new Run".into());
                 }
                 let mut exclusions = store.exclusions(&job.descriptor.result.launch_ref)?;
                 let path = Path::new(&job.descriptor.workspace);

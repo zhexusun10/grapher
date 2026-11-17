@@ -63,6 +63,7 @@ pub fn write_graph_profile(
 /// installation is the Grapher source checkout (or packaged app); like the
 /// shared engine copy it stays readable but must never be writable by an
 /// execution, matching the Linux bubblewrap read-only bind.
+#[allow(clippy::too_many_arguments)]
 pub fn write_execution_profile(
     path: &Path,
     repository: &Path,
@@ -87,6 +88,7 @@ pub fn write_execution_profile(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_execution_profile_scoped(
     path: &Path,
     repository: &Path,

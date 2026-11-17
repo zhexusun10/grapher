@@ -1233,6 +1233,7 @@ pub fn cap_summary_files(mut summary: FileChangeSummary, limit: usize) -> FileCh
     summary
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_from_log_text(
     run_id: &str,
     execution_id: &str,
@@ -2222,9 +2223,11 @@ mod tests {
         update_planning_from_log_chunk("planning-run", "planning-1", "/repo", "/repo", start);
         update_planning_from_log_chunk("planning-run", "planning-1", "/repo", "/repo", end);
         settle_planning("planning-run", "planning-1");
-        let mut state = Snapshot::default();
-        state.run_id = "planning-run".into();
-        state.planning_id = Some("planning-1".into());
+        let state = Snapshot {
+            run_id: "planning-run".into(),
+            planning_id: Some("planning-1".into()),
+            ..Snapshot::default()
+        };
         let summary =
             get_cached_run_changes(&state).expect("planner writes are part of the run summary");
         assert_eq!(summary.files[0].path, "docs/plan.md");

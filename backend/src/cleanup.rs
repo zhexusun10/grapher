@@ -561,8 +561,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
         }
     }
     if detach {
-        // Retire only the top-level targets; a parent's receipt owns its entire
-        // tree, including any legacy Planner checkout listed separately.
+        // Retire only the top-level targets; a parent's receipt owns its entire tree.
         for (target, path) in &detached_targets {
             if paths
                 .iter()

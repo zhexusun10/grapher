@@ -373,14 +373,15 @@ fn historical_run_routes_to_its_own_projection_while_the_active_run_is_busy() {
 }
 
 fn open_file_state(repository: &std::path::Path) -> Snapshot {
-    let mut state = Snapshot::default();
-    state.config = Some(
-        serde_json::from_value(serde_json::json!({
-            "repository": repository.to_string_lossy(), "model": "test", "maxParallel": 1
-        }))
-        .unwrap(),
-    );
-    state
+    Snapshot {
+        config: Some(
+            serde_json::from_value(serde_json::json!({
+                "repository": repository.to_string_lossy(), "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+        ),
+        ..Snapshot::default()
+    }
 }
 
 fn open_file_execution(id: &str, worktree: &std::path::Path, started_at: u64) -> Execution {

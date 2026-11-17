@@ -23,7 +23,7 @@ fn input(source: &Path, name: &str) -> Vec<(String, String, String)> {
     vec![(
         "workspace".into(),
         name.into(),
-        git2::Oid::hash_file(git2::ObjectType::Blob, &source.join(name))
+        git2::Oid::hash_file(git2::ObjectType::Blob, source.join(name))
             .unwrap()
             .to_string(),
     )]

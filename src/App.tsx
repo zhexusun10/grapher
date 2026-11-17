@@ -917,11 +917,6 @@ export default function App() {
     // A retry may have overlapped an edit attempt that was rejected only
     // because settings were still loading. Do not leave that stale error up.
     setError(previous => previous === t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。") ? "" : previous);
-    if (data.dataPath) {
-      const cleanDataPath = normalizeWorkspacePath(data.dataPath);
-      setDataPath(cleanDataPath);
-      writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
-    }
     writeStorageJson(STORAGE_KEYS.config, applyModelConfig(nextConfigObj, data.config));
     if (nextConfigObj.repository && workspaceKey(nextConfigObj.repository) !== workspaceKey(data.config.repository)) {
       void runtimeService.saveConfig(applyModelConfig(nextConfigObj, data.config)).catch(() => { });
@@ -1579,6 +1574,46 @@ export default function App() {
       setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
       return { accepted: false, completion: Promise.resolve(false) };
     }
+    // The backend performs the authoritative binding check as part of the
+    // planning request. A cached status can still reject a known-invalid
+    // project immediately, but a cold status read must not delay the first
+    // prompt or duplicate the backend's filesystem validation.
+    if (repositoryStatus?.repository === targetRepo && !repositoryStatus.valid) {
+      setError(repositoryStatus.error || t("正在确认项目绑定，请稍后重试。"));
+      return { accepted: false, completion: Promise.resolve(false) };
+    }
+    const requiredModels = planningModelRoles(effectiveMode).map(role => ({
+      label: modelRoles.find(item => item.id === role)!.label,
+      model: roleModelConfig(config, role, envOverrides).model,
+    }));
+    for (const { label, model } of requiredModels) {
+      if (!model) {
+        setModal("settings");
+        setError(t("请先在设置中配置 {0} 的模型。", label));
+        return { accepted: false, completion: Promise.resolve(false) };
+      }
+      const [provider, modelId] = model.split("/", 2);
+      if (!provider || !modelId) {
+        setModal("settings");
+        setError(t("{0} 模型标识 \"{1}\" 需使用 provider/model 格式。", label, model));
+        return { accepted: false, completion: Promise.resolve(false) };
+      }
+    }
+    // The backend performs the authoritative auth/model preflight. Use a
+    // catalog already loaded by Settings or a prior command for an instant
+    // client-side message; never make a cold catalog request part of send.
+    const cat = providerAuth.getCachedCatalog();
+    if (cat) {
+      for (const { label, model } of requiredModels) {
+        const providerId = providerIdForModel(model, cat.providers);
+        const prov = cat.providers.find(p => p.id === providerId);
+        if (prov && !prov.configured) {
+          setModal("settings");
+          setError(t("{0} 所选服务商 \"{1}\" 尚未认证，请在设置中配置 API Key 或登录。", label, prov.name || providerId));
+          return { accepted: false, completion: Promise.resolve(false) };
+        }
+      }
+    }
     const scope = planningRecovery.begin(targetRepo);
     let startedRunId: string | undefined;
 
@@ -1723,52 +1758,6 @@ export default function App() {
       let routeConfirmed = false;
       let failureSummary: PlanningSummary | undefined;
       try {
-        // The backend performs the authoritative binding check as part of the
-        // planning request. A cached status can still reject a known-invalid
-        // project immediately, but a cold status read must not delay the first
-        // prompt or duplicate the backend's filesystem validation.
-        if (repositoryStatus?.repository === targetRepo && !repositoryStatus.valid) {
-          setError(repositoryStatus.error || t("正在确认项目绑定，请稍后重试。"));
-          return;
-        }
-        if (!planningRecovery.current(scope)) return;
-        if (!config.repository) {
-          setModal("settings");
-          setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
-          return;
-        }
-        const requiredModels = planningModelRoles(effectiveMode).map(role => ({
-          label: modelRoles.find(item => item.id === role)!.label,
-          model: roleModelConfig(config, role, envOverrides).model,
-        }));
-        for (const { label, model } of requiredModels) {
-          if (!model) {
-            setModal("settings");
-            setError(t("请先在设置中配置 {0} 的模型。", label));
-            return;
-          }
-          const [provider, modelId] = model.split("/", 2);
-          if (!provider || !modelId) {
-            setModal("settings");
-            setError(t("{0} 模型标识 \"{1}\" 需使用 provider/model 格式。", label, model));
-            return;
-          }
-        }
-        // The backend performs the authoritative auth/model preflight. Use a
-        // catalog already loaded by Settings or a prior command for an instant
-        // client-side message; never make a cold catalog request part of send.
-        const cat = providerAuth.getCachedCatalog();
-        if (cat) {
-          for (const { label, model } of requiredModels) {
-            const providerId = providerIdForModel(model, cat.providers);
-            const prov = cat.providers.find(p => p.id === providerId);
-            if (prov && !prov.configured) {
-              setModal("settings");
-              setError(t("{0} 所选服务商 \"{1}\" 尚未认证，请在设置中配置 API Key 或登录。", label, prov.name || providerId));
-              return;
-            }
-          }
-        }
         if (!planningRecovery.current(scope)) return;
         let partInTag = false;
         let planInTag = false;

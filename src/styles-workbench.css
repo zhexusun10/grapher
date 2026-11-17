@@ -98,6 +98,7 @@
   }
 }
 
+.suggestions-header-refresh-btn,
 .suggestions-header-close-btn {
   display: inline-flex;
   align-items: center;
@@ -117,6 +118,7 @@
 /* Outrank the global `button:not(:disabled):hover` filter: inside a 20px round
    target it re-rasterizes the icon edge and shifts the glyph, which read as the
    X jittering under the pointer. The button paints its own hover surface. */
+.suggestions-header-refresh-btn:hover:not(:disabled),
 .suggestions-header-close-btn:hover:not(:disabled) {
   background: var(--bg-surface-hover);
   color: var(--text-primary);

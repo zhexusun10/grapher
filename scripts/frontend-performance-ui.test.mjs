@@ -159,7 +159,7 @@ test("hidden log polling slows down, visible resumes at the byte cursor and comp
   const { context, page, errors } = await fixture("case=log", async (route, command, body) => {
     assert.equal(command, "get_execution_output"); requests.push(body.offset);
     const content = complete && body.offset === 0 ? line : "";
-    await route.fulfill({ json: { result: { runId: "log-run", executionId: "log-exec", content,
+    await route.fulfill({ json: { result: { runId: "log-run", executionId: "log-exec", content, startOffset: 0,
       nextOffset: complete ? Buffer.byteLength(line) : 0, totalBytes: complete ? Buffer.byteLength(line) : 0,
       complete: true, status: complete ? "completed" : "running" } } });
   });

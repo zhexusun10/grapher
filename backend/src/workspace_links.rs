@@ -174,11 +174,8 @@ fn unlink(path: &Path) -> Result<(), String> {
         return Err("Project hardlink replacement is not a regular file".into());
     }
     #[cfg(windows)]
-    if metadata.permissions().readonly() {
-        let mut permissions = metadata.permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions).map_err(|e| e.to_string())?;
-    }
+    crate::workspace_cleanup::clear_readonly_attribute(path, &metadata)
+        .map_err(|e| e.to_string())?;
     fs::remove_file(path).map_err(|e| e.to_string())
 }
 

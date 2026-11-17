@@ -5,7 +5,7 @@ import "@xyflow/react/dist/style.css";
 import "katex/dist/katex.min.css";
 import "./tailwind.css";
 import "./tokens.css";
-// Preserve legacy cascade order while keeping feature styles in separate files.
+// Preserve cascade order while keeping feature styles in separate files.
 import "./styles.css";
 import "./styles-workbench.css";
 import "./styles-planning.css";

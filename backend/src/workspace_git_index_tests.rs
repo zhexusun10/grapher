@@ -64,7 +64,7 @@ fn batched_flags_preserve_literal_paths_and_all_flag_combinations() {
         // Force-add also keeps intent-to-add files beneath ignored paths.
         fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
         fs::create_dir(root.join("ignored")).unwrap();
-        let names = vec![
+        let names = [
             "- leading file".to_string(),
             "wild[1].txt".into(),
             "中文.txt".into(),

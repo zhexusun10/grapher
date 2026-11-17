@@ -774,7 +774,7 @@ fn environment_project_baseline() {
                     files.materialize_roots(&targets, &changed).unwrap()
                 });
                 files.verify_roots(&targets, &changed).unwrap();
-                files.validate(&[changed.clone()]).unwrap();
+                files.validate(std::slice::from_ref(&changed)).unwrap();
                 assert!(fs::read_to_string(restored.join(project.dependency()))
                     .unwrap()
                     .contains("source-later"));

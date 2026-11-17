@@ -1090,6 +1090,7 @@ impl Environments {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &self,
         path: &Path,

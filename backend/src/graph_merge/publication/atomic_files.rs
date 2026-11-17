@@ -293,10 +293,9 @@ pub(super) fn install_file(
                     .is_ok_and(|temp| crate::workspace_symlinks::is_link(&temp) && temp.is_dir())
         {
             crate::workspace_symlinks::remove(&target)?;
-        } else if metadata.permissions().readonly() {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(&target, permissions).map_err(|e| e.to_string())?;
+        } else {
+            crate::workspace_cleanup::clear_readonly_attribute(&target, &metadata)
+                .map_err(|e| e.to_string())?;
         }
     }
     fs::rename(&temporary, &target)
@@ -1035,9 +1034,17 @@ mod tests {
         perms.set_readonly(true);
         fs::set_permissions(&target, perms).unwrap();
         let input = workspace::snapshot_repository(&source).unwrap();
-        let mut node_perms = fs::metadata(node.join("file.txt")).unwrap().permissions();
-        node_perms.set_readonly(false);
-        fs::set_permissions(node.join("file.txt"), node_perms).unwrap();
+        #[cfg(windows)]
+        {
+            let node_file = node.join("file.txt");
+            let meta = fs::metadata(&node_file).unwrap();
+            crate::workspace_cleanup::clear_readonly_attribute(&node_file, &meta).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(node.join("file.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+        }
         fs::write(node.join("file.txt"), "published").unwrap();
         let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
         let run = uuid::Uuid::new_v4().to_string();

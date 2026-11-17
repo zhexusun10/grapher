@@ -383,7 +383,7 @@ fn native_runtime_return_projection_cannot_borrow_a_live_link_missing_from_histo
     crate::path_safety::remove_directory_link(&alias);
     let missing_link = uuid::Uuid::new_v4().to_string();
     files
-        .capture_roots(&roots, &layouts, &missing_link, &[complete.clone()])
+        .capture_roots(&roots, &layouts, &missing_link, std::slice::from_ref(&complete))
         .unwrap();
     crate::path_safety::directory_link(&work.join("env/real"), &alias);
     let stored = fs::read(

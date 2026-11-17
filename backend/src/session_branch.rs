@@ -470,6 +470,7 @@ fn session_entries(values: &[Value]) -> Result<HashMap<&str, &Value>, String> {
     Ok(entries)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_user_branch(
     session_dir: &Path,
     session_id: &str,

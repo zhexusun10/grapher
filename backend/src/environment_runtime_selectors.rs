@@ -21,7 +21,7 @@ fn absolute(path: &str) -> bool {
 }
 
 fn without_trailing_separator(path: &str) -> &str {
-    let trimmed = path.trim_end_matches(|character| character == '/' || character == '\\');
+    let trimmed = path.trim_end_matches(['/', '\\']);
     if trimmed.is_empty() {
         path
     } else {

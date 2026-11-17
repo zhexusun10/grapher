@@ -108,7 +108,7 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
         original,
         "fork must not change source permissions"
     );
-    let published = crate::graph_merge::merge_graph(&source, &[result.clone()], || {
+    let published = crate::graph_merge::merge_graph(&source, std::slice::from_ref(&result), || {
         panic!("no content conflict")
     })
     .unwrap();

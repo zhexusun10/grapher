@@ -76,12 +76,12 @@ pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
             let _ = locks.lock().map(|mut owned| owned.remove(&key));
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
-        return Ok(RuntimeLock {
+        Ok(RuntimeLock {
             _marker: marker,
             _parent: None,
             mutex: mutex as usize,
             key,
-        });
+        })
     }
 
     #[cfg(not(any(unix, windows)))]

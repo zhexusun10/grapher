@@ -1656,3 +1656,29 @@ test("restored workspace and conversation cards paint at their final state inste
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("synchronous preflight rejection on landing keeps the composer draft and avoids workbench flash", { timeout: 30_000 }, async () => {
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, config: { ...config, model: "" } } } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    const composer = page.locator(".landing-screen textarea");
+    await composer.fill("Keep this landing draft");
+    await composer.press("Enter");
+    await page.locator(".settings-modal").waitFor();
+    assert.equal(await page.locator(".workbench-view").count(), 0);
+    assert.equal(await page.locator('[data-run-id^="pending-"]').count(), 0);
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.getByRole("alert").filter({ hasText: /Configure a model for/i }).waitFor();
+    assert.equal(await composer.inputValue(), "Keep this landing draft");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_landing_goal_drafts"))["/responsiveness"]), "Keep this landing draft");
+    assert.equal(calls.filter(call => call.command === "plan_goal").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});

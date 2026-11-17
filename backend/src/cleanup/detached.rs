@@ -144,8 +144,7 @@ fn purge(root: &Path, store: &Store, mut record: Record) -> Result<(), String> {
     {
         return Err("Detached workspace contains a protected source project".into());
     }
-    // Delete exactly the receipt's unique path. `remove_paths` also removes
-    // an empty legacy Planner owner directory; that live parent is not owned
+    // Delete only the receipt's unique path; that live parent is not owned
     // by this receipt and may have been adopted or reserved by another actor.
     crate::workspace_cleanup::remove_tree(&path).map_err(|error| {
         format!(

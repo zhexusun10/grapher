@@ -1079,7 +1079,10 @@ fn batch_business_result_republishes_code_and_remains_launchable_after_restart()
         runtime.resume_scheduling().unwrap();
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.phase, "publishing");
-        assert_eq!(runtime.state.publication.as_ref().unwrap().heads, [result_head.clone()]);
+        assert_eq!(
+            runtime.state.publication.as_ref().unwrap().heads,
+            std::slice::from_ref(&result_head)
+        );
         assert!(runtime.start_result_entry(&[], Some(entry)).is_err());
 
         drop(runtime);

@@ -127,8 +127,7 @@ export const runtimeService = {
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   snapshotForRun: async (runId: string, signal?: AbortSignal) => {
     const snapshot = await request<Snapshot>("snapshot", { runId }, signal);
-    // Workspace ownership alone cannot distinguish two conversations. Never
-    // paint another Run if an older backend ignores the targeted request.
+    // Workspace ownership alone cannot distinguish two conversations.
     if (!snapshot || snapshot.runId !== runId) throw new Error(t("执行记录与请求不匹配"));
     return snapshot;
   },
@@ -139,7 +138,7 @@ export const runtimeService = {
     if (pending) return pending;
     const task = request<Snapshot>("history", { runId });
     historyRequests.set(runId, task);
-    void task.finally(() => { if (historyRequests.get(runId) === task) historyRequests.delete(runId); }).catch(() => {});
+    void task.finally(() => { if (historyRequests.get(runId) === task) historyRequests.delete(runId); }).catch(() => { });
     return task;
   },
   loadRun: async (runId: string) => {
@@ -192,7 +191,7 @@ export const runtimeService = {
       try {
         const errJson = await response.json();
         if (errJson.error) errMsg = errJson.error;
-      } catch {}
+      } catch { }
       throw new Error(errMsg);
     }
 
@@ -267,7 +266,7 @@ export const runtimeService = {
       }
       throw new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。"));
     } finally {
-      void reader.cancel().catch(() => {});
+      void reader.cancel().catch(() => { });
       reader.releaseLock();
     }
   },
@@ -277,27 +276,27 @@ export const runtimeService = {
   getFileChanges: async (runId: string, execution?: string | string[], signal?: AbortSignal) => {
     const result = await request<{ runId: string; executionId: string | null; executionIds: string[] | null; summary: FileChangeSummary }>(
       "get_file_changes", {
-        runId,
-        ...(Array.isArray(execution) ? { executionIds: execution } : execution ? { executionId: execution } : {}),
-      }, signal);
+      runId,
+      ...(Array.isArray(execution) ? { executionIds: execution } : execution ? { executionId: execution } : {}),
+    }, signal);
     const expectedId = typeof execution === "string" && execution ? execution : null;
     const optionalStrings = (value: unknown) => value === undefined ||
       (Array.isArray(value) && value.every(item => typeof item === "string"));
     if (!result || result.runId !== runId || result.executionId !== expectedId ||
-        (!Array.isArray(execution) && result.executionIds !== null) || !result.summary ||
-        !Array.isArray(result.summary.files) || result.summary.files.some(file =>
-          !file || typeof file.path !== "string" || !["added", "modified", "deleted", "renamed"].includes(file.status) ||
-          (file.oldPath !== undefined && typeof file.oldPath !== "string") ||
-          !optionalStrings(file.nodes) || !optionalStrings(file.executionIds) ||
-          [file.additions, file.deletions].some(value => !Number.isSafeInteger(value) || value < 0)) ||
-        [result.summary.totalFiles, result.summary.addedCount, result.summary.modifiedCount,
-          result.summary.deletedCount, result.summary.renamedCount, result.summary.totalAdditions,
-          result.summary.totalDeletions].some(value => !Number.isInteger(value) || value < 0)) {
+      (!Array.isArray(execution) && result.executionIds !== null) || !result.summary ||
+      !Array.isArray(result.summary.files) || result.summary.files.some(file =>
+        !file || typeof file.path !== "string" || !["added", "modified", "deleted", "renamed"].includes(file.status) ||
+        (file.oldPath !== undefined && typeof file.oldPath !== "string") ||
+        !optionalStrings(file.nodes) || !optionalStrings(file.executionIds) ||
+        [file.additions, file.deletions].some(value => !Number.isSafeInteger(value) || value < 0)) ||
+      [result.summary.totalFiles, result.summary.addedCount, result.summary.modifiedCount,
+      result.summary.deletedCount, result.summary.renamedCount, result.summary.totalAdditions,
+      result.summary.totalDeletions].some(value => !Number.isInteger(value) || value < 0)) {
       throw new Error("Invalid file changes response");
     }
     // Returned data must describe the requested execution scope.
     if (Array.isArray(execution) && (!Array.isArray(result.executionIds) ||
-        result.executionIds.length !== execution.length || result.executionIds.some((id, index) => id !== execution[index]))) {
+      result.executionIds.length !== execution.length || result.executionIds.some((id, index) => id !== execution[index]))) {
       throw new Error(t("后端不支持按执行范围读取文件变更，请更新后端后重试。"));
     }
     return result;
@@ -428,8 +427,6 @@ export const runtimeService = {
     });
     let res: { name: string; path: string };
     try {
-      // Never try the legacy basename-writing API, even after a 404. An old
-      // backend must reject before it can overwrite a same-name project file.
       res = await request("write_workspace_attachment", {
         repository,
         filename: file.name,

@@ -1198,7 +1198,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   )}
                 </span>
                 <span className="suggestions-header-actions">
-                  {triggerMode === '/' && triggerStart === 0 && <button type="button" className="suggestions-header-close-btn"
+                  {triggerMode === '/' && triggerStart === 0 && <button type="button" className="suggestions-header-refresh-btn"
                     aria-label={t('刷新指令')} title={t('刷新指令')} disabled={commands.commandsLoading}
                     onClick={commands.refreshCommands}><RefreshCw size={12} /></button>}
                   <span className="suggestions-header-hints" aria-hidden="true">

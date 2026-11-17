@@ -49,15 +49,15 @@ pub struct Service {
     extension: PathBuf,
 }
 
+type RunServiceMap = std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>;
+type HotServiceQueue = std::collections::VecDeque<(PathBuf, String, Arc<Service>)>;
+
 // Keep only weak references: active workers own their service; idle runs can
 // always be reconstructed from the shared event store on demand.
-static RUN_SERVICES: OnceLock<
-    Mutex<std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>>,
-> = OnceLock::new();
+static RUN_SERVICES: OnceLock<Mutex<RunServiceMap>> = OnceLock::new();
 // Active workers retain their own services; only two idle/historical services
 // are pinned so repeated polls do not replay a Run on every HTTP request.
-static HOT_SERVICES: OnceLock<Mutex<std::collections::VecDeque<(PathBuf, String, Arc<Service>)>>> =
-    OnceLock::new();
+static HOT_SERVICES: OnceLock<Mutex<HotServiceQueue>> = OnceLock::new();
 
 // Roots are immutable for a Service. Weak ownership must not keep a Runtime
 // lease alive after its last reader/worker has gone away.
@@ -1463,7 +1463,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     // must complete exactly one final four-character group.
     if padding > 2
         || data_len % 4 == 1
-        || (padding > 0 && (clean.len() % 4 != 0 || data_len % 4 + padding != 4))
+        || (padding > 0 && (!clean.len().is_multiple_of(4) || data_len % 4 + padding != 4))
     {
         return None;
     }
@@ -2064,6 +2064,9 @@ fn project_planner_graph_preview(
     }
 }
 
+pub(crate) type PlanningResult = Result<Snapshot, (String, Option<Box<PlanningSummary>>)>;
+
+#[allow(clippy::too_many_arguments)]
 fn plan_goal_internal(
     goal: String,
     config: Config,
@@ -2074,7 +2077,7 @@ fn plan_goal_internal(
     on_partitioner_line: impl FnMut(&str),
     on_route: impl FnMut(&Route),
     on_planner_line: impl FnMut(&str),
-) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
+) -> PlanningResult {
     plan_goal_internal_with_started(
         goal,
         config,
@@ -2090,6 +2093,7 @@ fn plan_goal_internal(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_goal_internal_with_started(
     goal: String,
     config: Config,
@@ -2102,7 +2106,7 @@ fn plan_goal_internal_with_started(
     on_partitioner_line: impl FnMut(&str),
     on_route: impl FnMut(&Route),
     on_planner_line: impl FnMut(&str),
-) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
+) -> PlanningResult {
     plan_goal_internal_with_options(
         goal,
         config,
@@ -2119,6 +2123,7 @@ fn plan_goal_internal_with_started(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_goal_internal_with_options(
     goal: String,
     config: Config,
@@ -2132,7 +2137,7 @@ fn plan_goal_internal_with_options(
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
     mut on_planner_line: impl FnMut(&str),
-) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
+) -> PlanningResult {
     if goal.trim().is_empty() {
         return Err(("Enter a goal".into(), None));
     }
@@ -3432,7 +3437,7 @@ fn plan_goal_internal_with_options(
                             // trusting a transcript window read while it was still writing.
                             notify_planning_output(&owner, &planning_id);
                         }
-                        Err((err, Some(failure_summary)))
+                        Err((err, Some(Box::new(failure_summary))))
                     }
                 }
             })()
@@ -3809,7 +3814,7 @@ fn reclaim_source_snapshot(service: &Arc<Service>, repository: &std::path::Path)
 mod publication_driver;
 
 enum DriverCompletion {
-    Node(Execution, Result<(String, String), String>),
+    Node(Box<Execution>, Result<(String, String), String>),
     Publication(Result<(), String>),
 }
 
@@ -4045,7 +4050,8 @@ fn drive(service: Arc<Service>) {
                         // Finish in the driver: the review's Finished event and
                         // its pending feedback barrier must be observed together
                         // before the next scheduler pass.
-                        let _ = completed_tx.send(DriverCompletion::Node(job.execution, result));
+                        let _ = completed_tx
+                            .send(DriverCompletion::Node(Box::new(job.execution), result));
                         if let Ok(mut generation) = service.drive_signal.0.lock() {
                             *generation += 1;
                             service.drive_signal.1.notify_one();
@@ -5333,6 +5339,7 @@ fn edit_planner(
     Ok(runtime.state.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn edit_node(
     node: String,
     execution_id: String,
@@ -6989,32 +6996,40 @@ fn handle_http_request(
                 serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
             });
 
-            let (goal, config, plan_mode, images, revision_run_id, continue_planning_id): (
-                String,
-                Config,
-                Option<String>,
-                Option<Vec<crate::model::ImageAttachment>>,
-                Option<String>,
-                Option<String>,
-            ) = match body_res.and_then(|body| {
+            struct StreamPlanRequest {
+                goal: String,
+                config: Config,
+                plan_mode: Option<String>,
+                images: Option<Vec<crate::model::ImageAttachment>>,
+                revision_run_id: Option<String>,
+                continue_planning_id: Option<String>,
+            }
+            let StreamPlanRequest {
+                goal,
+                config,
+                plan_mode,
+                images,
+                revision_run_id,
+                continue_planning_id,
+            } = match body_res.and_then(|body| {
                 let goal: String = argument(&body, "goal")?;
                 let config: Config = argument(&body, "config")?;
-                let mode: Option<String> = argument(&body, "mode").ok();
+                let plan_mode: Option<String> = argument(&body, "mode").ok();
                 let images: Option<Vec<crate::model::ImageAttachment>> =
                     argument(&body, "images").ok();
                 let revision_run_id: Option<String> = argument(&body, "revisionRunId").ok();
                 let continue_planning_id: Option<String> =
                     argument(&body, "continuePlanningId").ok();
-                Ok((
+                Ok(StreamPlanRequest {
                     goal,
                     config,
-                    mode,
+                    plan_mode,
                     images,
                     revision_run_id,
                     continue_planning_id,
-                ))
+                })
             }) {
-                Ok(tuple) => tuple,
+                Ok(parsed) => parsed,
                 Err(err) => {
                     let mut resp =
                         Response::from_string(serde_json::json!({"error": err}).to_string())
