@@ -364,7 +364,9 @@ impl RuntimeEvidence {
                 _ => None,
             })
             .collect();
-        let coverage = files.verify_recorded_runtime_files(version, single_root, &rooted)?;
+        let roots = BTreeMap::from([("workspace".into(), source.to_path_buf())]);
+        let coverage =
+            files.verify_recorded_runtime_files_at(version, single_root, &roots, &rooted)?;
         crate::workspace_view::verify_native_inputs(source, code_ref, &coverage.project)
     }
 
@@ -410,7 +412,7 @@ impl RuntimeEvidence {
         }
         if let Some(selectors) = &self.selectors {
             if self.schema == 3 {
-                let snapshot = files.runtime_paths(version, single_root)?;
+                let snapshot = files.runtime_paths(version, single_root, roots)?;
                 for selector in selectors
                     .iter()
                     .chain(self.external_selectors.iter().flatten())
@@ -435,7 +437,8 @@ impl RuntimeEvidence {
             .collect();
         // Owned bytes come from E, not from a possibly broken current prefix.
         // Explicitly excluded private caches are checked live, never restored.
-        let coverage = files.verify_recorded_runtime_files(version, single_root, &rooted)?;
+        let coverage =
+            files.verify_recorded_runtime_files_at(version, single_root, roots, &rooted)?;
         for (root, relative, blob) in coverage.caches {
             let root = roots
                 .get(&root)

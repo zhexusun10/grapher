@@ -16,7 +16,9 @@ impl Files {
         Ok(entries
             .values()
             .all(|entry| matches!(entry, Entry::Directory { .. }))
-            && untouched.iter().all(|name| self.is_cache(Path::new(name))))
+            && untouched
+                .iter()
+                .all(|name| self.is_cache_at(&root, Path::new(name))))
     }
 
     pub(crate) fn home_only_snapshot(&self, version: &str, home: &str) -> Result<bool, String> {

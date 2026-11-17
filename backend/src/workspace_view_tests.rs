@@ -692,11 +692,15 @@ fn legacy_foreign_ownership_is_inherited_without_privileged_chown() {
         let count = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
         assert!(count >= 0);
         groups.truncate(count as usize);
-        if groups
+        let changed = groups
             .into_iter()
             .filter(|gid| *gid != upstream_meta.gid())
-            .any(|gid| std::os::unix::fs::chown(&upstream_file, None, Some(gid)).is_ok())
-        {
+            .any(|gid| {
+                std::os::unix::fs::chown(&upstream_file, None, Some(gid)).is_ok()
+                    && fs::symlink_metadata(&upstream_file)
+                        .is_ok_and(|metadata| metadata.gid() != upstream_meta.gid())
+            });
+        if changed {
             assert_ne!(
                 fs::symlink_metadata(&upstream_file).unwrap().gid(),
                 upstream_meta.gid()

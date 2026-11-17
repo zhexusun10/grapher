@@ -226,7 +226,7 @@ fn strip_root_prefix(path: &str, root: &str) -> Option<String> {
     if norm_root.is_empty() {
         return None;
     }
-    if cfg!(windows) || cfg!(target_os = "macos") {
+    if crate::path_identity::case_insensitive_volume(Path::new(&norm_root)) {
         let path_lower = path.to_lowercase();
         let root_lower = norm_root.to_lowercase();
         if path_lower == root_lower {
@@ -248,6 +248,19 @@ fn strip_root_prefix(path: &str, root: &str) -> Option<String> {
         let prefix = format!("{norm_root}/");
         if let Some(rest) = path.strip_prefix(&prefix) {
             return Some(rest.to_string());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if Path::new(path).is_absolute() && Path::new(&norm_root).is_absolute() {
+        let candidate = Path::new(path);
+        let root = Path::new(&norm_root);
+        for ancestor in candidate.ancestors() {
+            if crate::path_identity::same_path(ancestor, root) {
+                return candidate
+                    .strip_prefix(ancestor)
+                    .ok()
+                    .map(|relative| relative.to_string_lossy().into_owned());
+            }
         }
     }
     None
@@ -1965,6 +1978,33 @@ mod persistence_bench;
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalizes_workspace_paths_through_macos_root_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("Repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("file.txt"), "project").unwrap();
+        let alias = temp.path().join("repository-alias");
+        std::os::unix::fs::symlink(&repository, &alias).unwrap();
+
+        assert_eq!(
+            normalize_workspace_path(
+                &alias.join("file.txt").to_string_lossy(),
+                &repository.to_string_lossy(),
+                &repository.to_string_lossy()
+            ),
+            Some("file.txt".into())
+        );
+        assert_eq!(
+            strip_root_prefix(
+                &alias.join("deleted.txt").to_string_lossy(),
+                &repository.to_string_lossy()
+            ),
+            Some("deleted.txt".into())
+        );
+    }
+
     #[test]
     fn normalizes_paths_and_strips_worktrees() {
         assert_eq!(
@@ -1993,7 +2033,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(windows)]
     #[test]
     fn normalizes_unicode_root_without_using_case_folded_byte_offsets() {
         for (path, root, expected) in [
@@ -2010,6 +2050,36 @@ mod tests {
             );
         }
         assert_eq!(strip_root_prefix("/repo/İ-other/file.txt", "/repo/İ"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_root_prefix_case_rules_follow_the_actual_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("MixedCase");
+        fs::create_dir(&root).unwrap();
+        let lower = temp.path().join("mixedcase");
+        let insensitive = crate::path_identity::case_insensitive_volume(&root);
+        assert_eq!(
+            normalize_workspace_path(
+                &lower.join("missing.txt").to_string_lossy(),
+                &root.to_string_lossy(),
+                &root.to_string_lossy(),
+            ),
+            insensitive.then(|| "missing.txt".into())
+        );
+
+        let unicode_root = temp.path().join("İ");
+        fs::create_dir(&unicode_root).unwrap();
+        let unicode_path = temp.path().join("i\u{307}/文件.txt");
+        assert_eq!(
+            strip_root_prefix(
+                &unicode_path.to_string_lossy(),
+                &unicode_root.to_string_lossy()
+            )
+            .as_deref(),
+            crate::path_identity::case_insensitive_volume(&unicode_root).then_some("文件.txt")
+        );
     }
 
     #[test]

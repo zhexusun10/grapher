@@ -58,6 +58,13 @@ impl RootScope {
         }
         Ok(())
     }
+
+    fn validate_at(&self, root: &Path) -> Result<(), String> {
+        self.validate()?;
+        let scopes = self.scopes.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let caches = self.caches.iter().map(PathBuf::from).collect::<Vec<_>>();
+        workspace::validate_scope_layout_at(root, &scopes, &caches)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,8 +200,8 @@ impl Files {
         let tracked = workspace::project_git(path, &["ls-files", "-z", "--cached"])?;
         for name in tracked.split('\0').filter(|name| !name.is_empty()) {
             if root.layout.scopes.iter().any(|scope| {
-                workspace::scope_contains(Path::new(name), Path::new(scope))
-                    || workspace::scope_contains(Path::new(scope), Path::new(name))
+                workspace::scope_contains_at(path, Path::new(name), Path::new(scope))
+                    || workspace::scope_contains_at(path, Path::new(scope), Path::new(name))
             }) {
                 return Err(format!(
                     "Managed environment scope conflicts with tracked path {name}"
@@ -280,6 +287,7 @@ impl Files {
             let root = paths[label]
                 .canonicalize()
                 .map_err(|error| error.to_string())?;
+            layout.validate_at(&root)?;
             let mut entries = Entries::new();
             for path in files.scoped_paths(&root)? {
                 files.collect(&root, &path, &mut entries, collection)?;
@@ -357,6 +365,10 @@ impl Files {
         self.check_native_project_scopes(paths, &snapshot)?;
         let mut plans = Vec::new();
         for (label, root) in snapshot.roots {
+            let target = paths[&label]
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            root.layout.validate_at(&target)?;
             let files = self.for_root(&root.layout);
             let plan = files
                 .plan_materialization(&paths[&label], root.entries, None, false)?

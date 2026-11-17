@@ -204,6 +204,56 @@ fn legacy_predecessor_does_not_delete_or_traverse_a_skipped_live_link() {
 }
 
 #[test]
+fn cache_exclusions_follow_case_behavior_of_the_workspace_volume() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join("managed/Cache")).unwrap();
+    fs::write(workspace.join("managed/package"), "environment").unwrap();
+    fs::write(workspace.join("managed/Cache/blob"), "cache").unwrap();
+    let insensitive = crate::path_identity::case_insensitive_volume(&workspace);
+    let files = Files::environment(
+        &temp.path().join("environment-files"),
+        &["managed".into()],
+        &["managed/cache".into()],
+    )
+    .unwrap();
+    let version = Uuid::new_v4().to_string();
+    files.capture(&workspace, &version, "", &[]).unwrap();
+
+    let entries = files.load(&version).unwrap().entries;
+    assert!(entries.contains_key("managed/package"));
+    assert_eq!(entries.contains_key("managed/Cache/blob"), !insensitive);
+    assert_eq!(
+        entries
+            .keys()
+            .any(|name| name.starts_with("managed/Cache/")),
+        !insensitive
+    );
+}
+
+#[test]
+fn overlapping_scope_aliases_are_rejected_only_when_the_workspace_volume_aliases_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join("managed")).unwrap();
+    let insensitive = crate::path_identity::case_insensitive_volume(&workspace);
+    if !insensitive {
+        fs::create_dir_all(workspace.join("Managed")).unwrap();
+        fs::write(workspace.join("managed/lower"), "lower").unwrap();
+        fs::write(workspace.join("Managed/upper"), "upper").unwrap();
+    }
+    let files = Files::environment(
+        &temp.path().join("environment-files"),
+        &["managed".into(), "Managed".into()],
+        &[],
+    )
+    .unwrap();
+    let version = Uuid::new_v4().to_string();
+    let result = files.capture(&workspace, &version, "", &[]);
+    assert_eq!(result.is_err(), insensitive, "{result:?}");
+}
+
+#[test]
 fn nested_cache_paths_are_left_out_of_the_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

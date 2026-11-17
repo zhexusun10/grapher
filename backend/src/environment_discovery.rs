@@ -160,7 +160,7 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
         ".git-config",
     ]
     .iter()
-    .any(|scope| workspace::scope_contains(Path::new(&name), Path::new(scope)))
+    .any(|scope| workspace::scope_contains_at(&root, Path::new(&name), Path::new(scope)))
     {
         return Err("Environment prefix overlaps Runtime/engine state or excluded caches".into());
     }
@@ -1477,8 +1477,9 @@ pub(crate) fn resolve_for_policy_with_state(
                     ".git-config",
                 ]
                 .iter()
-                .any(|scope| workspace::scope_contains(Path::new(&relative), Path::new(scope)))
-                {
+                .any(|scope| {
+                    workspace::scope_contains_at(root, Path::new(&relative), Path::new(scope))
+                }) {
                     continue;
                 }
                 if let Ok(Some(_environment_kind)) = kind(&prefix) {

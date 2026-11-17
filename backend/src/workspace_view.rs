@@ -363,7 +363,7 @@ fn walk_scoped_with_nested(
         // Excluded scopes (managed environments/caches) and untracked generated
         // artifacts are not part of the project view, so a scoped capture never
         // inspects their contents.
-        if !git && workspace::collection_excluded(&path, tracked, exclusions) {
+        if !git && workspace::collection_excluded_at(root, &path, tracked, exclusions) {
             continue;
         }
         // Lock files are volatile Git storage, not the source's repository
@@ -2319,7 +2319,7 @@ fn prepare_fresh_base_checkout(
 ) -> Result<Option<View>, String> {
     let tracked = workspace::project_tracked_paths(path);
     for (name, entry) in view.entries.iter().rev() {
-        if workspace::collection_excluded(Path::new(name), &tracked, exclusions) {
+        if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
             let target = path.join(name);
             if fs::symlink_metadata(&target).is_ok() {
                 remove_entry(entry, &target)?;
@@ -2329,7 +2329,9 @@ fn prepare_fresh_base_checkout(
     let expected: BTreeMap<_, _> = view
         .entries
         .iter()
-        .filter(|(name, _)| !workspace::collection_excluded(Path::new(name), &tracked, exclusions))
+        .filter(|(name, _)| {
+            !workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions)
+        })
         .map(|(name, entry)| (name.clone(), entry.clone()))
         .collect();
     for (name, entry) in &expected {
@@ -2518,7 +2520,7 @@ pub(crate) fn prepare(
             }
             // A recorded tree may still carry generated artifacts from before
             // this policy; skip them here so the comparison matches the scan.
-            if workspace::collection_excluded(Path::new(name), &tracked, exclusions) {
+            if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
                 continue;
             }
             let target = path.join(name);
@@ -3348,7 +3350,7 @@ pub(crate) fn seal_composed_view(
         }) {
             return Err("Unsafe graph project path".into());
         }
-        if workspace::collection_excluded(Path::new(name), &tracked, exclusions) {
+        if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
             continue;
         }
         if fields[2].len() != 40 {

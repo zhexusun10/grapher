@@ -106,7 +106,7 @@ pub(crate) fn path_key(path: &Path) -> String {
     {
         #[cfg(target_os = "macos")]
         {
-            if macos_case_insensitive(Path::new(&text)) {
+            if case_insensitive_volume(Path::new(&text)) {
                 text.to_lowercase()
             } else {
                 text
@@ -151,8 +151,28 @@ fn macos_case_insensitive(path: &Path) -> bool {
         .is_ok_and(|other| original.dev() == other.dev() && original.ino() == other.ino())
 }
 
-/// Cheap comparison key for relative workspace paths. Avoids filesystem
-/// queries in per-file snapshot loops; callers use path_key for absolute paths.
+/// Whether lexical aliases should fold case on this path's volume. Relative
+/// names without a root must not guess this property.
+pub(crate) fn case_insensitive_volume(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        true
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_case_insensitive(path)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Cheap comparison key for relative workspace paths. Relative names have no
+/// volume context, so preserve case on POSIX; callers that have absolute paths
+/// use `path_key`, which applies the host volume's actual case rules.
 pub(crate) fn lexical_key(path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
     #[cfg(windows)]
@@ -163,14 +183,7 @@ pub(crate) fn lexical_key(path: &Path) -> String {
     }
     #[cfg(not(windows))]
     {
-        #[cfg(target_os = "macos")]
-        {
-            text.to_lowercase()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            text
-        }
+        text
     }
 }
 
@@ -305,6 +318,73 @@ mod tests {
             )));
         }
         assert!(!is_runtime_metadata_name(OsStr::new("src")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn relative_scope_checks_preserve_case_on_case_sensitive_volumes() {
+        let temp = tempfile::tempdir().unwrap();
+        let upper = temp.path().join("Managed");
+        let lower = temp.path().join("managed");
+        fs::create_dir(&upper).unwrap();
+        let insensitive = lower.exists();
+        assert_eq!(
+            crate::workspace::scope_contains_at(
+                temp.path(),
+                Path::new("managed/file"),
+                Path::new("Managed")
+            ),
+            insensitive
+        );
+        // Relative spellings without a filesystem root preserve case instead
+        // of assuming the default macOS volume behavior.
+        if insensitive {
+            return;
+        }
+
+        assert!(!crate::workspace::scope_contains(
+            Path::new("managed/file"),
+            Path::new("Managed")
+        ));
+        assert!(crate::workspace::scope_contains(
+            Path::new("Managed/file"),
+            Path::new("Managed")
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn relative_scope_checks_follow_macos_unicode_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let nfc = "é";
+        let nfd = "e\u{301}";
+        let directory = temp.path().join(nfc);
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("child"), "scoped").unwrap();
+
+        assert!(crate::workspace::scope_contains_at(
+            temp.path(),
+            Path::new(&format!("{nfd}/child")),
+            Path::new(nfc)
+        ));
+        assert!(!crate::workspace::scope_contains_at(
+            temp.path(),
+            Path::new(&format!("{nfd}x/child")),
+            Path::new(nfc)
+        ));
+
+        let upper = "Étage";
+        let lower = "étage";
+        let insensitive = crate::path_identity::case_insensitive_volume(temp.path());
+        fs::create_dir(temp.path().join(upper)).unwrap();
+        assert_eq!(
+            crate::workspace::scope_contains_at(
+                temp.path(),
+                Path::new(&format!("{lower}/child")),
+                Path::new(upper)
+            ),
+            insensitive
+        );
     }
 
     #[cfg(target_os = "macos")]

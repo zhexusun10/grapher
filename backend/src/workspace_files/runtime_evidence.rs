@@ -11,10 +11,21 @@ impl Files {
     /// Verify native files captured in E. Explicit caches remain live inputs;
     /// ordinary W files remain on the existing codeRef channel, never a second
     /// environment delivery channel. Recorded absence INSIDE an E scope fails.
+    #[cfg(test)]
     pub(crate) fn verify_recorded_runtime_files(
         &self,
         version: &str,
         single_root: &str,
+        expected: &[(&str, &str, &str)],
+    ) -> Result<RuntimeFileCoverage, String> {
+        self.verify_recorded_runtime_files_at(version, single_root, &BTreeMap::new(), expected)
+    }
+
+    pub(crate) fn verify_recorded_runtime_files_at(
+        &self,
+        version: &str,
+        single_root: &str,
+        roots: &BTreeMap<String, PathBuf>,
         expected: &[(&str, &str, &str)],
     ) -> Result<RuntimeFileCoverage, String> {
         let value = self.load(version)?;
@@ -27,6 +38,12 @@ impl Files {
             relative(path)?;
             self.blob_path(wanted_blob)?;
             let input = || (root.into(), path.into(), wanted_blob.into());
+            let contains = |path: &Path, scope: &Path| {
+                roots.get(root).map_or_else(
+                    || workspace::scope_contains(path, scope),
+                    |base| workspace::scope_contains_at(base, path, scope),
+                )
+            };
             let entries = if let Some(snapshot) = &value.rooted {
                 let frame = match snapshot.roots.get(root) {
                     Some(frame) => frame,
@@ -44,12 +61,17 @@ impl Files {
                     .layout
                     .caches
                     .iter()
-                    .any(|cache| workspace::scope_contains(Path::new(path), Path::new(cache)))
+                    .any(|cache| contains(Path::new(path), Path::new(cache)))
                 {
                     coverage.caches.push(input());
                     continue;
                 }
-                if !frame.layout.covers(path) {
+                if !frame
+                    .layout
+                    .scopes
+                    .iter()
+                    .any(|scope| contains(Path::new(path), Path::new(scope)))
+                {
                     if root == "workspace" {
                         coverage.project.push(input());
                         continue;
@@ -65,15 +87,16 @@ impl Files {
                     }
                     return Err(format!("Single-root snapshot has no byte evidence for native input {root}:{path}; refusing another root's same-named file"));
                 }
-                if self.is_cache(Path::new(path)) {
+                if roots.get(root).map_or_else(
+                    || self.is_cache(Path::new(path)),
+                    |base| self.is_cache_at(base, Path::new(path)),
+                ) {
                     coverage.caches.push(input());
                     continue;
                 }
                 if root == "workspace"
                     && self.scopes.as_ref().is_some_and(|scopes| {
-                        !scopes
-                            .iter()
-                            .any(|scope| workspace::scope_contains(Path::new(path), scope))
+                        !scopes.iter().any(|scope| contains(Path::new(path), scope))
                     })
                 {
                     coverage.project.push(input());

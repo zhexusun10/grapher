@@ -654,8 +654,8 @@ impl EnvironmentConfig {
         let tracked = workspace::working_tree_git(path, &["ls-files", "-z", "--cached"])?;
         for name in tracked.split('\0').filter(|s| !s.is_empty()) {
             if self.exclusions().iter().any(|scope| {
-                workspace::scope_contains(Path::new(name), Path::new(scope))
-                    || workspace::scope_contains(Path::new(scope), Path::new(name))
+                workspace::scope_contains_at(path, Path::new(name), Path::new(scope))
+                    || workspace::scope_contains_at(path, Path::new(scope), Path::new(name))
             }) {
                 return Err(format!(
                     "Managed environment/cache conflicts with tracked file: {name}"
@@ -1474,8 +1474,12 @@ impl Environments {
                         .split('\0')
                         .filter(|name| !name.is_empty())
                         .find(|name| {
-                            workspace::scope_contains(Path::new(name), Path::new(scope))
-                                || workspace::scope_contains(Path::new(scope), Path::new(name))
+                            workspace::scope_contains_at(path, Path::new(name), Path::new(scope))
+                                || workspace::scope_contains_at(
+                                    path,
+                                    Path::new(scope),
+                                    Path::new(name),
+                                )
                         })
                 {
                     return Err(format!(

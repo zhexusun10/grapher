@@ -36,6 +36,26 @@ pub(super) fn fixture() -> (
     (temp, files, paths, layouts)
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn rooted_scope_aliases_are_checked_against_each_actual_root_volume() {
+    let (_temp, files, paths, mut layouts) = fixture();
+    let root = &paths["workspace"];
+    let insensitive = crate::path_identity::case_insensitive_volume(root);
+    if !insensitive {
+        fs::create_dir_all(root.join("ENV")).unwrap();
+        fs::write(root.join("ENV/other"), "distinct scope").unwrap();
+    }
+    layouts.insert(
+        "workspace".into(),
+        RootScope::normalized(vec!["env".into(), "ENV".into()], vec![]),
+    );
+
+    let version = Uuid::new_v4().to_string();
+    let result = files.capture_roots(&paths, &layouts, &version, &[]);
+    assert_eq!(result.is_err(), insensitive, "{result:?}");
+}
+
 #[test]
 fn rooted_snapshot_restores_distinct_roots_absence_and_keeps_caches() {
     let (_temp, files, paths, layouts) = fixture();

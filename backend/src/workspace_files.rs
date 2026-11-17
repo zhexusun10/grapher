@@ -152,17 +152,6 @@ fn excluded(path: &Path) -> bool {
     })
 }
 
-/// Compare a workspace-relative path against configured cache paths with one
-/// separator style and, on Windows, one case so `INetCache`/`inetcache` match.
-fn cache_key(value: &Path) -> String {
-    let text = value.to_string_lossy().replace('\\', "/");
-    if cfg!(windows) {
-        text.to_lowercase()
-    } else {
-        text
-    }
-}
-
 fn relative(value: &str) -> Result<&Path, String> {
     let path = Path::new(value);
     if value.is_empty()
@@ -230,22 +219,20 @@ impl Files {
         self
     }
 
-    fn is_excluded(&self, path: &Path) -> bool {
-        excluded(path) || self.is_cache(path)
+    fn is_cache(&self, path: &Path) -> bool {
+        self.caches
+            .iter()
+            .any(|cache| workspace::scope_contains(path, cache))
     }
 
-    /// A cache may be a top-level scope or a subtree inside one (for example
-    /// the browser caches under the redirected `.agent-home`). Anything at or
-    /// below a cache path is left out of the snapshot untouched.
-    fn is_cache(&self, path: &Path) -> bool {
-        let name = cache_key(path);
-        self.caches.iter().any(|cache| {
-            let cache = cache_key(cache);
-            name == cache
-                || name
-                    .strip_prefix(cache.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
+    fn is_cache_at(&self, root: &Path, path: &Path) -> bool {
+        self.caches
+            .iter()
+            .any(|cache| workspace::scope_contains_at(root, path, cache))
+    }
+
+    fn is_excluded(&self, root: &Path, path: &Path) -> bool {
+        excluded(path) || self.is_cache_at(root, path)
     }
 
     fn save_version(&self, version: &str, mut value: Version) -> Result<(), String> {
@@ -508,7 +495,7 @@ impl Files {
                 path.display()
             ));
         }
-        if self.is_excluded(name) || path == self.excluded_data {
+        if self.is_excluded(root, name) || path == self.excluded_data {
             collection.note_untouched(name)?;
             return Ok(());
         }
@@ -554,7 +541,7 @@ impl Files {
             if let Ok(local) = resolved.strip_prefix(root) {
                 let local = path_name(local)?;
                 relative(&local)?;
-                if self.is_excluded(Path::new(&local)) {
+                if self.is_excluded(root, Path::new(&local)) {
                     return Err(format!("Workspace link crosses a managed scope: {name}"));
                 }
                 Entry::Link {
@@ -630,6 +617,7 @@ impl Files {
             .scopes
             .as_ref()
             .ok_or("Managed environment storage requires explicit scopes")?;
+        workspace::validate_scope_layout_at(workspace, scopes, &self.caches)?;
         let mut paths = Vec::new();
         for scope in scopes {
             let path = workspace.join(scope);
@@ -914,7 +902,13 @@ impl Files {
         previous: Option<&str>,
         reuse: bool,
     ) -> Result<Option<Materialization>, String> {
-        if desired.keys().any(|name| self.is_excluded(Path::new(name))) {
+        if let Some(scopes) = &self.scopes {
+            workspace::validate_scope_layout_at(workspace, scopes, &self.caches)?;
+        }
+        if desired
+            .keys()
+            .any(|name| self.is_excluded(workspace, Path::new(name)))
+        {
             return Err("Workspace file snapshot overlaps an excluded managed scope".into());
         }
         let tracked = if self.project_index {
@@ -1054,7 +1048,7 @@ impl Files {
                 path.strip_prefix(&root)
                     .map_err(|error| error.to_string())?,
             )?;
-            if tracked.contains(name.as_str()) || self.is_excluded(Path::new(&name)) {
+            if tracked.contains(name.as_str()) || self.is_excluded(&root, Path::new(&name)) {
                 continue;
             }
             // Never traverse a destination junction/link to delete another tree.

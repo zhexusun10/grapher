@@ -297,17 +297,19 @@ mod workspace_guard_tests {
             "linux",
             |name| (name == "HOME").then(|| PathBuf::from("/home/test"))
         ));
-        // Default macOS volumes are case-insensitive; canonicalize() preserves
-        // the caller's spelling, so the desktop guard must fold case itself.
-        assert!(is_desktop_workspace(
-            &PathBuf::from("/Users/test/desktop"),
-            "macos",
-            |name| (name == "HOME").then(|| PathBuf::from("/Users/test"))
-        ));
+        let mac_home = tempfile::tempdir().unwrap();
+        let mac_desktop = mac_home.path().join("Desktop");
+        fs::create_dir(&mac_desktop).unwrap();
+        let mac_env = |name: &str| (name == "HOME").then(|| mac_home.path().to_path_buf());
+        let lower_spelling = mac_home.path().join("desktop");
+        assert_eq!(
+            is_desktop_workspace(&lower_spelling, "macos", mac_env),
+            crate::path_identity::same_path(&lower_spelling, &mac_desktop)
+        );
         assert!(!is_desktop_workspace(
-            &PathBuf::from("/Users/test/Desktop/Project"),
+            &mac_desktop.join("Project"),
             "macos",
-            |name| (name == "HOME").then(|| PathBuf::from("/Users/test"))
+            mac_env
         ));
     }
 
@@ -372,14 +374,18 @@ fn is_desktop_workspace(
             }
         }
     }
+    if platform == "macos" {
+        return roots
+            .iter()
+            .any(|root| crate::path_identity::same_path(candidate, root));
+    }
     let normalize = |path: &Path| {
         let text = path.to_string_lossy();
         let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
         let text = text.replace('\\', "/");
         let text = text.trim_end_matches('/').to_string();
-        // Windows filesystems and default macOS APFS volumes are
-        // case-insensitive, while canonicalize() keeps the input spelling.
-        if platform == "windows" || platform == "macos" {
+        // Windows path bindings may differ only in case and separators.
+        if platform == "windows" {
             text.to_lowercase()
         } else {
             text
@@ -2885,6 +2891,80 @@ pub(crate) fn scope_contains(path: &Path, scope: &Path) -> bool {
     Path::new(&key(path)).starts_with(Path::new(&key(scope)))
 }
 
+/// Compare relative paths using the case behavior of their owning filesystem.
+/// Callers with only serialized relative names use `scope_contains` and retain
+/// exact POSIX spelling rather than guessing that every macOS volume folds case.
+pub(crate) fn scope_contains_at(root: &Path, path: &Path, scope: &Path) -> bool {
+    if path.is_absolute() || scope.is_absolute() {
+        return scope_contains(path, scope);
+    }
+    if path.starts_with(scope) {
+        return true;
+    }
+    if !cfg!(target_os = "macos") {
+        return Path::new(&crate::path_identity::lexical_key(path))
+            .starts_with(Path::new(&crate::path_identity::lexical_key(scope)));
+    }
+    let insensitive = crate::path_identity::case_insensitive_volume(root);
+    if insensitive {
+        let key = |value: &Path| value.to_string_lossy().to_lowercase();
+        if Path::new(&key(path)).starts_with(Path::new(&key(scope))) {
+            return true;
+        }
+    }
+    // macOS filesystems also resolve canonically equivalent Unicode spellings
+    // (for example composed and decomposed `é`). `Path::starts_with` and case
+    // folding alone cannot represent that rule. Only pay for filesystem
+    // identity lookups when the scope itself has a non-ASCII component.
+    if !scope.to_string_lossy().is_ascii() {
+        if let (Ok(path), Ok(scope)) = (
+            crate::path_identity::actual_path(&root.join(path)),
+            crate::path_identity::actual_path(&root.join(scope)),
+        ) {
+            return path.starts_with(scope);
+        }
+    }
+    false
+}
+
+pub(crate) fn validate_scope_layout_at(
+    root: &Path,
+    scopes: &[PathBuf],
+    caches: &[PathBuf],
+) -> Result<(), String> {
+    for (index, scope) in scopes.iter().enumerate() {
+        if scopes[..index].iter().any(|other| {
+            scope_contains_at(root, scope, other) || scope_contains_at(root, other, scope)
+        }) {
+            return Err(format!(
+                "Overlapping environment scopes on this filesystem: {}",
+                scope.display()
+            ));
+        }
+    }
+    for (index, cache) in caches.iter().enumerate() {
+        if caches[..index].iter().any(|other| {
+            scope_contains_at(root, cache, other) || scope_contains_at(root, other, cache)
+        }) {
+            return Err(format!(
+                "Overlapping environment caches on this filesystem: {}",
+                cache.display()
+            ));
+        }
+        for scope in scopes {
+            let inside = scope_contains_at(root, cache, scope);
+            let contains = scope_contains_at(root, scope, cache);
+            if (inside || contains) && !(inside && !contains) {
+                return Err(format!(
+                    "Environment cache must be strictly nested inside a managed scope on this filesystem: {}",
+                    cache.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Rebuildable tool caches, not installed dependencies or runnable output.
 /// A directory name does not prove that a manifest/registry can reproduce its
 /// bytes. node_modules, .next, dist/build/out/target and standalone bytecode
@@ -2945,7 +3025,26 @@ pub(crate) fn project_tracked_paths(root: &Path) -> std::collections::BTreeSet<S
 /// Managed environment/cache scopes are always excluded. A generated artifact
 /// is excluded only when the project's own Git does not track it, so committed
 /// dependencies, build output or bytecode stay authored project content.
+#[cfg(test)]
 pub(crate) fn collection_excluded(
+    relative: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    exclusions: &[String],
+) -> bool {
+    collection_excluded_inner(None, relative, tracked, exclusions)
+}
+
+pub(crate) fn collection_excluded_at(
+    root: &Path,
+    relative: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    exclusions: &[String],
+) -> bool {
+    collection_excluded_inner(Some(root), relative, tracked, exclusions)
+}
+
+fn collection_excluded_inner(
+    root: Option<&Path>,
     relative: &Path,
     tracked: &std::collections::BTreeSet<String>,
     exclusions: &[String],
@@ -2965,10 +3064,12 @@ pub(crate) fn collection_excluded(
     {
         return true;
     }
-    if exclusions
-        .iter()
-        .any(|scope| scope_contains(relative, Path::new(scope)))
-    {
+    if exclusions.iter().any(|scope| {
+        root.map_or_else(
+            || scope_contains(relative, Path::new(scope)),
+            |root| scope_contains_at(root, relative, Path::new(scope)),
+        )
+    }) {
         return true;
     }
     let portable = relative.to_string_lossy().replace('\\', "/");
@@ -3034,7 +3135,7 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
         let tracked = project_tracked_paths(path);
         let mut status = raw;
         for name in ignored.split('\0').filter(|s| !s.is_empty()) {
-            if status_path_excluded(name, None, None, exclusions, &tracked) {
+            if status_path_excluded(name, Some(path), None, exclusions, &tracked) {
                 continue;
             }
             status.push_str(&format!("!! {name}\0"));
@@ -3087,7 +3188,7 @@ fn restore_tracked_generated(
             is_generated_artifact(Path::new(name))
                 && !exclusions
                     .iter()
-                    .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+                    .any(|scope| scope_contains_at(path, Path::new(name), Path::new(scope)))
         })
         .collect();
     if generated.is_empty() {
@@ -3139,10 +3240,12 @@ fn status_path_excluded(
     if crate::path_identity::is_runtime_metadata_path(Path::new(name)) {
         return true;
     }
-    if exclusions
-        .iter()
-        .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
-    {
+    if exclusions.iter().any(|scope| {
+        root.map_or_else(
+            || scope_contains(Path::new(name), Path::new(scope)),
+            |root| scope_contains_at(root, Path::new(name), Path::new(scope)),
+        )
+    }) {
         return true;
     }
     if is_generated_artifact(Path::new(name)) && !tracked.contains(&name.replace('\\', "/")) {
@@ -3468,7 +3571,7 @@ pub(crate) fn copy_ordinary_files(
             })
             || exclusions
                 .iter()
-                .any(|scope| scope_contains(relative, Path::new(scope)))
+                .any(|scope| scope_contains_at(&source, relative, Path::new(scope)))
             || runtime_data.as_ref().is_some_and(|data| {
                 data != &source
                     && data.starts_with(&source)

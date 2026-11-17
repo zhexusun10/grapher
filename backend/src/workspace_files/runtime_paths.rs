@@ -16,6 +16,7 @@ pub(crate) struct RuntimePaths {
     single_root: String,
     scopes: Option<Vec<PathBuf>>,
     caches: Vec<PathBuf>,
+    roots: BTreeMap<String, PathBuf>,
 }
 
 impl Files {
@@ -23,12 +24,14 @@ impl Files {
         &self,
         version: &str,
         single_root: &str,
+        roots: &BTreeMap<String, PathBuf>,
     ) -> Result<RuntimePaths, String> {
         Ok(RuntimePaths {
             value: self.load(version)?,
             single_root: single_root.into(),
             scopes: self.scopes.clone(),
             caches: self.caches.clone(),
+            roots: roots.clone(),
         })
     }
 }
@@ -51,8 +54,14 @@ impl RuntimePaths {
                 ))
             }
         };
-        let covered = |scope: &Path| workspace::scope_contains(relative_path, scope);
-        let ancestor = |scope: &Path| workspace::scope_contains(scope, relative_path);
+        let contains = |path: &Path, scope: &Path| {
+            self.roots.get(root).map_or_else(
+                || workspace::scope_contains(path, scope),
+                |base| workspace::scope_contains_at(base, path, scope),
+            )
+        };
+        let covered = |scope: &Path| contains(relative_path, scope);
+        let ancestor = |scope: &Path| contains(scope, relative_path);
         let entries = if let Some(snapshot) = &self.value.rooted {
             let Some(frame) = snapshot.roots.get(root) else {
                 return outside();
@@ -65,7 +74,12 @@ impl RuntimePaths {
             {
                 return Ok(RuntimePath::Live);
             }
-            if !frame.layout.covers(path) {
+            if !frame
+                .layout
+                .scopes
+                .iter()
+                .any(|scope| covered(Path::new(scope)))
+            {
                 if frame
                     .layout
                     .scopes
