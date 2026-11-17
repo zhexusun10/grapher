@@ -9,11 +9,28 @@ pub(crate) enum CopyKind {
 }
 
 pub(crate) fn copy(source: &Path, destination: &Path) -> Result<CopyKind, String> {
-    if fs::symlink_metadata(destination).is_ok() {
-        return Err(format!(
-            "Private copy destination already exists: {}",
-            destination.display()
-        ));
+    copy_with_clone(source, destination, clone)
+}
+
+fn copy_with_clone(
+    source: &Path,
+    destination: &Path,
+    clone_file: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<CopyKind, String> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(format!(
+                "Private copy destination already exists: {}",
+                destination.display()
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect private copy destination {}: {error}",
+                destination.display()
+            ));
+        }
     }
     let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
     if !metadata.is_file() {
@@ -27,8 +44,15 @@ pub(crate) fn copy(source: &Path, destination: &Path) -> Result<CopyKind, String
         fs::copy(source, destination).map_err(|e| e.to_string())?;
         return Ok(CopyKind::Bytes);
     }
-    match clone(source, destination) {
+    match clone_file(source, destination) {
         Ok(()) => Ok(CopyKind::Clone),
+        // Both macOS `clonefile` and the Linux O_EXCL destination creation can
+        // lose a race to another writer. Never remove the winner's new file in
+        // the generic clone-error cleanup below.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(format!(
+            "Private copy destination already exists: {}",
+            destination.display()
+        )),
         Err(error) if unsupported(&error) => {
             // Failed native clones may have created an empty/partial destination.
             match fs::remove_file(destination) {
@@ -323,6 +347,22 @@ mod tests {
         assert!(copy(&source, &a).is_err());
         assert_eq!(fs::read(&a).unwrap(), b"private replacement");
         eprintln!("Native filesystem private copy outcome: {kind:?}");
+    }
+
+    #[test]
+    fn clone_collision_does_not_remove_the_concurrent_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        fs::write(&source, vec![7; 128 * 1024]).unwrap();
+
+        let result = copy_with_clone(&source, &destination, |_, target| {
+            fs::write(target, b"concurrent writer").unwrap();
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        });
+
+        assert!(result.unwrap_err().contains("destination already exists"));
+        assert_eq!(fs::read(destination).unwrap(), b"concurrent writer");
     }
 
     #[cfg(windows)]
