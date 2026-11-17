@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.9] - 2026-11-17
+
+**Release highlights:** Planner now has a unified `edit_graph`/`read_graph` workflow with atomic node-and-edge edits, final-graph validation, structured diagnostics, safe overflow reports and revision-impact warnings. The bundled Planner tools and prompts were refined to produce more complete, dependency-aware workstreams and clearer workspace handoffs—better than ever for complex coding tasks.
+
+`pi-better-web-search` is upgraded to 1.0.3. It provides Pi's best web-search experience to date: provider-native raw search results, URL analysis, automatic fallback and dedicated Keenable, Exa, Perplexity and DeepSeek routes. The supported providers include the leading entries highlighted by the [Artificial Analysis Search Index](https://artificialanalysis.ai/agents/search-api); see the [pi-better-web-search project](https://github.com/zhexusun10/pi-better-web-search) for provider details and methodology.
+
+**Breaking persisted-format change:** `v1.8.9` is the last release that supports the legacy database generation. Grapher `v1.9.9` does not migrate or replay old Run, database, session or workspace stores. Keep `v1.8.9` available for those historical records; `v1.9.9` preserves incompatible data and starts a separate current-format store instead.
+
 **Upgrade note:** Update the frontend, backend and engine adapter together. This release introduces a breaking persisted-format boundary: old Run, database, session and workspace generations are not migrated or replayed. On a known database-format mismatch, startup preserves the original data and automatically creates or reuses a separate current-format directory such as `.grapher/format-1/`; the console reports its path and a durable selection record preserves it across restarts. New history starts empty, and the original records remain available to their original application version. Current project views use schema 6 with native ACLs, Graph nodes require `id`, and managed environment records require versioned manifests, launches and explicit ownership. Installed dependencies participate in project snapshots, increasing storage and preparation costs; missing historical evidence is not backfilled from live source files.
 
 ### Added
