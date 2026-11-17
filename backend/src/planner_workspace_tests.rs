@@ -205,10 +205,7 @@ fn complete(runtime: &mut Runtime, mut job: Job) -> Execution {
         .clone()
 }
 
-fn turn(
-    service: &Arc<Service>,
-    config: &Config,
-) -> PlanningResult {
+fn turn(service: &Arc<Service>, config: &Config) -> PlanningResult {
     let run = service.runtime.lock().unwrap().state.run_id.clone();
     plan_goal_internal(
         "additional information".into(),

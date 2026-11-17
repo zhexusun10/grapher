@@ -32,8 +32,8 @@ mod workspace_images;
 use crate::path_identity::same_repository_binding;
 #[cfg(all(test, windows))]
 use crate::path_identity::windows_repository_key;
-pub(crate) use activity::{set_prepare_phase, ActivityGuard as RuntimeActivityGuard};
 use activity::*;
+pub(crate) use activity::{set_prepare_phase, ActivityGuard as RuntimeActivityGuard};
 use open_file::*;
 use project_discovery::*;
 use sse::*;
@@ -49,7 +49,8 @@ pub struct Service {
     extension: PathBuf,
 }
 
-type RunServiceMap = std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>;
+type RunServiceMap =
+    std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>;
 type HotServiceQueue = std::collections::VecDeque<(PathBuf, String, Arc<Service>)>;
 
 // Keep only weak references: active workers own their service; idle runs can

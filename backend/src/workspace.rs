@@ -2603,21 +2603,22 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
             views.push(head.clone());
         }
-        let observed =
-            crate::workspace_view::prepare(
-                &canonical_repo,
-                path,
-                &base_head,
-                &views,
-                exclusions,
-                !destination_exists && parents.is_empty() && base == base_head,
-            )?;
+        let observed = crate::workspace_view::prepare(
+            &canonical_repo,
+            path,
+            &base_head,
+            &views,
+            exclusions,
+            !destination_exists && parents.is_empty() && base == base_head,
+        )
+        .map_err(|error| format!("Cannot prepare Graph project view: {error}"))?;
         return crate::workspace_view::seal_prepared_scoped(
             path,
             &canonical_repo,
             exclusions,
             observed,
-        );
+        )
+        .map_err(|error| format!("Cannot seal prepared Graph project view: {error}"));
     }
     Ok(head)
 }
@@ -2970,8 +2971,14 @@ pub(crate) fn collection_excluded(
     {
         return true;
     }
-    is_generated_artifact(relative)
-        && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+    let portable = relative.to_string_lossy().replace('\\', "/");
+    if is_host_metadata(&portable) && !tracked.contains(&portable) {
+        return true;
+    }
+    if is_generated_artifact(relative) && !tracked.contains(&portable) {
+        return true;
+    }
+    false
 }
 
 /// Git pathspecs that exclude generated artifacts from a forced `git add` or

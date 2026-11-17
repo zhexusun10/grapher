@@ -26,17 +26,23 @@ impl<'a, F: FnMut(String)> NodeCompletion<'a, F> {
         work: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         self.activity.phase(phase);
-        (self.output)(format!("{}\n", serde_json::json!({
-            "type": "grapher_completion_phase", "phase": phase,
-            "status": "running", "timestamp": crate::model::now(),
-        })));
+        (self.output)(format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "grapher_completion_phase", "phase": phase,
+                "status": "running", "timestamp": crate::model::now(),
+            })
+        ));
         let started = Instant::now();
         let result = work();
-        (self.output)(format!("{}\n", serde_json::json!({
-            "type": "grapher_completion_phase", "phase": phase,
-            "status": if result.is_ok() { "completed" } else { "failed" },
-            "elapsedMs": started.elapsed().as_millis(), "timestamp": crate::model::now(),
-        })));
+        (self.output)(format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "grapher_completion_phase", "phase": phase,
+                "status": if result.is_ok() { "completed" } else { "failed" },
+                "elapsedMs": started.elapsed().as_millis(), "timestamp": crate::model::now(),
+            })
+        ));
         result
     }
 }
@@ -57,8 +63,10 @@ mod tests {
                 Err("seal failed".into()),
             );
         }
-        let events: Vec<serde_json::Value> = output.iter()
-            .map(|text| serde_json::from_str(text).unwrap()).collect();
+        let events: Vec<serde_json::Value> = output
+            .iter()
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect();
         assert_eq!(events.len(), 4);
         assert_eq!(events[0]["phase"], "snapshot");
         assert_eq!(events[0]["status"], "running");

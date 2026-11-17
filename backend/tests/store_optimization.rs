@@ -1119,7 +1119,10 @@ fn terminal_cache_settlement_matches_single_and_batch_event_commits() {
             {
                 let mut append = |kind| {
                     if batched {
-                        store.append_batch(&mut state, vec![EventKind::Paused { paused: true }, kind])
+                        store.append_batch(
+                            &mut state,
+                            vec![EventKind::Paused { paused: true }, kind],
+                        )
                     } else {
                         store.append(&mut state, kind)
                     }

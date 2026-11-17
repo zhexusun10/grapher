@@ -235,7 +235,10 @@ fn remove_link(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
 /// Clear the Windows read-only file attribute so unlinking or replacement succeeds.
 #[cfg(windows)]
 #[allow(clippy::permissions_set_readonly_false)]
-pub(crate) fn clear_readonly_attribute(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+pub(crate) fn clear_readonly_attribute(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> std::io::Result<()> {
     if metadata.permissions().readonly() {
         let mut permissions = metadata.permissions();
         permissions.set_readonly(false);

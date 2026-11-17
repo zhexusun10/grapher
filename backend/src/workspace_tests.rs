@@ -1155,6 +1155,32 @@ fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn untracked_finder_metadata_is_not_restored_into_a_private_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join("main.txt"), "project file").unwrap();
+    workspace::git(&repository, &["add", "main.txt"]).unwrap();
+    workspace::git(&repository, &["commit", "-qm", "base"]).unwrap();
+    fs::write(repository.join(".DS_Store"), "Finder metadata").unwrap();
+    fs::create_dir(repository.join("nested")).unwrap();
+    fs::write(repository.join("nested/._resource"), "AppleDouble metadata").unwrap();
+
+    let base = workspace::snapshot_repository(&repository).unwrap();
+    let node = slot(&temp, "finder-metadata");
+    workspace::prepare(&repository, &node, &base, &[]).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(node.join("main.txt")).unwrap(),
+        "project file"
+    );
+    assert!(!node.join(".DS_Store").exists());
+    assert!(!node.join("nested/._resource").exists());
+}
+
 #[test]
 fn host_metadata_does_not_dirty_a_shadow_snapshot() {
     let temp = tempfile::tempdir().unwrap();

@@ -7473,7 +7473,8 @@ fn perform_with_merger_inner(
                 )?;
                 Ok(())
             },
-        )?
+        )
+        .map_err(|error| format!("Cannot compose Graph workspace {}: {error}", path.display()))?
     };
     if !reused && !crate::workspace_view::is_bound(path) {
         if let Some(source) = &job.copy_from_workspace {
@@ -7570,7 +7571,10 @@ fn perform_with_merger_inner(
         output
     };
     let mut completion = completion::NodeCompletion::new(
-        &job.run_id, &job.execution.id, &job.execution.node, &mut on_output,
+        &job.run_id,
+        &job.execution.id,
+        &job.execution.node,
+        &mut on_output,
     );
     completion.run("verify", || {
         if !source_tree {
@@ -7614,7 +7618,12 @@ fn perform_with_merger_inner(
                 &exclusions,
             )
         } else {
-            workspace::snapshot_node_for_run(path, &repository, &job.execution.node, Some(&job.run_id))
+            workspace::snapshot_node_for_run(
+                path,
+                &repository,
+                &job.execution.node,
+                Some(&job.run_id),
+            )
         }
     })?;
     completion.run("file_changes", || {

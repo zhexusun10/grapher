@@ -326,14 +326,8 @@ fn compose_graph_scoped(
         if crate::workspace_view::has_record(source, &current) {
             inputs.push(current);
         }
-        let observed = crate::workspace_view::prepare(
-            source,
-            repository,
-            &base,
-            &inputs,
-            exclusions,
-            false,
-        )?;
+        let observed =
+            crate::workspace_view::prepare(source, repository, &base, &inputs, exclusions, false)?;
         return crate::workspace_view::seal_prepared_scoped(
             repository, source, exclusions, observed,
         );

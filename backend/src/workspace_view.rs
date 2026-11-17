@@ -2329,15 +2329,15 @@ fn prepare_fresh_base_checkout(
     let expected: BTreeMap<_, _> = view
         .entries
         .iter()
-        .filter(|(name, _)| {
-            !workspace::collection_excluded(Path::new(name), &tracked, exclusions)
-        })
+        .filter(|(name, _)| !workspace::collection_excluded(Path::new(name), &tracked, exclusions))
         .map(|(name, entry)| (name.clone(), entry.clone()))
         .collect();
     for (name, entry) in &expected {
         if let Entry::Link { target, .. } = entry {
             let target_path = path.join(name);
-            real_child_path(path, &target_path, true)?;
+            // Git has already created this recorded leaf link. materialize checks
+            // its real parent and safely replaces the leaf; real_child_path would
+            // reject the valid symlink before it can be rebound into the workspace.
             crate::workspace_symlinks::materialize(path, &target_path, target)?;
         }
     }
@@ -2386,7 +2386,8 @@ fn prepare_fresh_base_checkout(
     )?;
     crate::workspace_links::restore(path, &topology, &signatures)?;
     for (name, entry) in expected.iter().rev() {
-        restore_entry(&path.join(name), entry)?;
+        restore_entry(&path.join(name), entry)
+            .map_err(|error| format!("Cannot restore project metadata for {name}: {error}"))?;
     }
     let root = Entry::Directory {
         mode: view.root_mode,
@@ -2472,7 +2473,8 @@ pub(crate) fn prepare(
         )?;
     }
     if fresh_base_checkout {
-        return prepare_fresh_base_checkout(source, path, &record, &base_view, exclusions);
+        return prepare_fresh_base_checkout(source, path, &record, &base_view, exclusions)
+            .map_err(|error| format!("Cannot prepare fresh Graph base checkout: {error}"));
     }
     let conflict = workspace::git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok();
     let tracked = workspace::project_tracked_paths(path);
@@ -3179,7 +3181,10 @@ fn reject_undeliverable_special_changes(
     // This validation belongs only to this snapshot operation. Most nodes still
     // have their prepared base as HEAD; reuse the comparison while the slot is
     // leased instead of loading and normalizing that large record again.
-    Ok(Some((base, node_view_identity(&recorded)? == observed_identity)))
+    Ok(Some((
+        base,
+        node_view_identity(&recorded)? == observed_identity,
+    )))
 }
 
 pub(crate) fn seal_prepared_scoped(

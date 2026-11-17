@@ -2251,10 +2251,19 @@ fn relative_git_includes_and_matched_conditional_includes_fail_instead_of_being_
 #[cfg(unix)]
 #[test]
 fn live_unix_sockets_are_refused_without_exposing_a_partial_workspace() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = source(&temp);
-    let _listener = std::os::unix::net::UnixListener::bind(source.join("runtime.sock")).unwrap();
-    let error = workspace::snapshot_repository(&source).unwrap_err();
+    // Unix-domain socket paths have a small platform limit (SUN_LEN on macOS).
+    // Keep both the temporary directory prefix and project-relative socket name
+    // short so long TMPDIR/APFS mount paths do not make the fixture fail before
+    // the snapshot code ever sees the socket.
+    let temp = tempfile::Builder::new().prefix("s").tempdir().unwrap();
+    let source = temp.path();
+    workspace::git(source, &["init", "-q"]).unwrap();
+    configure_author(source);
+    fs::write(source.join("tracked.txt"), "project file").unwrap();
+    workspace::git(source, &["add", "tracked.txt"]).unwrap();
+    workspace::git(source, &["commit", "-qm", "base"]).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(source.join("s")).unwrap();
+    let error = workspace::snapshot_repository(source).unwrap_err();
     assert!(error.contains("live Unix socket"), "{error}");
 }
 

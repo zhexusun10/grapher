@@ -30,7 +30,7 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
     const agent = join(directory, 'agent');
     const data = join(directory, 'data');
     const errors = [], calls = [], browserErrors = [], requests = [];
-    let backend, vite, browser, context, page, serialRunId, api, diagnostics = '', success = false;
+    let backend, vite, browser, context, page, graphRunId, serialRunId, api, diagnostics = '', success = false;
     const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
     Object.assign(gitEnv, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' });
     const git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
@@ -181,6 +181,7 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       const runs = (await api('bootstrap')).runs;
       assert.equal(runs.length, 1);
       const runId = runs[0];
+      graphRunId = runId;
       const planned = await api('snapshot', { runId });
       assert.equal(planned.phase, 'awaiting_approval');
       assert.equal(planned.graph.nodes.length, 5);
@@ -300,10 +301,24 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
     } catch (error) {
       const view = page && await page.evaluate(() => ({ text: document.body.innerText.slice(-6000),
         inputs: [...document.querySelectorAll('textarea')].map(input => ({ value: input.value, disabled: input.disabled })) })).catch(() => null);
-      const snapshot = serialRunId && api && await api('snapshot', { runId: serialRunId }).catch(() => null);
+      const failedRunId = serialRunId ?? graphRunId;
+      const snapshot = failedRunId && api && await api('snapshot', { runId: failedRunId }).catch(() => null);
+      const executionDiagnostics = snapshot && await Promise.all(snapshot.executions.map(async execution => {
+        const result = await api('get_execution_output', {
+          runId: failedRunId, executionId: execution.id, full: true,
+        }).catch(error => ({ content: String(error) }));
+        return {
+          id: execution.id,
+          node: execution.node,
+          status: execution.status,
+          worktree: execution.worktree,
+          resolvedWorktree: await realpath(execution.worktree).catch(error => String(error)),
+          output: String(result?.content ?? '').split('\n').slice(-30).join('\n'),
+        };
+      }));
       const serial = snapshot && { phase: snapshot.phase, nodes: snapshot.nodes,
         executions: snapshot.executions.map(({ id, status, sessionId }) => ({ id, status, sessionId })) };
-      console.error(`macOS browser acceptance failed; backend:\n${diagnostics}\nModel calls: ${JSON.stringify(calls)}\nErrors: ${JSON.stringify(errors)}\nBrowser errors: ${JSON.stringify(browserErrors)}\nRequests: ${JSON.stringify(requests.slice(-40))}\nView: ${JSON.stringify(view)}\nSerial: ${JSON.stringify(serial)}`);
+      console.error(`macOS browser acceptance failed; backend:\n${diagnostics}\nModel calls: ${JSON.stringify(calls)}\nErrors: ${JSON.stringify(errors)}\nBrowser errors: ${JSON.stringify(browserErrors)}\nRequests: ${JSON.stringify(requests.slice(-40))}\nView: ${JSON.stringify(view)}\nSerial: ${JSON.stringify(serial)}\nExecution diagnostics: ${JSON.stringify(executionDiagnostics)}`);
       throw error;
     } finally {
       // A failed browser cleanup must not strand the separately owned backend
