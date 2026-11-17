@@ -35,8 +35,13 @@ function readGraph() {
   return JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"));
 }
 
-function graphReadView(graph: any) {
-  return { nodes: graph.nodes, edges: graph.edges };
+function graphReadView(graph: any, feedbackEnabled = process.env.GRAPHER_FEEDBACK_ENABLED === "true") {
+  return {
+    nodes: graph.nodes,
+    edges: feedbackEnabled
+      ? graph.edges
+      : graph.edges.filter((edge: any) => !edge.feedback).map(({ from, to }: any) => ({ from, to })),
+  };
 }
 
 // Item-level shorthands below exercise the real edit_graph declaration and
@@ -162,8 +167,16 @@ try {
     }
     const beforeRejected = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
     const inspected = await tools.get("read_graph")!.definition.execute("off-read", {}, undefined, undefined, {} as ExtensionContext);
-    assert.deepEqual(JSON.parse(inspected.content[0].text), graphReadView(JSON.parse(beforeRejected)),
-      "Read returns actual retained routes even when the capability to create them is disabled");
+    assert.doesNotMatch(inspected.content[0].text, /"feedback"/,
+      "Read must not expose the feedback field or retained feedback routes when Feedback is disabled");
+    const inspectedGraph = JSON.parse(inspected.content[0].text);
+    assert.deepEqual(inspectedGraph.edges, [{ from: "a", to: "b" }]);
+    assert.deepEqual(inspectedGraph, graphReadView(JSON.parse(beforeRejected), false));
+    assert.deepEqual(
+      validateToolArguments(edgeTool, { type: "toolCall", id: "off-read-reuse", name: "edit_graph", arguments: { edges: inspectedGraph.edges } }),
+      { edges: [{ from: "a", to: "b" }] },
+      "Edges returned by read_graph when Feedback is disabled must conform to edit_graph's disabled edge schema",
+    );
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"), beforeRejected);
     const rejected = await edgeTool.execute("off-remove-path", edgeTool.prepareArguments!({ from: "a", to: "b", delete: true }) as any, undefined, undefined, {} as ExtensionContext);
     const rejectedBody = graphResult(rejected);

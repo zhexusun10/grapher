@@ -1205,27 +1205,37 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
     let view = crate::workspace_view::inspect_source_scoped(&canonical, exclusions)?;
     let identity = crate::workspace_view::view_identity(&view)?;
     if exclusions.is_empty() {
-        crate::workspace_view::stage_project(&canonical, &shadow)?;
+        crate::workspace_view::stage_project_with_view(&canonical, &shadow, &view)?;
     } else {
         stage_scoped(&canonical, exclusions)?;
     }
     let lock = host_ref_lock(&canonical)?;
     let _guard = lock.lock().map_err(|e| e.to_string())?;
-    let staged = git(
-        &canonical,
-        &[
-            "--git-dir",
-            git_dir,
-            "--work-tree",
-            work_tree,
-            "diff",
-            "--cached",
-            "--name-only",
-        ],
-    )?;
-    let mut commit = vec!["--git-dir", git_dir, "--work-tree", work_tree, "commit"];
-    if staged.trim().is_empty() {
-        if head_exists {
+    let mut commit = vec![
+        "--git-dir",
+        git_dir,
+        "--work-tree",
+        work_tree,
+        "commit",
+        "-q",
+    ];
+    if !head_exists {
+        // First collection of an empty or populated directory needs a HEAD.
+        commit.push("--allow-empty");
+    } else {
+        let staged = git(
+            &canonical,
+            &[
+                "--git-dir",
+                git_dir,
+                "--work-tree",
+                work_tree,
+                "diff",
+                "--cached",
+                "--name-only",
+            ],
+        )?;
+        if staged.trim().is_empty() {
             // Git omits empty directories and most filesystem metadata. Reuse
             // HEAD only when its recorded project view is still equivalent.
             let head = bridge_plain_snapshot(&canonical)?;
@@ -1237,10 +1247,6 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
                 }
                 return Ok(head);
             }
-            commit.push("--allow-empty");
-        }
-        // First collection of an empty directory also needs a HEAD.
-        if !head_exists {
             commit.push("--allow-empty");
         }
     }
@@ -2598,7 +2604,14 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
             views.push(head.clone());
         }
         let observed =
-            crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views, exclusions)?;
+            crate::workspace_view::prepare(
+                &canonical_repo,
+                path,
+                &base_head,
+                &views,
+                exclusions,
+                !destination_exists && parents.is_empty() && base == base_head,
+            )?;
         return crate::workspace_view::seal_prepared_scoped(
             path,
             &canonical_repo,
@@ -2732,15 +2745,14 @@ fn snapshot_slot_to_ref_scoped(
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
-    let view_identity =
-        crate::workspace_view::stage_node_snapshot(&canonical_path, &canonical_repo, exclusions)?;
+    let staged = crate::workspace_view::stage_node_snapshot_with_record(
+        &canonical_path,
+        &canonical_repo,
+        exclusions,
+    )?;
     let current = git(&canonical_path, &["rev-parse", "HEAD"])?;
-    let changed_view = match view_identity.as_deref() {
-        Some(identity) => {
-            !crate::workspace_view::record_matches(&canonical_repo, &current, identity)?
-        }
-        None => false,
-    };
+    let changed_view = !staged.record_matches(&canonical_repo, &current)?;
+    let view_identity = staged.identity;
     // A head that already exists without a view record (an explicit human or
     // agent commit) is captured below instead of being given a redundant
     // snapshot commit. This keeps `runtime.resolved` importing the user's
@@ -2914,6 +2926,9 @@ pub(crate) fn is_generated_artifact(relative: &Path) -> bool {
 /// The project's own Git-tracked paths (never the force-collected graph index).
 /// A plain folder has no project Git, so its tracked set is empty.
 pub(crate) fn project_tracked_paths(root: &Path) -> std::collections::BTreeSet<String> {
+    if fs::symlink_metadata(root.join(".git")).is_err() {
+        return Default::default();
+    }
     project_git(root, &["ls-files", "-z", "--cached"])
         .ok()
         .map(|raw| {
@@ -3570,7 +3585,11 @@ fn snapshot_source_scoped(
             repository_git(path, &["read-tree", "--empty"])?;
         }
         if exclusions.is_empty() {
-            crate::workspace_view::stage_project(path, &shadow)?;
+            if let Some(view) = source_view.as_ref() {
+                crate::workspace_view::stage_project_with_view(path, &shadow, view)?;
+            } else {
+                crate::workspace_view::stage_project(path, &shadow)?;
+            }
         } else {
             stage_scoped(path, exclusions)?;
         }
@@ -3731,7 +3750,11 @@ fn snapshot_source_scoped(
             .map(crate::workspace_view::view_identity)
             .transpose()?;
         if exclusions.is_empty() {
-            crate::workspace_view::stage_project(&canonical, &shadow)?;
+            if let Some(view) = source_view.as_ref() {
+                crate::workspace_view::stage_project_with_view(&canonical, &shadow, view)?;
+            } else {
+                crate::workspace_view::stage_project(&canonical, &shadow)?;
+            }
         } else {
             stage_scoped(&canonical, exclusions)?;
         }
@@ -3747,23 +3770,27 @@ fn snapshot_source_scoped(
                 ],
             );
         }
-        let status = git(
-            &canonical,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "diff",
-                "--cached",
-                "--name-only",
-            ],
-        )?;
         let unborn = git(
             &canonical,
             &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
         )
         .is_err();
+        let status = if unborn {
+            String::new()
+        } else {
+            git(
+                &canonical,
+                &[
+                    "--git-dir",
+                    git_dir_str,
+                    "--work-tree",
+                    work_tree_str,
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                ],
+            )?
+        };
         let lock = host_ref_lock(&canonical)?;
         let _guard = lock.lock().map_err(|e| e.to_string())?;
         let changed_view = if status.trim().is_empty() && !unborn {
@@ -3783,6 +3810,7 @@ fn snapshot_source_scoped(
                 "--work-tree",
                 work_tree_str,
                 "commit",
+                "-q",
             ];
             if status.trim().is_empty() {
                 commit.push("--allow-empty");

@@ -6087,7 +6087,7 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
         .unwrap()
         .contains("<user further request>"));
 
-    // Only a source-publication Merger receives the extra user requests.
+    // Final publication receives the goal and accepted user requests.
     {
         let mut runtime = service.runtime.lock().unwrap();
         runtime.state.mergers[0].node = "merger".into();
@@ -6103,6 +6103,53 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
     assert!(prompt.contains(
         "<user further request>\nKeep the public API compatible\n</user further request>"
     ));
+
+    // Intermediate source write-back uses the incident node's objective.
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.graph.nodes.push(Node {
+            id: "upstream".into(),
+            task: "Completed upstream implementation".into(),
+        });
+        runtime.state.graph.edges.push(Edge {
+            from: "upstream".into(),
+            to: "feat_qa".into(),
+            feedback: false,
+        });
+        runtime.state.nodes.insert(
+            "upstream".into(),
+            NodeState {
+                status: "completed".into(),
+                head: Some("upstream-head".into()),
+                ..Default::default()
+            },
+        );
+        runtime
+            .state
+            .nodes
+            .insert("feat_qa".into(), NodeState::default());
+        runtime.state.batch_handoff = Some(BatchHandoff {
+            recovery_execution_ids: vec![],
+        });
+        runtime.state.publication = Some(Publication {
+            repository: temp.path().to_string_lossy().into(),
+            heads: vec!["upstream-head".into()],
+            status: "merging".into(),
+            head: None,
+            error: None,
+            started_at: 0,
+            completed_at: None,
+        });
+    }
+    let handoff = get_merger_prompt(
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}),
+        &service,
+    )
+    .unwrap();
+    let prompt = handoff["prompt"].as_str().unwrap();
+    assert!(prompt.contains("Feature QA verification task"));
+    assert!(!prompt.contains("Original goal"));
+    assert!(!prompt.contains("<user further request>"));
 
     // 3. When system-prompt.md is written to disk, it reads the disk file directly
     let session_dir = temp.path().join("mergers").join(merger_id);

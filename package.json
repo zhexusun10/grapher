@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/patch-picomatch.mjs",
     "test:list": "node scripts/test.mjs --list",
     "test:inventory": "node scripts/test.mjs --check",
     "test:scripts": "node scripts/test.mjs scripts",
@@ -60,7 +61,7 @@
     "lucide-react": "0.468.0",
     "marked": "^18.0.13",
     "motion": "^13.2.0",
-    "pi-better-web-search": "1.0.3",
+    "pi-better-web-search": "1.0.4",
     "pi-continuity": "0.5.0",
     "pi-trim": "0.2.2",
     "react": "19.2.0",
@@ -79,7 +80,7 @@
     "tailwindcss": "^4.3.4",
     "tsx": "^4.23.15",
     "typescript": "5.9.3",
-    "vite": "7.3.7"
+    "vite": "7.3.8"
   },
   "overrides": {
     "undici": "8.12.3"

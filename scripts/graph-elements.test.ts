@@ -251,15 +251,15 @@ test("a publication merger is a card below the terminal layer", () => {
   const idle = projectGraph(state, "");
   const card = idle.nodes.find(node => node.id === "merger:publication");
   assert.ok(card, "publication merger card must exist once invoked");
-  assert.equal(card!.data.id, "publication merger");
+  assert.equal(card!.data.id, "merger");
   assert.equal(card!.data.kind, "merger");
   assert.equal(card!.data.status, "completed");
   assert.equal(card!.data.selected, false);
-  // The publication card sits below the last execution layer and receives the
-  // terminal edges only. Merger executions use the compact card geometry.
+  // The publication card shares task geometry and sits one row below its terminal.
   const terminal = idle.nodes.find(node => node.id === "b")!;
-  assert.ok(card!.width! < terminal.width!);
-  assert.ok(card!.position.y > terminal.position.y);
+  assert.equal(card!.width, terminal.width);
+  assert.equal(card!.position.y - terminal.position.y, terminal.position.y - idle.nodes.find(node => node.id === "a")!.position.y);
+  assert.equal(card!.data.hasBottom, false);
   assert.equal(terminal.data.hasBottom, true);
   const publicationEdges = idle.edges.filter(edge => edge.target === "merger:publication");
   assert.deepEqual(publicationEdges.map(edge => edge.source), ["b"]);
@@ -278,7 +278,7 @@ test("a publication merger is a card below the terminal layer", () => {
   assert.ok(!projectGraph(plain, "").edges.some(edge => edge.target === "merger:publication"));
 });
 
-test("a batch handoff merger connects delivered producers, not unstarted graph terminals", () => {
+test("a batch handoff merger replaces delivered producers' downstream connections", () => {
   const state = publicationMergerState();
   state.batchHandoff = { recoveryExecutionIds: [] };
   state.phase = 'merging';
@@ -291,7 +291,7 @@ test("a batch handoff merger connects delivered producers, not unstarted graph t
   assert.deepEqual(edges.map(edge => edge.source), ['a']);
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
   const card = projected.nodes.find(node => node.id === 'merger:publication')!;
-  assert.equal(card.data.id, t('批次回写 merger'));
+  assert.equal(card.data.id, 'merger');
   const producer = projected.nodes.find(node => node.id === 'a')!;
   const downstream = projected.nodes.find(node => node.id === 'b')!;
   assert.ok(card.position.y > producer.position.y);
@@ -300,10 +300,19 @@ test("a batch handoff merger connects delivered producers, not unstarted graph t
   assert.equal(edges[0].sourceHandle, 'bottom');
   assert.equal(edges[0].targetHandle, 'top');
   assert.equal(producer.data.hasBottom, true);
-  assert.equal(card.data.hasBottom, false, 'handoff is not a dependency of the next batch');
-  assert.ok(!projected.edges.some(edge => edge.source === card.id));
-  assert.equal(typeof projected.edges.find(edge => edge.source === 'a' && edge.target === 'b')!.data?.routeX,
-    'number', 'the existing task dependency routes around the inserted handoff card');
+  assert.equal(card.data.hasBottom, true);
+  assert.equal(card.position.y - producer.position.y, downstream.position.y - card.position.y);
+  const downstreamEdges = projected.edges.filter(edge => edge.target === downstream.id);
+  assert.equal(downstreamEdges.length, 1);
+  assert.equal(downstreamEdges[0].source, card.id);
+  assert.equal(downstreamEdges[0].sourceHandle, 'bottom');
+  assert.equal(downstreamEdges[0].targetHandle, 'top');
+  assert.equal(downstreamEdges[0].data?.routeX, undefined, 'adjacent Merger-to-task edges connect directly');
+  assert.equal(downstreamEdges[0].animated, false, 'downstream transfer waits for publication to complete');
+  assert.ok(!projected.edges.some(edge => edge.source === 'a' && edge.target === 'b'));
+  state.mergers![0].status = 'completed';
+  const completed = projectGraph(state, '');
+  assert.equal(completed.edges.find(edge => edge.source === card.id && edge.target === 'b')!.animated, true);
 });
 
 test('historical batch merger stays attached to its producers after publication clears and nodes advance', () => {
@@ -325,12 +334,53 @@ test('historical batch merger stays attached to its producers after publication 
   const projected = projectGraph(state, '');
   const card = projected.nodes.find(node => node.id === 'merger:publication')!;
   assert.equal(card.data.status, 'completed');
-  assert.equal(card.data.id, t('批次回写 merger'));
-  assert.equal(card.data.hint, t('批次回写记录，不属于任务依赖'));
+  assert.equal(card.data.id, 'merger');
+  assert.equal(card.data.hint, t('合并至源目录'));
   assert.ok(card.position.y > projected.nodes.find(node => node.id === 'a')!.position.y);
   assert.ok(card.position.y < projected.nodes.find(node => node.id === 'b')!.position.y);
   assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
+  assert.deepEqual(projected.edges.filter(edge => edge.target === 'b').map(edge => edge.source), [card.id]);
+  assert.ok(!projected.edges.some(edge => edge.source === 'a' && edge.target === 'b'));
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
+});
+
+test('batch publication coalesces shared destinations and chains into node Mergers', () => {
+  const state = publicationMergerState();
+  state.graph = {
+    originalGoal: 'publish and merge',
+    nodes: ['a', 'b', 'external', 'join', 'tail'].map(id => ({ id, task: id })),
+    edges: [
+      { from: 'a', to: 'b', feedback: false },
+      ...['a', 'b', 'external'].map(from => ({ from, to: 'join', feedback: false })),
+      { from: 'join', to: 'tail', feedback: false },
+      { from: 'tail', to: 'a', feedback: true },
+    ],
+  };
+  state.plan = { executionBatches: [['a'], ['b', 'external'], ['join'], ['tail']], rootNodes: ['a', 'external'], terminals: ['tail'], warnings: [] };
+  for (const id of ['external', 'join', 'tail']) {
+    state.nodes[id] = { status: 'waiting', revision: 1, head: null, instruction: '', error: null };
+  }
+  state.batchHandoff = { recoveryExecutionIds: [] };
+  state.publication = { repository: '/source', heads: ['ha', 'hb'], status: 'merging', head: null, error: null, startedAt: 1, completedAt: null };
+  state.mergers!.push({ ...state.mergers![0], id: 'join-merger', node: 'merge:join', status: 'running' });
+  const originalGraph = structuredClone(state.graph);
+  const projected = projectGraph(state, '');
+  const cards = graphCardIds(state.graph);
+  const helper = cards.mergers.get('join')!;
+  const publication = cards.publication;
+  assert.deepEqual(projected.edges.map(edge => [edge.source, edge.target]).sort(), [
+    ['a', 'b'], ['a', publication], ['b', publication],
+    [publication, helper], ['external', helper], [helper, 'join'],
+    ['join', 'tail'], ['tail', 'a'],
+  ].sort());
+  assert.equal(new Set(projected.edges.map(edge => edge.id)).size, projected.edges.length);
+  assert.equal(projected.edges.find(edge => edge.source === publication && edge.target === helper)!.animated, true);
+  const feedback = projected.edges.find(edge => edge.source === 'tail' && edge.target === 'a')!;
+  assert.equal(feedback.markerEnd, 'workflow-arrow-feedback');
+  assert.deepEqual(state.graph, originalGraph, 'projection preserves the authoritative graph');
+  const restored = projectGraph({ ...state, mergers: [] }, '');
+  assert.deepEqual(restored.edges.map(edge => [edge.source, edge.target]).sort(),
+    state.graph.edges.map(edge => [edge.from, edge.to]).sort(), 'without Merger cards the original connections return');
 });
 
 test("literal graph ids cannot collide with node or publication Merger cards", () => {
@@ -396,7 +446,7 @@ test("a node-composition merger is a selectable card in the topology", () => {
   const mergerCard = idle.nodes.find(node => node.id === "merger:join")!;
   assert.equal(mergerCard.data.kind, "merger");
   assert.equal(mergerCard.data.status, "failed");
-  assert.ok(mergerCard.width! < nodeCard.width!);
+  assert.equal(mergerCard.width, nodeCard.width);
   assert.deepEqual(mergerCard.origin, nodeCard.origin);
   assert.ok(mergerCard.position.y < nodeCard.position.y);
   assert.equal(mergerCard.position.x + mergerCard.width! / 2, nodeCard.position.x + nodeCard.width! / 2);
@@ -436,9 +486,14 @@ test("Merger rows preserve task columns and keep multiple fan-in helpers between
   for (const name of ['join', 'other']) {
     const target = byName.get(name)!, merger = byName.get(`merger:${name}`)!;
     assert.equal(merger.position.x + merger.width! / 2, target.position.x + target.width! / 2);
-    assert.ok(merger.position.y + 70 < target.position.y - 98, 'cards have a clear vertical gap');
+    assert.ok(merger.position.y + 98 < target.position.y - 98, 'cards have a clear vertical gap');
     for (const parent of ['a', 'b']) {
-      assert.ok(byName.get(parent)!.position.y + 98 < merger.position.y - 70);
+      const parentCard = byName.get(parent)!;
+      assert.ok(parentCard.position.y + 98 < merger.position.y - 98);
+      assert.equal(merger.position.y - parentCard.position.y, target.position.y - merger.position.y,
+        'task and Merger rows use the same pitch');
+      assert.ok(!projected.edges.some(edge => edge.source === parent && edge.target === target.id),
+        'upstream dependencies enter the Merger without a parallel task connection');
       const edge = projected.edges.find(edge => edge.source === parent && edge.target === merger.id)!;
       assert.equal(edge.sourceHandle, 'bottom');
       assert.equal(edge.targetHandle, 'top');
@@ -463,6 +518,8 @@ test('batch Merger centers on its producers rather than a wider unrelated layer'
   assert.ok(card.position.y > producer.position.y);
   assert.ok(card.position.y < projected.nodes.find(node => node.id === 'c')!.position.y);
   assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
+  assert.equal(card.data.hasBottom, false, 'unrelated later tasks do not acquire a publication dependency');
+  assert.ok(!projected.edges.some(edge => edge.source === card.id));
 });
 
 test("stale, superseded, invalidated, and removed-route warnings are hidden", () => {

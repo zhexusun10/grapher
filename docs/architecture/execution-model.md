@@ -139,7 +139,7 @@ Focused evidence: [runtime review regressions](../../backend/src/planner_review_
 
 A Git conflict during [parent composition](workspace-snapshots-and-feedback.md#composition-and-conflicts) invokes the Merger in the child's workspace before its task starts. Environment differences follow [local reuse/unbound selection](native-environments.md#branches-metadata-and-storage), not the Merger flow.
 
-A node-composition Merger is a first-class conversation while it runs: the execution graph shows its card while it prepares the node, and its live session accepts steering like a node execution. A successful node-composition Merger becomes read-only history and the node's own execution continues the work; a failed Merger accepts a repair follow-up in its retained workspace. A publication Merger has no planner node. Final publication appears below the terminal layer; an intermediate batch handoff appears beside its producing nodes and is labelled as batch publication history after it settles. Its producer links are derived from the events and heads that launched that Merger, so clearing the current publication or starting later work cannot reattach an old batch card to unstarted graph terminals. It is steerable while it runs and, unlike a node-composition Merger, keeps accepting follow-ups after it settles: each follow-up is a new Merger execution continuing the same Pi session, and it does not re-enter the publication state machine. A failed publication keeps that conversation in its private repair workspace. After successful publication it returns to source for direct edits, rebinding the existing session cwd without discarding history. Publication status and retry remain the publication panel's concern, not the Merger conversation's.
+A node-composition Merger is a first-class conversation while it runs: the execution graph shows its card while it prepares the node, and its live session accepts steering like a node execution. A successful node-composition Merger becomes read-only history and the node's own execution continues the work; a failed Merger accepts a repair follow-up in its retained workspace. A publication Merger has no planner node. Final publication appears below the terminal layer; an intermediate batch handoff appears between its recorded producers and their downstream cards. Merger card headings are always `merger`. The execution-flow projection replaces producer-to-downstream bypass links with connections through the relevant Merger; it does not add planner dependencies. Its producer links are derived from the events and heads that launched that Merger, so clearing the current publication or starting later work cannot reattach an old batch card to unrelated unstarted graph terminals. It is steerable while it runs and, unlike a node-composition Merger, keeps accepting follow-ups after it settles: each follow-up is a new Merger execution continuing the same Pi session, and it does not re-enter the publication state machine. A failed publication keeps that conversation in its private repair workspace. After successful publication it returns to source for direct edits, rebinding the existing session cwd without discarding history. Publication retry retains its own lifecycle: an empty composer in the failed publication Merger offers `retry_publication`, matching the publication footer, while an explicit follow-up continues only that Merger conversation.
 
 Merger continuation reserves its workspace before preparing inputs. Attachment delivery or other pre-launch failures record a terminal failure and release that reservation even if no process started. A successful node repair atomically records Merger completion and returns a failed/blocked target to `dirty` in the event reducer, only for the target revision captured at reservation; replay preserves the same status/revision and does not unpause the Run.
 
@@ -196,8 +196,18 @@ running -> publishing -> completed
 
 Only a real Git conflict invokes a dedicated Merger in the private publication workspace. A missing/inaccessible repository or permission error is a publication failure, not a request for the model to improvise a workaround. Node preparation never inspects the live source working tree; source changes are incorporated at publication.
 
-The source-publication Merger's workspace objective keeps `graph.original_goal`
-and appends recorded user steers inside `<user further request>` when present.
+Merger context follows the purpose of the merge, independently of whether its
+files are being written back to source. An intermediate private-batch handoff
+uses the tasks of unfinished downstream nodes connected to the pinned delivery
+heads. Shared fan-in targets appear once, multiple consumers retain their own
+IDs and tasks, and applicable pending feedback identifies its repair target.
+Unrelated nodes, later descendants, the overall user goal and global user
+requests are not substituted for those workspace objectives. A handoff with
+remaining work but no direct consumer keeps a scoped batch-integration objective.
+
+Final publication, including the last private-batch delivery after all graph
+work and pending feedback settle, keeps `graph.original_goal` and appends
+recorded user steers inside `<user further request>` when present.
 Requests contain only the user's original text in event order, separated by
 blank lines, without Planner/node/Merger source labels. Withdrawn requests,
 failed or extension-handled Planner sends, and steers from superseded node
@@ -205,8 +215,11 @@ executions are omitted. This is additional conflict-resolution
 context, not a new task or an import of agent conversation histories. Node-input
 composition still receives the target's `job.task` unchanged; Merger follow-ups
 still continue their own session. Publication retries rebuild the context from
-persisted Run events, while a saved Merger prompt remains the authority for that
-execution's prompt inspection.
+persisted Run events. A saved Merger prompt remains the authority for that
+execution's prompt inspection; when absent, the backend reconstructs context
+at its `MergerStarted` event, so later completion or graph edits cannot replace
+an intermediate objective with the user's final goal. The frontend waits for
+that publication prompt instead of guessing its objective from the global goal.
 
 `retry_publication` reuses retained Git heads, private merge state and durable delivery evidence without rerunning the graph. Internal composition must preserve input ancestry, but delivery never creates a commit or advances the user's branch/index. Recovery and concurrent-source handling follow [Git publication](workspace-snapshots-and-feedback.md#publication). For private execution, only `PublicationCompleted` establishes delivery; shared-source Graphs settle directly under the [workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy).
 

@@ -41,6 +41,26 @@ function fixture(t) {
   return { root, write, installRoot, env: { ...process.env, npm_execpath: join(root, 'fake-npm.mjs') } };
 }
 
+test('picomatch repeated wildcard extglobs remain bounded on long non-matches', () => {
+  const probe = `
+    import assert from 'node:assert/strict';
+    import picomatch from 'picomatch';
+    const singleBranch = picomatch.makeRe('+(a*)b');
+    assert.equal(singleBranch.source.includes('+'), false);
+    assert.equal(picomatch('+(a*)b')('aaab'), true);
+    const multiBranch = picomatch.makeRe('+(a*|b*)c');
+    assert.equal(multiBranch.source.includes('[^/]*?'), false);
+    const hostile = 'a'.repeat(100000) + '!';
+    assert.equal(singleBranch.test(hostile), false);
+    assert.equal(multiBranch.test(hostile), false);
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('root readiness checks dev tools and exact bundled releases without loading code', t => {
   const f = fixture(t);
   assert.equal(rootDependenciesReady(f.root), true);

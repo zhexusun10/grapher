@@ -349,6 +349,111 @@ function assertSameViewport(actual, expected) {
     `expected the same viewport: ${JSON.stringify({ actual, expected })}`);
 }
 
+for (const language of ["en", "zh"]) {
+  test(`Merger rows use task spacing and replace bypass connections (${language})`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, reducedMotion: "reduce" });
+    await context.addInitScript(language => localStorage.setItem("grapher_language_v1", language), language);
+    const errors = [];
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const result = command === "get_file_changes" ? fixtureFileChanges(route.request().postDataJSON())
+        : command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
+      if (result === null) errors.push(`Unexpected API: ${command}`);
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    const graph = { originalGoal: "Merge completed branches", nodes: ["a", "b", "join", "tail"].map(id => ({ id, task: `Task ${id}` })),
+      edges: [{ from: "a", to: "join", feedback: false }, { from: "b", to: "join", feedback: false },
+        { from: "join", to: "tail", feedback: false }] };
+    const mergers = [["publish", "merger", "completed"], ["join-helper", "merge:join", "running"]]
+      .map(([id, node, status]) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
+        worktree: "/mock", before: "base", after: null, output: "", outputBytes: 0, startedAt: 1, completedAt: status === "completed" ? 2 : null }));
+    try {
+      await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+      await page.waitForFunction(() => !!window.graphFixture);
+      await page.evaluate(patch => window.graphFixture.update(patch, false), {
+        runId: "merger-spacing", phase: "running", approved: true, graph, mergers,
+        nodes: Object.fromEntries(graph.nodes.map(({ id }) => [id, { status: ["a", "b"].includes(id) ? "completed" : "waiting",
+          revision: 1, head: id === "a" ? "ha" : id === "b" ? "hb" : null, instruction: "", error: null }])),
+        batchHandoff: { recoveryExecutionIds: [] },
+        publication: { repository: "/mock", heads: ["ha", "hb"], status: "completed", head: "hc", error: null, startedAt: 1, completedAt: 2 },
+      });
+      await waitForSettledGraph(page, 6);
+      const rows = await page.evaluate(() => ["a", "merger:publication", "merger:join", "join", "tail"].map(id => {
+        const card = document.querySelector(`.task-node[data-card-id="${id}"]`);
+        const rect = card.getBoundingClientRect();
+        return { width: rect.width, top: rect.top, bottom: rect.bottom, center: (rect.top + rect.bottom) / 2 };
+      }));
+      const pitch = rows[1].center - rows[0].center;
+      for (let index = 1; index < rows.length; index++) {
+        assert.ok(Math.abs(rows[index].width - rows[0].width) < 1, "tasks and Mergers share card width");
+        assert.ok(rows[index].top > rows[index - 1].bottom, "adjacent cards never overlap");
+        assert.ok(Math.abs(rows[index].center - rows[index - 1].center - pitch) < 1, "every row uses the same spacing");
+      }
+      const edgeIds = () => page.locator(".react-flow__edge").evaluateAll(edges => edges.map(edge => edge.dataset.id).sort());
+      assert.deepEqual(await edgeIds(), ["publication:a->merger", "publication:b->merger", "merger:join->join",
+        JSON.stringify(["merger:publication", "dep", "merger:join"]), JSON.stringify(["join", "dep", "tail"])].sort());
+      await page.evaluate(() => window.graphFixture.update({ mergers: [] }, false));
+      await waitForSettledGraph(page, 4);
+      assert.deepEqual(await edgeIds(), graph.edges.map(edge => JSON.stringify([edge.from, "dep", edge.to])).sort());
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("publication Merger waits for its recorded objective instead of showing the global goal", { timeout: 30_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  let releasePrompt, markRequested;
+  const gate = new Promise(resolve => { releasePrompt = resolve; });
+  const requested = new Promise(resolve => { markRequested = resolve; });
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    let result;
+    if (command === "get_merger_prompt") {
+      markRequested();
+      await gate;
+      result = { prompt: "DOWNSTREAM_QA_WORKSPACE_OBJECTIVE" };
+    } else if (command === "get_execution_output") {
+      const body = route.request().postDataJSON();
+      result = { runId: body.runId, executionId: body.executionId, content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: true, status: "completed" };
+    } else if (command === "get_file_changes") result = fixtureFileChanges(route.request().postDataJSON());
+    else if (command === "list_files") result = { files: [] };
+    else if (command === "list_skills") result = { skills: [] };
+    else { errors.push(`Unexpected API: ${command}`); result = null; }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await page.evaluate(() => window.graphFixture.update({
+      runId: "handoff-objective", phase: "running", approved: true,
+      graph: { originalGoal: "GLOBAL_USER_REQUEST_ONLY_FOR_FINAL_PUBLICATION",
+        nodes: [{ id: "producer", task: "Implement the branch" }, { id: "qa", task: "Integrate and verify" }],
+        edges: [{ from: "producer", to: "qa", feedback: false }] },
+      nodes: { producer: { status: "completed", revision: 1, head: "parent", instruction: "", error: null },
+        qa: { status: "waiting", revision: 1, head: null, instruction: "", error: null } },
+      mergers: [{ id: "historical-handoff", node: "merger", revision: 1, attempt: 1, sessionId: "historical-handoff",
+        status: "completed", worktree: "/mock", before: "parent", after: "merged", output: "", outputBytes: 0, startedAt: 1, completedAt: 2 }],
+    }, false));
+    await waitForSettledGraph(page, 3);
+    await page.locator('.react-flow__node[data-id="merger:publication"]').click();
+    await requested;
+    const task = page.locator(".node-task-card");
+    await task.waitFor();
+    assert.ok(!(await task.innerText()).includes("GLOBAL_USER_REQUEST_ONLY_FOR_FINAL_PUBLICATION"));
+    releasePrompt();
+    await task.getByText("DOWNSTREAM_QA_WORKSPACE_OBJECTIVE", { exact: true }).waitFor();
+    assert.ok(!(await task.innerText()).includes("GLOBAL_USER_REQUEST_ONLY_FOR_FINAL_PUBLICATION"));
+    assert.deepEqual(errors, []);
+  } finally { releasePrompt(); await context.close(); }
+});
+
 test("literal task IDs and colliding Merger cards open separate conversations", { timeout: 35_000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
@@ -369,7 +474,7 @@ test("literal task IDs and colliding Merger cards open separate conversations", 
   });
   const page = await context.newPage();
   page.on("pageerror", error => { errors.push(String(error)); console.error(error.stack); });
-  const taskIds = ["join", "publication", "merger:join", "merger:publication", "merger · join"];
+  const taskIds = ["join", "publication", "merger:join", "merger:publication", "merger"];
   const graph = { originalGoal: "Literal identities", nodes: taskIds.map(id => ({ id, task: `TASK_${id}` })),
     edges: [{ from: "join", to: "publication", feedback: false }] };
   const mergers = [["join-helper", "merge:join"], ["publication-helper", "merge:publication"], ["publish-helper", "merger"]]
@@ -390,21 +495,21 @@ test("literal task IDs and colliding Merger cards open separate conversations", 
       assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 1);
       await page.locator(".back-to-query-btn").click();
     }
-    for (const [label, executionId, cardId] of [["merger · join", "join-helper", "merger:join#"], ["merger · publication", "publication-helper", "merger:publication##"], ["publication merger", "publish-helper", "merger:publication#"]]) {
+    for (const [executionId, cardId] of [["join-helper", "merger:join#"], ["publication-helper", "merger:publication##"], ["publish-helper", "merger:publication#"]]) {
       await page.locator(`.react-flow__node[data-id="${cardId}"]`).click();
       await page.locator(".node-task-card").getByText(`PROMPT_${executionId}`, { exact: true }).waitFor();
       assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 0);
       await page.locator(".back-to-query-btn").click();
     }
-    const literalAndHelper = page.locator(".react-flow__node").filter({ has: page.getByText("merger · join", { exact: true }) });
-    assert.equal(await literalAndHelper.count(), 2, "literal task label and helper label are both rendered");
-    assert.equal(await page.locator('.task-node[data-node-id="merger · join"]').count(), 1);
-    await page.locator('.task-node[data-node-id="merger · join"]').click();
-    await page.locator(".node-task-card").getByText("TASK_merger · join", { exact: true }).waitFor();
+    const literalAndHelper = page.locator(".react-flow__node").filter({ has: page.getByText("merger", { exact: true }) });
+    assert.equal(await literalAndHelper.count(), 4, "literal task label and all helper labels are rendered");
+    assert.equal(await page.locator('.task-node[data-node-id="merger"]').count(), 1);
+    await page.locator('.task-node[data-node-id="merger"]').click();
+    await page.locator(".node-task-card").getByText("TASK_merger", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "Edit task directive", exact: true }).count(), 1);
     await page.locator(".back-to-query-btn").click();
     const helper = page.locator('.react-flow__node[data-id="merger:join#"]');
-    assert.equal((await helper.locator('.task-node[data-node-kind="merger"] .node-kind-label').innerText()).toLowerCase(), "merger");
+    assert.equal(await helper.locator('.task-node[data-node-kind="merger"] .node-heading strong').innerText(), "merger");
     await helper.click();
     await page.locator(".node-task-card").getByText("PROMPT_join-helper", { exact: true }).waitFor();
     // Adding a task may reclaim a helper's old card ID. Keep the selected
@@ -457,8 +562,8 @@ test("prototype-like and Unicode task IDs remain literal in the graph UI", { tim
 });
 
 for (const collision of [
-  { label: "publication", taskId: "merger", mergerNode: "merger", helperCard: "merger:publication", helperLabel: "publication merger" },
-  { label: "node-composition", taskId: "merge:join", mergerNode: "merge:join", helperCard: "merger:join", helperLabel: "merger · join" },
+  { label: "publication", taskId: "merger", mergerNode: "merger", helperCard: "merger:publication" },
+  { label: "node-composition", taskId: "merge:join", mergerNode: "merge:join", helperCard: "merger:join" },
 ]) {
   test(`${collision.label} Merger history stays separate from task ${collision.taskId}`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
@@ -514,7 +619,7 @@ for (const collision of [
       await taskPane.getByText("TASK_ONLY_STEER", { exact: true }).waitFor();
       assert.equal(await taskPane.getByText("MERGER_ONLY_STEER", { exact: true }).count(), 0,
         "a Merger steer must not leak into the same-spelled task conversation");
-      await page.locator(".react-flow__node").filter({ has: page.getByText(collision.helperLabel, { exact: true }) }).click();
+      await page.locator(`.react-flow__node[data-id="${collision.helperCard}"]`).click();
       const mergerPane = page.locator(".chat-messages-stream");
       await mergerPane.getByText("MERGER_ONLY_STEER", { exact: true }).waitFor();
       assert.equal(await mergerPane.getByText("TASK_ONLY_STEER", { exact: true }).count(), 0,

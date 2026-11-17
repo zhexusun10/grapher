@@ -14,6 +14,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod completion;
+
 #[path = "feedback_continuation.rs"]
 mod feedback_continuation;
 #[path = "workspace_policy.rs"]
@@ -7567,14 +7569,19 @@ fn perform_with_merger_inner(
     } else {
         output
     };
-    if !source_tree {
-        workspace::verify_prepared_ancestor(path, &before)?;
-        // The agent may have staged a managed scope itself. Untrack it before
-        // post-turn environment validation and the snapshot; the live files stay
-        // in the workspace and the snapshot commit records the removal.
-        workspace::unstage_scoped(path, &exclusions)?;
-    }
-    let environment_result_input =
+    let mut completion = completion::NodeCompletion::new(
+        &job.run_id, &job.execution.id, &job.execution.node, &mut on_output,
+    );
+    completion.run("verify", || {
+        if !source_tree {
+            workspace::verify_prepared_ancestor(path, &before)?;
+            // The agent may have staged a managed scope itself. Untrack it
+            // without changing the live files before recording the result.
+            workspace::unstage_scoped(path, &exclusions)?;
+        }
+        Ok(())
+    })?;
+    let environment_result_input = completion.run("discovery", || {
         if let (Some(store), Some(input)) = (&environments, &environment_input) {
             let discovered = store.discover(
                 path,
@@ -7586,41 +7593,50 @@ fn perform_with_merger_inner(
                 ),
             )?;
             exclusions.extend(store.exclusions(&discovered.launch_ref)?);
-            Some(discovered)
+            Ok(Some(discovered))
         } else {
-            None
-        };
-    if let Some(config) = &job.config.environment {
-        config.check_tracked(path)?;
-    }
-    let head = if job.source_direct || source_tree {
-        // Source execution never creates Git snapshots, even in a Git repository.
-        String::new()
-    } else if environments.is_some() {
-        workspace::snapshot_node_scoped(
-            path,
-            &repository,
-            &job.execution.node,
-            Some(&job.run_id),
-            &exclusions,
-        )?
-    } else {
-        workspace::snapshot_node_for_run(path, &repository, &job.execution.node, Some(&job.run_id))?
-    };
-    if !head.is_empty() && !before.is_empty() {
-        crate::file_changes::record_git_commit_changes(
-            &job.run_id,
-            &job.execution.id,
-            &job.execution.node,
-            path,
-            &repository,
-            &before,
-            &head,
-        );
-    }
-    if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
-        store.prove_accelerator(&repository, path, input)?;
-        store.seal(path, input, &head, vec![])?;
-    }
+            Ok(None)
+        }
+    })?;
+    let head = completion.run("snapshot", || {
+        if let Some(config) = &job.config.environment {
+            config.check_tracked(path)?;
+        }
+        if job.source_direct || source_tree {
+            // Source execution never creates Git snapshots.
+            Ok(String::new())
+        } else if environments.is_some() {
+            workspace::snapshot_node_scoped(
+                path,
+                &repository,
+                &job.execution.node,
+                Some(&job.run_id),
+                &exclusions,
+            )
+        } else {
+            workspace::snapshot_node_for_run(path, &repository, &job.execution.node, Some(&job.run_id))
+        }
+    })?;
+    completion.run("file_changes", || {
+        if !head.is_empty() && !before.is_empty() {
+            crate::file_changes::record_git_commit_changes(
+                &job.run_id,
+                &job.execution.id,
+                &job.execution.node,
+                path,
+                &repository,
+                &before,
+                &head,
+            );
+        }
+        Ok(())
+    })?;
+    completion.run("environment", || {
+        if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
+            store.prove_accelerator(&repository, path, input)?;
+            store.seal(path, input, &head, vec![])?;
+        }
+        Ok(())
+    })?;
     Ok((head, output))
 }

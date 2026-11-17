@@ -4392,8 +4392,8 @@ for (const wireStatus of ["completed"]) {
       for (const [status, expected] of Object.entries(statuses)) {
         assert.equal(await page.locator(`.task-node[data-node-id="${status}"] .status`).innerText(), expected);
       }
-      assert.equal(await page.locator('.task-node[data-node-kind="merger"]').filter({ hasText: "merger · blocked" }).locator(".status").innerText(), "Failed");
-      assert.equal(await page.locator('.task-node[data-node-kind="merger"]').filter({ hasText: "publication merger" }).locator(".status").innerText(), "Completed");
+      assert.equal(await page.locator('.task-node[data-card-id="merger:blocked"] .status').innerText(), "Failed");
+      assert.equal(await page.locator('.task-node[data-card-id="merger:publication"] .status').innerText(), "Completed");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });

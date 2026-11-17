@@ -9,6 +9,7 @@ import {
   FileCode,
   FileEdit,
   GitFork,
+  Network,
   Compass,
   Globe,
   Wrench,
@@ -181,6 +182,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             badge: "route_task",
             summary: args.plan_type ? t("决定任务路线: [{0}]", args.plan_type) : t("任务路线决策"),
             type: "route",
+          };
+        case "read_graph":
+          return {
+            icon: <Network size={14} className="tool-icon read" />,
+            badge: "read_graph",
+            summary: t("读取任务图"),
+            type: "graph",
           };
         case "edit_graph":
           return {

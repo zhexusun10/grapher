@@ -209,6 +209,89 @@ fn complete_project_view_keeps_dirty_index_names_bytes_and_native_git() {
 }
 
 #[test]
+fn node_snapshot_record_comparison_validates_each_attempt_and_its_actual_head() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "record-comparison");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+
+    let first = stage_node_snapshot_with_record(&node, &source, &[]).unwrap();
+    assert_eq!(
+        first.record_matches(&source, &base).unwrap(),
+        record_matches(&source, &base, first.identity.as_deref().unwrap()).unwrap(),
+    );
+    fs::write(node.join("tracked.txt"), "different bytes\n").unwrap();
+    let next = stage_node_snapshot_with_record(&node, &source, &[]).unwrap();
+    assert!(!next.record_matches(&source, &base).unwrap());
+    assert_ne!(first.identity, next.identity);
+
+    let head = workspace::snapshot_node(&node, &source, "record-comparison").unwrap();
+    assert_ne!(head, base);
+    let continued = stage_node_snapshot_with_record(&node, &source, &[]).unwrap();
+    // A retained node can have a result HEAD different from its prepared base;
+    // that record must be checked independently of the base comparison.
+    assert!(continued.record_matches(&source, &head).unwrap());
+    fs::write(
+        record_path(&source, &head).unwrap().join("checksum"),
+        "damaged",
+    )
+    .unwrap();
+    assert!(continued
+        .record_matches(&source, &head)
+        .unwrap_err()
+        .contains("Damaged project-view evidence"));
+
+    // Reusing a comparison within one operation never bypasses validation on
+    // the next attempt, even when the project files have not changed.
+    fs::write(
+        record_path(&source, &base).unwrap().join("checksum"),
+        "damaged",
+    )
+    .unwrap();
+    assert!(stage_node_snapshot_with_record(&node, &source, &[])
+        .err()
+        .unwrap()
+        .contains("Damaged project-view evidence"));
+}
+
+#[test]
+fn node_snapshot_base_comparison_uses_normalized_view_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "normalized-record-comparison");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+
+    let (mut observed, _) = node_view(&node, &source, &[]).unwrap().unwrap();
+    let identity = node_view_identity(&observed).unwrap();
+    observed
+        .git_entries
+        .as_mut()
+        .expect("project Git evidence")
+        .insert(
+            "index".into(),
+            Entry::File {
+                mode: 0o644,
+                blob: "0".repeat(40),
+                extra: Default::default(),
+            },
+        );
+    assert_ne!(
+        serde_json::to_vec(&load(&record_path(&source, &base).unwrap()).unwrap()).unwrap(),
+        serde_json::to_vec(&observed).unwrap(),
+        "the synthetic index difference is present in serialized evidence",
+    );
+    assert_eq!(node_view_identity(&observed).unwrap(), identity);
+
+    assert_eq!(
+        reject_undeliverable_special_changes(&node, &source, &observed, &identity).unwrap(),
+        Some((base, true)),
+        "volatile Git index state is excluded from the current view identity",
+    );
+}
+
+#[test]
 fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
     for format in ["plain", "sha1", "sha256"] {
         let temp = tempfile::tempdir().unwrap();
@@ -283,6 +366,64 @@ fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
             .entries
             .contains_key("ignored/empty"));
     }
+}
+
+#[test]
+fn cold_source_staging_reuses_inspected_view_and_validates_duplicate_blobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("plain-source");
+    fs::create_dir(&source).unwrap();
+    for index in 0..48u32 {
+        fs::write(
+            source.join(format!("unique-{index:02}.txt")),
+            format!("payload-{index}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(source.join("dup-a.txt"), "shared-bytes\n").unwrap();
+    fs::write(source.join("dup-b.txt"), "shared-bytes\n").unwrap();
+    let view = inspect_source_scoped(&source, &[]).unwrap();
+
+    let shadow_stale = temp.path().join("stale-shadow.git");
+    workspace::git(
+        &source,
+        &[
+            "--git-dir",
+            shadow_stale.to_str().unwrap(),
+            "--work-tree",
+            source.to_str().unwrap(),
+            "init",
+            "-q",
+        ],
+    )
+    .unwrap();
+    fs::write(source.join("dup-b.txt"), "grown-shared-bytes\n").unwrap();
+    let err = stage_project_with_view(&source, &shadow_stale, &view).unwrap_err();
+    assert!(
+        err.contains("Project changed while binding its byte snapshot"),
+        "{err}"
+    );
+    fs::write(source.join("dup-b.txt"), "edited-bytes\n").unwrap();
+    let err = stage_project_with_view(&source, &shadow_stale, &view).unwrap_err();
+    assert!(
+        err.contains("Project changed while binding its byte snapshot"),
+        "{err}"
+    );
+    fs::write(source.join("dup-b.txt"), "shared-bytes\n").unwrap();
+    fs::write(source.join("unique-10.txt"), "same-len-edit").unwrap();
+    let err = stage_project_with_view(&source, &shadow_stale, &view).unwrap_err();
+    assert!(
+        err.contains("Project changed while binding its byte snapshot"),
+        "{err}"
+    );
+    fs::write(source.join("unique-10.txt"), "payload-10\n").unwrap();
+
+    let head = workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    let node = slot(&temp, "cold-source-node");
+    workspace::prepare(&source, &node, &head, &[]).unwrap();
+    assert_eq!(bytes(&node.join("dup-a.txt")), b"shared-bytes\n");
+    assert_eq!(bytes(&node.join("dup-b.txt")), b"shared-bytes\n");
+    assert_eq!(bytes(&node.join("unique-10.txt")), b"payload-10\n");
 }
 
 #[cfg(windows)]

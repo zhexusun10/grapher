@@ -82,11 +82,8 @@ impl Batch {
 }
 
 fn verify_file(file: &Path, blob: &str) -> Result<(), String> {
-    if git2::Oid::hash_file(git2::ObjectType::Blob, file)
-        .map_err(|e| e.to_string())?
-        .to_string()
-        != blob
-    {
+    let len = fs::metadata(file).map_err(|e| e.to_string())?.len();
+    if super::file_blob(file, len)?.to_string() != blob {
         return Err(CHANGED.into());
     }
     Ok(())

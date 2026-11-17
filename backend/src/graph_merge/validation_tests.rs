@@ -168,6 +168,46 @@ impl Fixture {
 }
 
 #[test]
+fn imported_resolution_rejects_new_worktree_changes_instead_of_collecting_them_again() {
+    for plain in [true, false] {
+        let fixture = Fixture::new(plain, "exit 0");
+        crate::workspace_view::prepare_conflicts(&fixture.source, &fixture.target).unwrap();
+        let incoming = crate::graph_merge::pending(&fixture.target).unwrap();
+        fs::write(fixture.target.join("registry.jsonl"), "left\nright\n").unwrap();
+        fs::write(
+            fixture.target.join("attempts.sqlite3"),
+            b"SQLite format 3\0left+right",
+        )
+        .unwrap();
+        workspace::git(
+            &fixture.target,
+            &["add", "-f", "--", "registry.jsonl", "attempts.sqlite3"],
+        )
+        .unwrap();
+        crate::workspace_view::import_resolution(&fixture.target).unwrap();
+        // A change after import is not part of the drained model turn's
+        // captured resolution and must not be silently folded into its commit.
+        fs::write(fixture.target.join("late.txt"), "later writer\n").unwrap();
+        let error = crate::graph_merge::finish_merge_checked(
+            &fixture.target,
+            &incoming,
+            &[],
+            true,
+            crate::graph_merge::ResolutionIndex::Imported,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ResolutionError::Repair(_)));
+        assert!(error.to_string().contains("uncommitted changes"));
+        assert!(workspace::git(&fixture.target, &["show", "HEAD:late.txt"]).is_err());
+        assert_eq!(
+            fs::read(fixture.target.join("late.txt")).unwrap(),
+            b"later writer\n"
+        );
+        fixture.assert_resolved();
+    }
+}
+
+#[test]
 fn validation_feedback_repairs_plain_binary_and_git_conflicts_in_same_execution() {
     for plain in [true, false] {
         let mut fixture = Fixture::new(

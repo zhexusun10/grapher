@@ -144,6 +144,66 @@ fn file_scanning_benchmark() {
 }
 
 #[test]
+#[ignore = "local completion record benchmark; run explicitly with --ignored --nocapture"]
+fn node_completion_record_comparison_benchmark() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut view = inspect(temp.path()).unwrap();
+    let extra = serde_json::from_value(serde_json::json!({
+        "attributes": [], "security": vec![42u8; 224], "protected": false,
+        "flags": 0, "owner": null, "efs": false,
+    }))
+    .unwrap();
+    let entry = Entry::File {
+        mode: 0o644,
+        blob: "a".repeat(40),
+        extra,
+    };
+    for index in 0..53_000 {
+        view.entries.insert(
+            format!("node_modules/pkg-{index:05}/index.js"),
+            entry.clone(),
+        );
+    }
+    let record = temp.path().join("record");
+    fs::create_dir(&record).unwrap();
+    save(&record, &view).unwrap();
+    let identity = node_view_identity(&view).unwrap();
+    let mut repeated = Vec::new();
+    let mut reused = Vec::new();
+    for round in 0..3 {
+        for reuse in if round % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let started = Instant::now();
+            // Both paths validate the complete stored checksum. The original
+            // special-entry check discarded this record before HEAD comparison.
+            let baseline = load(&record).unwrap();
+            let matches = if reuse {
+                baseline == view
+            } else {
+                drop(baseline);
+                node_view_identity(&load(&record).unwrap()).unwrap() == identity
+            };
+            assert!(matches);
+            let elapsed = started.elapsed();
+            if reuse {
+                reused.push(elapsed);
+            } else {
+                repeated.push(elapsed);
+            }
+        }
+    }
+    println!(
+        "completion record comparison: entries=53000, record_bytes={}, repeated={:?}, reused={:?}",
+        fs::metadata(record.join("view.json")).unwrap().len(),
+        median(repeated),
+        median(reused)
+    );
+}
+
+#[test]
 #[ignore = "local SHA-1/SHA-256 staging benchmark; run explicitly with --ignored --nocapture"]
 fn snapshot_staging_benchmark() {
     crate::ensure_test_data_root();

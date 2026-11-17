@@ -33,7 +33,7 @@ export const phaseText: Record<string, string> = {
 export type WorkNode = Node<{
   id: string;
   task: string;
-  /** Merger cards are execution helpers, not planner tasks, and use compact geometry. */
+  /** Merger cards share task geometry while retaining their execution identity. */
   kind?: "task" | "merger";
   status: Status;
   attempts: number;
@@ -61,7 +61,6 @@ export const TaskNode = React.memo(({ id, data }: NodeProps<WorkNode>) => {
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
       <div className="node-heading">
-        {data.kind === "merger" && <span className="node-kind-label">{t("合并辅助节点")}</span>}
         <strong>{data.id}</strong>
       </div>
       <p>{data.task}</p>

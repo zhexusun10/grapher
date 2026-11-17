@@ -32,7 +32,7 @@ mod workspace_images;
 use crate::path_identity::same_repository_binding;
 #[cfg(all(test, windows))]
 use crate::path_identity::windows_repository_key;
-pub(crate) use activity::set_prepare_phase;
+pub(crate) use activity::{set_prepare_phase, ActivityGuard as RuntimeActivityGuard};
 use activity::*;
 use open_file::*;
 use project_discovery::*;
@@ -5972,7 +5972,7 @@ fn get_merger_prompt(
     if let Some(merger) = runtime.state.mergers.iter().find(|m| m.id == execution_id) {
         let target_node_name = merger.node.strip_prefix("merge:").unwrap_or(&merger.node);
         let target_task = if merger.node == "merger" {
-            publication_driver::merger_query(&runtime.state)
+            publication_driver::merger_query_at_start(&runtime.state, &merger.id)
         } else {
             runtime
                 .state

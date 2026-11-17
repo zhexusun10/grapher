@@ -141,23 +141,48 @@ pub(super) fn run_activity(run: &str) -> Vec<RuntimeActivity> {
 }
 
 /// Clears its activity entry on drop, including early `?` returns.
-pub(super) struct ActivityGuard {
+pub(crate) struct ActivityGuard {
     run: String,
     key: String,
 }
 
 impl ActivityGuard {
-    pub(super) fn begin(run: &str, key: &str, kind: &str, node: &str) -> Self {
+    pub(crate) fn begin(run: &str, key: &str, kind: &str, node: &str) -> Self {
         set_activity(run, key, kind, node);
         Self {
             run: run.into(),
             key: key.into(),
         }
     }
+    pub(crate) fn phase(&self, phase: &str) {
+        set_activity_phase(&self.run, &self.key, phase);
+    }
 }
 
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
         clear_activity(&self.run, &self.key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalization_activity_is_visible_by_node_and_clears_when_work_fails() {
+        let run = uuid::Uuid::new_v4().to_string();
+        let failed = || -> Result<(), String> {
+            let guard = ActivityGuard::begin(&run, "finalize-attempt", "node_finalize", "writer");
+            guard.phase("snapshot");
+            let activity = run_activity(&run);
+            assert_eq!(activity.len(), 1);
+            assert_eq!(activity[0].kind, "node_finalize");
+            assert_eq!(activity[0].nodes, vec!["writer"]);
+            assert_eq!(activity[0].phase.as_deref(), Some("snapshot"));
+            Err("snapshot failed".into())
+        };
+        assert!(failed().is_err());
+        assert!(run_activity(&run).is_empty());
     }
 }

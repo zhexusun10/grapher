@@ -102,6 +102,12 @@ fn compose_graph_virtual(
     Ok(Some(current))
 }
 
+#[derive(Clone, Copy)]
+enum ResolutionIndex {
+    Collect,
+    Imported,
+}
+
 /// `resolved` distinguishes a merge Git completed by itself from one a Merger
 /// had to repair. Only a repair can leave unresolved entries, a staged managed
 /// scope or uncommitted leftovers, and only then are the full-tree status walks
@@ -112,7 +118,14 @@ fn finish_merge(
     exclusions: &[String],
     resolved: bool,
 ) -> Result<(), String> {
-    finish_merge_checked(repository, head, exclusions, resolved).map_err(|error| error.to_string())
+    finish_merge_checked(
+        repository,
+        head,
+        exclusions,
+        resolved,
+        ResolutionIndex::Collect,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn finish_merge_checked(
@@ -120,6 +133,7 @@ fn finish_merge_checked(
     head: &str,
     exclusions: &[String],
     resolved: bool,
+    index: ResolutionIndex,
 ) -> Result<(), ResolutionError> {
     if resolved {
         let unmerged = git(repository, &["diff", "--name-only", "--diff-filter=U"])?;
@@ -129,7 +143,14 @@ fn finish_merge_checked(
             )));
         }
         if pending(repository).is_some() {
-            workspace::stage_scoped_local(repository, exclusions)?;
+            // Bound resolution import has already captured the drained writer's
+            // full project tree. Repeating it here scans and stages every file
+            // again before the same patch validation and commit.
+            if matches!(index, ResolutionIndex::Collect)
+                || !crate::workspace_view::is_bound(repository)
+            {
+                workspace::stage_scoped_local(repository, exclusions)?;
+            }
             // A Merger may have staged a managed environment/cache scope itself;
             // never let a runtime-owned path enter the merge commit.
             workspace::unstage_scoped(repository, exclusions)?;
@@ -178,7 +199,14 @@ pub(crate) fn finish_project_resolution(
 ) -> Result<(), String> {
     crate::workspace_view::accept_resolution(repository, true)?;
     if let Some(incoming) = pending(repository) {
-        finish_merge(repository, &incoming, exclusions, true)?;
+        finish_merge_checked(
+            repository,
+            &incoming,
+            exclusions,
+            true,
+            ResolutionIndex::Imported,
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -298,8 +326,14 @@ fn compose_graph_scoped(
         if crate::workspace_view::has_record(source, &current) {
             inputs.push(current);
         }
-        let observed =
-            crate::workspace_view::prepare(source, repository, &base, &inputs, exclusions)?;
+        let observed = crate::workspace_view::prepare(
+            source,
+            repository,
+            &base,
+            &inputs,
+            exclusions,
+            false,
+        )?;
         return crate::workspace_view::seal_prepared_scoped(
             repository, source, exclusions, observed,
         );
@@ -466,7 +500,13 @@ pub(crate) fn resolve_with_merger_for_node(
                 .map(|environment| environment.exclusions())
                 .unwrap_or_default();
             crate::workspace_view::import_resolution(repository)?;
-            finish_merge_checked(repository, &incoming, &exclusions, true)?;
+            finish_merge_checked(
+                repository,
+                &incoming,
+                &exclusions,
+                true,
+                ResolutionIndex::Imported,
+            )?;
             if crate::workspace_view::is_bound(repository) {
                 crate::workspace_view::seal_prepared_scoped(
                     repository,
@@ -633,7 +673,13 @@ pub fn continue_merger_for_node(
                 .unwrap_or_default();
             crate::workspace_view::import_resolution(repository)?;
             if let Some(head) = &incoming {
-                finish_merge_checked(repository, head, &exclusions, true)
+                finish_merge_checked(
+                    repository,
+                    head,
+                    &exclusions,
+                    true,
+                    ResolutionIndex::Imported,
+                )
             } else if crate::workspace_view::is_bound(repository) {
                 workspace::snapshot_node_scoped(
                     repository,

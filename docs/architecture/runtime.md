@@ -641,7 +641,18 @@ return progress instead of queueing behind I/O. Activity is display-only and
 never changes durable event state. `workspace_prepare` includes workspace reuse,
 validation and environment setup; the UI reports copying only for an explicit
 `copy` phase. Missing, mixed or unrecognized phases use a generic preparation
-label. Metadata, history, settings, and provider-catalog waits have a 15-second
+label. After the agent returns (including any feedback-protocol repair),
+`node_finalize` reports result saving, with snapshot and environment phases shown
+in the node conversation. Completion still waits for validated code/environment
+evidence and the output flush; this activity never marks a node completed early.
+The execution log records `grapher_completion_phase` start/end entries with
+`phase`, `status`, `timestamp` and terminal `elapsedMs` for verification, discovery,
+snapshot, file-change collection and environment sealing. These timings separate
+post-agent Runtime work from the model-process duration. A node snapshot reuses
+its fresh project inspection for special-entry checks and retains its validated
+base comparison only for that leased snapshot operation; later attempts and the
+post-import capture still recheck their own evidence.
+Metadata, history, settings, and provider-catalog waits have a 15-second
 browser deadline; planning streams, approvals and native result execution do not.
 A settings timeout asks the user to refresh and verify; it never rolls back or
 automatically retries a save.
@@ -776,8 +787,8 @@ After interruption:
   Failed retries retain their own draft for another explicit continuation. See
   [Planner continuation](../../backend/src/planner_continuation_tests.rs) and
   [context projection](../../scripts/continuation-context.test.ts).
-- Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
-- An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.
+- Interrupted publication or its Merger becomes `publication_failed` for explicit retry. The empty composer in that Merger conversation or the Graph main view issues `retry_publication`, like the footer's Retry write-back action. It preserves the pinned completed heads and retained publication journal/merge workspace without rerunning completed nodes or adding a user message. This resumes the publication operation; conflict repair may launch a new Merger execution rather than resume the interrupted model session. A draft still starts an explicit Merger follow-up, which does not itself complete or retry publication.
+- An interrupted node-composition Merger is recorded as failed without entering the publication phase. Its composer can issue `resume_node` for the target task only when the backend exposes that node as individually recoverable. This retries workspace preparation and then the node task. A globally paused multi-node Graph requires the footer's run-wide Continue; individual composers do not unpause unrelated work.
 - Committed pending feedback remains queued. Resume drains and validates it before related dispatch; an uncommitted finish cannot leave a half-persisted handoff.
 
 Old executor leases block startup until the old execution is confirmed stopped; the native backend does not silently discard them or take over background writers.

@@ -234,7 +234,11 @@ metadata against the common source/node ancestor. Missing or ambiguous common
 view evidence fails closed rather than guessing which metadata to retain.
 Preparation compares the complete physical result before recording readiness;
 legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
-an incomplete workspace. Unix UID/GID are host ownership, not portable project
+an incomplete workspace. For an empty parentless slot, the immutable base View
+and successful Git checkout are reused as the materialization proof, while
+native metadata, links, hardlinks and nested repositories are still restored
+before the readiness gate. Reused slots and composed inputs retain the complete
+physical comparison. Unix UID/GID are host ownership, not portable project
 metadata: private entries keep their actual creation ownership. Current view
 records exclude host UID/GID while preserving their checksum contract. UID/GID-only changes do
 not advance a view reference and are not transferred or published. Permission
@@ -602,6 +606,11 @@ unmerged index and a successful `git diff --cached --check`. Searching text
 markers alone is not verification. The backend imports resolved project bytes
 and commits the graph merge preserving its incoming parents; the visible
 project repository receives no internal `MERGE_HEAD` commits or graph refs.
+Once resolution import captures a bound workspace, merge finalization reuses
+that imported index rather than collecting the full project tree again. It
+still checks unresolved entries, patch diagnostics, managed scopes, incoming
+ancestry and worktree cleanliness before reporting success; a change after
+import is refused rather than silently included in a second capture.
 For plain sources, explicit staging can resolve a path without changing its
 bytes (a deliberate keep-ours decision), but the working file must match the
 staged resolution; clearing index conflict entries alone is not evidence.

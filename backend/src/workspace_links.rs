@@ -41,19 +41,12 @@ fn safe(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn capture(
-    root: &Path,
-    files: impl IntoIterator<Item = String>,
+pub(crate) fn capture_from_identities(
+    files: impl IntoIterator<Item = (String, (u128, u64))>,
 ) -> Result<Topology, String> {
     let mut groups: BTreeMap<u128, (Vec<String>, u64)> = BTreeMap::new();
-    for name in files {
+    for (name, (identity, count)) in files {
         safe(&name)?;
-        let path = root.join(&name);
-        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err("Hardlink evidence must identify regular files".into());
-        }
-        let (identity, count) = crate::workspace_metadata::file_identity(&path, &metadata)?;
         if count <= 1 {
             continue;
         }

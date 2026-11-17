@@ -2,9 +2,13 @@
 use super::*;
 use std::path::Path;
 
-/// Extra user context belongs only to source publication. Node preparation still
-/// passes its Job.task unchanged, and Merger continuations retain their own chat.
+/// Choose context by the purpose of this delivery, independently of its cwd.
+/// Intermediate handoffs prepare downstream work; final publication keeps the
+/// user's goal and accepted requests.
 pub(super) fn merger_query(state: &Snapshot) -> String {
+    if let Some(objective) = handoff_merger_query(state) {
+        return objective;
+    }
     let withdrawn = state.withdrawn_steer_sequences();
     let planner_statuses: std::collections::BTreeMap<_, _> = state
         .events
@@ -58,6 +62,90 @@ pub(super) fn merger_query(state: &Snapshot) -> String {
             requests.join("\n\n")
         )
     }
+}
+
+fn handoff_merger_query(state: &Snapshot) -> Option<String> {
+    if state.batch_handoff.is_none()
+        || (state.pending_feedback.is_empty()
+            && state.graph.nodes.iter().all(|node| {
+                state
+                    .nodes
+                    .get(&node.id)
+                    .is_some_and(|node| node.status == "completed")
+            }))
+    {
+        return None;
+    }
+    let heads: BTreeSet<&str> = state
+        .publication
+        .iter()
+        .flat_map(|publication| publication.heads.iter().map(String::as_str))
+        .collect();
+    let mut producers: BTreeSet<&str> = state
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.head
+                .as_deref()
+                .is_some_and(|head| heads.contains(head))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    producers.extend(state.executions.iter().filter_map(|execution| {
+        (execution.status == "completed"
+            && !state.superseded_execution_ids.contains(&execution.id)
+            && execution
+                .after
+                .as_deref()
+                .is_some_and(|head| heads.contains(head)))
+        .then_some(execution.node.as_str())
+    }));
+    let mut targets: BTreeSet<&str> = state
+        .graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            !edge.feedback
+                && producers.contains(edge.from.as_str())
+                && state
+                    .nodes
+                    .get(&edge.to)
+                    .is_none_or(|node| node.status != "completed")
+        })
+        .map(|edge| edge.to.as_str())
+        .collect();
+    targets.extend(state.pending_feedback.iter().filter_map(|feedback| {
+        (!feedback.accepted && heads.contains(feedback.source_head.as_str()))
+            .then_some(feedback.to.as_str())
+    }));
+    let tasks: Vec<_> = state
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| targets.contains(node.id.as_str()))
+        .map(|node| format!("Node {}:\n{}", node.id, node.task))
+        .collect();
+    let mut objective = "Integrate the completed upstream results into the source workspace so the remaining graph work can proceed.".to_string();
+    if !tasks.is_empty() {
+        objective.push_str("\n\nDownstream workspace objectives:\n\n");
+        objective.push_str(&tasks.join("\n\n"));
+    }
+    Some(objective)
+}
+
+/// A missing saved prompt must use the execution's launch context, even after
+/// its handoff clears, downstream tasks finish, or Planner revises the graph.
+pub(super) fn merger_query_at_start(state: &Snapshot, execution_id: &str) -> String {
+    let Some(start) = state.events.iter().position(|event| {
+        matches!(&event.kind, EventKind::MergerStarted { execution } if execution.id == execution_id)
+    }) else {
+        return merger_query(state);
+    };
+    let mut historical = Snapshot::default();
+    for event in &state.events[..=start] {
+        crate::model::apply(&mut historical, event);
+    }
+    merger_query(&historical)
 }
 
 pub(super) fn publish_batch(
@@ -234,6 +322,239 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn handoff_state() -> Snapshot {
+        let mut snapshot = state(vec![planner_steer("global", "A global user follow-up")]);
+        snapshot.graph.nodes = [
+            ("left", "Implement the left branch"),
+            ("right", "Implement the right branch"),
+            ("qa", "Integrate both branches and run build plus visual QA"),
+            ("later", "A later task after QA"),
+            ("unrelated", "An unrelated task"),
+        ]
+        .into_iter()
+        .map(|(id, task)| Node {
+            id: id.into(),
+            task: task.into(),
+        })
+        .collect();
+        snapshot.graph.edges = [("left", "qa"), ("right", "qa"), ("qa", "later")]
+            .into_iter()
+            .map(|(from, to)| Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback: false,
+            })
+            .collect();
+        snapshot.nodes = snapshot
+            .graph
+            .nodes
+            .iter()
+            .map(|node| {
+                let completed = matches!(node.id.as_str(), "left" | "right");
+                (
+                    node.id.clone(),
+                    NodeState {
+                        status: if completed { "completed" } else { "waiting" }.into(),
+                        head: completed.then(|| format!("head-{}", node.id)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        snapshot.batch_handoff = Some(BatchHandoff {
+            recovery_execution_ids: vec![],
+        });
+        snapshot.publication = Some(Publication {
+            repository: "/source".into(),
+            heads: vec!["head-left".into(), "head-right".into()],
+            status: "publishing".into(),
+            head: None,
+            error: None,
+            started_at: 0,
+            completed_at: None,
+        });
+        snapshot
+    }
+
+    #[test]
+    fn handoff_merger_objective_uses_downstream_task_instead_of_global_requests() {
+        let snapshot = handoff_state();
+        let query = merger_query(&snapshot);
+        assert!(query.contains("Node qa:\nIntegrate both branches and run build plus visual QA"));
+        assert_eq!(
+            query.matches("Node qa:").count(),
+            1,
+            "fan-in lists the target once"
+        );
+        for excluded in [
+            "Refactor login",
+            "A global user follow-up",
+            "Implement the left branch",
+            "A later task after QA",
+            "An unrelated task",
+            "<user further request>",
+        ] {
+            assert!(
+                !query.contains(excluded),
+                "unrelated context leaked: {excluded}"
+            );
+        }
+        let prompt =
+            crate::graph_merge::merger_prompt(&query, crate::graph_merge::MergerConflicts::GIT);
+        assert!(prompt.contains("context, not a task to execute"));
+        assert!(prompt.contains(&format!(
+            "<workspace_objective>\n{query}\n</workspace_objective>"
+        )));
+    }
+
+    #[test]
+    fn handoff_merger_objective_handles_multiple_consumers_and_only_delivered_heads() {
+        let mut snapshot = handoff_state();
+        snapshot.graph.edges.extend([
+            Edge {
+                from: "right".into(),
+                to: "unrelated".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "left".into(),
+                to: "later".into(),
+                feedback: true,
+            },
+        ]);
+        let query = merger_query(&snapshot);
+        assert!(query.contains("Node qa:"));
+        assert!(query.contains("Node unrelated:"));
+        assert!(
+            !query.contains("Node later:"),
+            "feedback is not an incoming dependency"
+        );
+        snapshot.publication.as_mut().unwrap().heads = vec!["head-left".into()];
+        assert!(!merger_query(&snapshot).contains("Node unrelated:"));
+        snapshot.nodes.get_mut("qa").unwrap().status = "completed".into();
+        let query = merger_query(&snapshot);
+        assert!(
+            !query.contains("Node qa:"),
+            "completed consumers are not upcoming work"
+        );
+        assert!(
+            !query.contains(&snapshot.graph.original_goal),
+            "a handoff with remaining work stays scoped even without a direct consumer"
+        );
+    }
+
+    #[test]
+    fn handoff_merger_objective_includes_a_pending_feedback_target() {
+        let mut snapshot = handoff_state();
+        for node in snapshot.nodes.values_mut() {
+            node.status = "completed".into();
+        }
+        snapshot.pending_feedback.push(PendingFeedback {
+            execution_id: "review".into(),
+            from: "right".into(),
+            to: "left".into(),
+            source_head: "head-right".into(),
+            target_head: Some("head-left".into()),
+            target_revision: 1,
+            target_execution_id: Some("left-execution".into()),
+            accepted: false,
+            output_offset: 0,
+            output_bytes: 0,
+        });
+        let query = merger_query(&snapshot);
+        assert!(query.contains("Node left:\nImplement the left branch"));
+        assert!(!query.contains("Refactor login"));
+        assert!(!query.contains("A global user follow-up"));
+    }
+
+    #[test]
+    fn final_batch_publication_keeps_user_goal_and_requests() {
+        let mut snapshot = handoff_state();
+        for node in snapshot.nodes.values_mut() {
+            node.status = "completed".into();
+        }
+        let query = merger_query(&snapshot);
+        assert!(query.starts_with("Refactor login\n\n<user further request>"));
+        assert!(query.contains("A global user follow-up"));
+        assert!(!query.contains("Node qa:"));
+    }
+
+    #[test]
+    fn historical_merger_objective_retains_its_launch_context_after_downstream_completion() {
+        let original = handoff_state();
+        let mut snapshot = Snapshot::default();
+        let mut append = |kind| {
+            let event = Event {
+                sequence: snapshot.events.len() as i64 + 1,
+                timestamp: 0,
+                kind,
+            };
+            crate::model::apply(&mut snapshot, &event);
+        };
+        append(EventKind::Created {
+            graph: original.graph.clone(),
+            config: serde_json::from_value(
+                serde_json::json!({"repository": "/source", "model": "fixture"}),
+            )
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        });
+        for node in ["left", "right"] {
+            let execution: Execution = serde_json::from_value(serde_json::json!({
+                "id": node, "node": node, "revision": 1, "attempt": 1, "sessionId": node,
+                "worktree": "/private", "before": "base", "status": "running", "startedAt": 0,
+            }))
+            .unwrap();
+            append(EventKind::Started {
+                execution,
+                message_sequences: None,
+                fresh_restart: false,
+            });
+            append(EventKind::Finished {
+                execution_id: node.into(),
+                head: format!("head-{node}"),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            });
+        }
+        append(EventKind::BatchHandoffRequested {
+            recovery_execution_ids: vec![],
+        });
+        append(EventKind::PublicationStarted {
+            repository: "/source".into(),
+            heads: original.publication.unwrap().heads,
+        });
+        let execution: Execution = serde_json::from_value(serde_json::json!({
+            "id": "handoff-merger", "node": "merger", "revision": 1, "attempt": 1, "sessionId": "handoff-merger",
+            "worktree": "/private", "before": "base", "status": "running", "startedAt": 0,
+        })).unwrap();
+        append(EventKind::MergerStarted { execution });
+        let before = merger_query_at_start(&snapshot, "handoff-merger");
+        assert!(before.contains("Node qa:"));
+        let event = Event {
+            sequence: snapshot.events.len() as i64 + 1,
+            timestamp: 0,
+            kind: EventKind::PublicationCompleted {
+                head: "delivered".into(),
+            },
+        };
+        crate::model::apply(&mut snapshot, &event);
+        snapshot
+            .graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "qa")
+            .unwrap()
+            .task = "A revised QA task".into();
+        for node in snapshot.nodes.values_mut() {
+            node.status = "completed".into();
+        }
+        assert!(!merger_query(&snapshot).contains("Node qa:"));
+        assert_eq!(merger_query_at_start(&snapshot, "handoff-merger"), before);
     }
 
     #[test]

@@ -323,7 +323,10 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         const { nodes, edges } = readCandidate();
         // Return only the editable graph contents, not the stored user goal.
         // Inline output and overflow snapshots share this same projection.
-        const text = JSON.stringify({ nodes, edges }, null, 2);
+        const projectedEdges = feedbackEnabled
+          ? edges
+          : edges.filter(edge => !edge.feedback).map(({ from, to }) => ({ from, to }));
+        const text = JSON.stringify({ nodes, edges: projectedEdges }, null, 2);
         const truncation = truncateHead(text);
         const details: { truncation?: typeof truncation; fullOutputPath?: string } = {};
         let content = truncation.content;

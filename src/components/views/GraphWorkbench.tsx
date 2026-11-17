@@ -82,6 +82,17 @@ function plannerSteerLabel(row: PlannerSteerRow): string {
   }
 }
 
+function nodeCompletionStatusText(activity: RuntimeActivity[], node?: string): string | undefined {
+  const completion = activity.find(item => item.kind === "node_finalize" &&
+    (!node || item.nodes.includes(node)));
+  if (!completion) return undefined;
+  switch (completion.phase) {
+    case "snapshot": return t("正在保存节点快照");
+    case "environment": return t("正在保存节点运行环境");
+    default: return t("正在保存节点结果");
+  }
+}
+
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
   if (!activity.length) return null;
@@ -104,7 +115,7 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
   }
   if (byKind("source_materialize")) return t("正在建立临时 Git 快照（首次收录项目文件）");
   if (byKind("source_capture")) return t("正在记录 Git 源快照");
-  return null;
+  return nodeCompletionStatusText(activity) ?? null;
 }
 
 /** Planner positions persist within a Conversation; Node views reopen at the
@@ -677,13 +688,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [selectedMerger?.id, state.runId, mergerPrompts]);
 
   const nodeMergerPrompt = useMemo(() => {
-    if (!isNodeMergerSelected && !selectedPublicationMerger) return "";
-    const originalGoal = state.graph.originalGoal || state.planning?.goal || "";
-    const targetTask = isNodeMergerSelected
-      ? (state.graph.nodes.find((item) => item.id === nodeMergerTarget)?.task || originalGoal)
-      : originalGoal;
+    // Publication can be an intermediate handoff or the final delivery. Wait
+    // for its recorded backend prompt instead of guessing from the user's goal.
+    if (!isNodeMergerSelected) return "";
+    const targetTask = state.graph.nodes.find((item) => item.id === nodeMergerTarget)?.task || "";
     return getMergerSystemPrompt(targetTask);
-  }, [isNodeMergerSelected, selectedPublicationMerger, nodeMergerTarget, state.graph.nodes, state.graph.originalGoal, state.planning?.goal]);
+  }, [isNodeMergerSelected, nodeMergerTarget, state.graph.nodes]);
 
   const activeMergerPrompt = (selectedMerger?.id ? mergerPrompts[selectedMerger.id] : undefined) || nodeMergerPrompt;
 
@@ -2418,6 +2428,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const publicationWorking = graphPhase === "publishing" || graphPhase === "merging"
     || publicationStatus === "publishing" || publicationStatus === "merging";
   const publicationFailedNow = graphPhase === "publication_failed" || publicationStatus === "failed";
+  const canRetryPublication = state.phase === "publication_failed" && !isPlanning && controlPending === null &&
+    ![...state.executions, ...(state.mergers ?? [])].some(item => item.status === "running");
+  const retryPublication = () => {
+    setControlPending("resume");
+    return onControl("retry_publication");
+  };
+  const continueSelectedAgent = selectedMerger
+    ? publicationMergerSelected && canRetryPublication
+      ? retryPublication
+      : isNodeMergerSelected && selectedMerger.status === "failed" && canContinueNode(state.nodes[nodeMergerTarget])
+        ? () => continueNode(nodeMergerTarget)
+        : undefined
+    : selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.id) : undefined;
   const publicationErrorText = publicationFailedNow ? state.publication?.error ?? "" : "";
   const publicationTarget = publicationWorking || publicationFailedNow ? state.publication?.repository : undefined;
   const hasCompletedPublication = routeType === "graph" && (
@@ -3012,7 +3035,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onToggle={() => toggleFooterPanel("details")}
                   showWorking={isSelectedNodeWorking}
                   compacting={isSelectedNodeCompacting}
-                  workingLabel={publicationWorkingLabel}
+                  workingLabel={nodeCompletionStatusText(activity, selectedNode.id) ?? publicationWorkingLabel}
                   summaryAction={changesTrigger}
                   additionalDetails={changesPanel}
                   scrollContainerRef={chatScrollRef}
@@ -3101,7 +3124,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.id); onInterrupt(selectedNode?.id); } : undefined}
                 onWithdraw={withdrawMessages}
-                onContinue={!selectedMerger && selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.id) : undefined}
+                onContinue={continueSelectedAgent}
                 disabled={nodeComposerDisabled}
               />
             </motion.div>
@@ -3243,7 +3266,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       onToggle={() => toggleFooterPanel("details")}
                       showWorking={isMainViewWorking}
                       compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
-                      workingLabel={publicationWorkingLabel}
+                      workingLabel={nodeCompletionStatusText(activity, serialNode?.id) ?? publicationWorkingLabel}
                       summaryAction={changesTrigger}
                       additionalDetails={changesPanel}
                       scrollContainerRef={chatScrollRef}
@@ -3550,7 +3573,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
                 onWithdraw={withdrawMessages}
                 onContinue={isSerialExecution && serialNode && canContinueNode(serialNodeState) ? () => continueNode(serialNode.id)
-                  : routeType === "graph" && !isMainViewWorking && (failedPlanning ?? state.planning)?.status === "failed" &&
+                  : routeType === "graph" && canRetryPublication ? retryPublication
+                    : routeType === "graph" && !isMainViewWorking && (failedPlanning ?? state.planning)?.status === "failed" &&
                     (failedPlanning ?? state.planning)?.planType === "graph" && (failedPlanning ?? state.planning)?.runId === state.runId
                     ? onContinuePlanner : undefined}
                 disabled={mainComposerDisabled}
@@ -3718,7 +3742,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     </FooterStatusLabel>
                     <FooterControlsGroup token={footerControlKey} disabled={reduceMotion}>
                       {publicationFailedNow ? (
-                        <button key="retry-publication-btn" type="button" className="primary" disabled={locked} onClick={() => onControl("retry_publication")}>
+                        <button key="retry-publication-btn" type="button" className="primary" disabled={locked || controlPending !== null} onClick={retryPublication}>
                           {t("重试回写")}
                         </button>
                       ) : graphPhase === "awaiting_approval" ? (

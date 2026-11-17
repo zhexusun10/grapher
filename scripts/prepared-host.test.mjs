@@ -401,8 +401,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         assert.deepEqual(savedGraph.nodes.map(node => node.id), ['published', 'A', 'B']);
         assert.deepEqual(savedGraph.edges, [{ from: 'A', to: 'B', feedback: false }]);
         assert.equal(savedGraph.originalGoal, 'goal-planner', 'Reads do not erase the stored goal');
-        assert.deepEqual(JSON.parse(results[7].content), { nodes: savedGraph.nodes, edges: savedGraph.edges },
-          'a read later in the same response sees only successful mutations without echoing the original goal');
+        assert.deepEqual(JSON.parse(results[7].content), { nodes: savedGraph.nodes, edges: [{ from: 'A', to: 'B' }] },
+          'a read later in the same response sees only successful mutations without echoing the original goal or disabled feedback field');
       } else {
         assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));
         assert.ok(!tools.includes('read_graph'), 'graph inspection is Planner-only');

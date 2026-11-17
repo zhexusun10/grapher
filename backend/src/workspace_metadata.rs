@@ -125,8 +125,15 @@ const MACOS_HOST_MANAGED_FLAGS: u32 =
 #[cfg(not(target_os = "macos"))]
 const MACOS_HOST_MANAGED_FLAGS: u32 = 0;
 
-pub(crate) fn capture(path: &Path, _metadata: &fs::Metadata) -> Result<Extra, String> {
-    platform::capture(path)
+pub(crate) fn capture(path: &Path, metadata: &fs::Metadata) -> Result<Extra, String> {
+    platform::capture(path, metadata)
+}
+
+pub(crate) fn capture_with_identity(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(Extra, (u128, u64)), String> {
+    platform::capture_with_identity(path, metadata)
 }
 
 #[cfg(all(windows, test))]
@@ -322,8 +329,7 @@ mod platform {
         }
         Ok(flags as u32 & !STORAGE)
     }
-    pub(super) fn capture(value: &Path) -> Result<Extra, String> {
-        let metadata = fs::symlink_metadata(value).map_err(|e| e.to_string())?;
+    pub(super) fn capture(value: &Path, metadata: &fs::Metadata) -> Result<Extra, String> {
         #[cfg(target_os = "linux")]
         let flags = if metadata.is_file() || metadata.is_dir() {
             linux_flags(value, None)?
@@ -372,7 +378,25 @@ mod platform {
             ..Extra::default()
         })
     }
+    pub(super) fn capture_with_identity(
+        value: &Path,
+        metadata: &fs::Metadata,
+    ) -> Result<(Extra, (u128, u64)), String> {
+        Ok((
+            capture(value, metadata)?,
+            super::file_identity(value, metadata)?,
+        ))
+    }
     pub(super) fn restore(value: &Path, extra: &Extra, mode: Option<u32>) -> Result<(), String> {
+        let initial_metadata = fs::symlink_metadata(value).map_err(|e| e.to_string())?;
+        if mode.is_none_or(|wanted| {
+            use std::os::unix::fs::PermissionsExt;
+            !initial_metadata.file_type().is_symlink()
+                && (initial_metadata.permissions().mode() & 0o7777) == wanted
+        }) && capture(value, &initial_metadata).is_ok_and(|current| current == *extra)
+        {
+            return Ok(());
+        }
         // Private project entries are created by the runtime's host user.
         // Legacy UID/GID values are not replayed, including on symlinks; mode,
         // ACLs, xattrs and flags are still restored and verified below.
@@ -481,7 +505,8 @@ mod platform {
                 linux_flags(value, Some(extra.flags))?;
             }
         }
-        if capture(value)? != *extra {
+        let final_metadata = fs::symlink_metadata(value).map_err(|e| e.to_string())?;
+        if capture(value, &final_metadata)? != *extra {
             return Err(format!(
                 "Project metadata differs after materialization: {}",
                 value.display()
@@ -571,13 +596,9 @@ mod platform {
             length: *mut u32,
         ) -> i32;
     }
-    pub(super) fn file_identity(path: &Path) -> Result<(u128, u64), String> {
-        use std::os::windows::io::AsRawHandle;
-        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    fn identity_from_handle(handle: *mut c_void) -> Result<(u128, u64), String> {
         let mut information = [0u32; 13]; // BY_HANDLE_FILE_INFORMATION, DWORD aligned
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) }
-            == 0
-        {
+        if unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) } == 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
         Ok((
@@ -587,10 +608,13 @@ mod platform {
             u64::from(information[10]),
         ))
     }
-    fn stream_keys(path: &Path) -> Result<Vec<String>, String> {
-        if crate::workspace_symlinks::is_link(
-            &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
-        ) {
+    pub(super) fn file_identity(path: &Path) -> Result<(u128, u64), String> {
+        use std::os::windows::io::AsRawHandle;
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        identity_from_handle(file.as_raw_handle())
+    }
+    fn stream_keys(path: &Path, metadata: &fs::Metadata) -> Result<Vec<String>, String> {
+        if crate::workspace_symlinks::is_link(metadata) {
             return Ok(Vec::new());
         }
         let name = wide(path)?;
@@ -664,10 +688,28 @@ mod platform {
         }
         Ok(())
     }
-    pub(super) fn capture(path: &Path) -> Result<Extra, String> {
+    pub(super) fn capture(path: &Path, source_metadata: &fs::Metadata) -> Result<Extra, String> {
+        capture_impl(path, source_metadata, false).map(|(extra, _)| extra)
+    }
+    pub(super) fn capture_with_identity(
+        path: &Path,
+        source_metadata: &fs::Metadata,
+    ) -> Result<(Extra, (u128, u64)), String> {
+        let (extra, identity) = capture_impl(path, source_metadata, true)?;
+        let identity = match identity {
+            Some(identity) => identity,
+            None => file_identity(path)?,
+        };
+        Ok((extra, identity))
+    }
+    fn capture_impl(
+        path: &Path,
+        source_metadata: &fs::Metadata,
+        need_identity: bool,
+    ) -> Result<(Extra, Option<(u128, u64)>), String> {
         use std::os::windows::fs::MetadataExt;
-        let source_metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-        let efs = source_metadata.file_attributes() & 0x4000 != 0;
+        let attributes_raw = source_metadata.file_attributes();
+        let efs = attributes_raw & 0x4000 != 0;
         let name = wide(path)?;
         // Open the link itself, never canonicalize/follow it to a live source
         // target when capturing or restoring security metadata.
@@ -701,6 +743,11 @@ mod platform {
                 std::ptr::null_mut(),
                 &mut descriptor,
             )
+        };
+        let identity = if need_identity && result == 0 {
+            identity_from_handle(handle).ok()
+        } else {
+            None
         };
         unsafe {
             CloseHandle(handle);
@@ -769,7 +816,7 @@ mod platform {
         }
         let security = text.into_bytes();
         let mut attributes = Vec::new();
-        for key in stream_keys(path)? {
+        for key in stream_keys(path, source_metadata)? {
             let mut stream_path = path.as_os_str().to_os_string();
             stream_path.push(&key);
             attributes.push((
@@ -778,18 +825,18 @@ mod platform {
             ));
         }
         attributes.sort();
-        let flags = fs::symlink_metadata(path)
-            .map_err(|e| e.to_string())?
-            .file_attributes()
-            & 0x3127;
-        Ok(Extra {
-            attributes,
-            security,
-            protected: control & 0x1000 != 0,
-            flags,
-            owner: None,
-            efs,
-        })
+        let flags = attributes_raw & 0x3127;
+        Ok((
+            Extra {
+                attributes,
+                security,
+                protected: control & 0x1000 != 0,
+                flags,
+                owner: None,
+                efs,
+            },
+            identity,
+        ))
     }
     fn ownership_changes(path: &Path, expected: *const c_void) -> Result<u32, String> {
         let name = wide(path)?;
@@ -864,13 +911,18 @@ mod platform {
     }
 
     pub(super) fn restore(path: &Path, extra: &Extra, _mode: Option<u32>) -> Result<(), String> {
+        use std::os::windows::fs::MetadataExt;
+        let initial_metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if capture(path, &initial_metadata).is_ok_and(|current| current == *extra) {
+            return Ok(());
+        }
         let native_path = wide(path)?;
         let expected: BTreeSet<&str> = extra
             .attributes
             .iter()
             .map(|(key, _)| key.as_str())
             .collect();
-        for key in stream_keys(path)? {
+        for key in stream_keys(path, &initial_metadata)? {
             if !expected.contains(key.as_str()) {
                 let mut name = path.as_os_str().to_os_string();
                 name.push(&key);
@@ -960,8 +1012,12 @@ mod platform {
             LocalFree(descriptor);
         }
         result?;
-        set_encrypted(path, extra.efs)?;
-        let actual = capture(path)?;
+        let pre_efs_metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if (pre_efs_metadata.file_attributes() & 0x4000 != 0) != extra.efs || extra.efs {
+            set_encrypted(path, extra.efs)?;
+        }
+        let final_metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        let actual = capture(path, &final_metadata)?;
         if actual != *extra {
             return Err(format!(
                 "Project ACL/streams/encryption differ after materialization: {}",
