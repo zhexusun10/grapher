@@ -55,6 +55,44 @@ fn deleting_and_clearing_runs_invalidates_cached_services() {
         .all(|(path, _, _)| *path != root));
 }
 
+#[cfg(not(feature = "fixture"))]
+#[test]
+fn rejected_run_deletion_preserves_its_parked_services() {
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::engine::stop_lingering_for_run(&self.0);
+        }
+    }
+
+    let (_temp, _source, primary, ids) = workspace_deletion_fixture();
+    let target = service_for_run(&primary, &ids[0], false).unwrap();
+    let _cleanup = Cleanup(ids[0].clone());
+    let tree = crate::engine::park_test_shell(&ids[0], &Uuid::new_v4().to_string());
+    target.runtime.lock().unwrap().state.phase = "planning".into();
+    assert!(delete_run(ids[0].clone(), &target).is_err());
+    assert!(
+        tree.has_live_members(),
+        "a rejected deletion must preserve the Run's services"
+    );
+    assert!(target
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .contains_run(&ids[0])
+        .unwrap());
+
+    target.runtime.lock().unwrap().state.phase = "draft".into();
+    delete_run(ids[0].clone(), &target).unwrap();
+    assert!(
+        !tree.has_live_members(),
+        "committed deletion must stop services"
+    );
+    let root = primary.runtime.lock().unwrap().root.clone();
+    invalidate_service_cache(&root, None);
+}
+
 fn workspace_deletion_fixture() -> (tempfile::TempDir, PathBuf, Arc<Service>, Vec<String>) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("project unicode");

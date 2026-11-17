@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Node, ReactFlowInstance } from "@xyflow/react";
-import { computeExecutionLayers, graphEdgeId, graphFeedbackEnabled, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
+import { computeExecutionLayers, graphEdgeId, graphFeedbackEnabled, indexFeedbackExhaustion, indexGraphInputs, orderGraphLayers, useGraphElements } from "../src/hooks/useGraphElements.ts";
 import { runningGraphFitViewport, runningViewportForGraph } from "../src/lib/graphFit.ts";
 import { defaultConfig, emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
 import { t } from "../src/i18n/index.ts";
@@ -149,6 +149,20 @@ test("node attempt badges use recorded numbers rather than pause/resume executio
   const elements = projectGraph(state, "");
   assert.deepEqual(elements.nodes.map(node => node.data.attempts), [1, 2, 0]);
   assert.equal(state.executions.length, 5, "all execution records remain available");
+});
+
+test("visual layer ordering follows dependency medians", () => {
+  const layered = [
+    ["p1", "p2"],
+    ["q1", "q2"],
+  ];
+  const edges = [
+    { from: "p1", to: "q2", feedback: false },
+    { from: "p2", to: "q1", feedback: false },
+  ] as Graph["edges"];
+  assert.deepEqual(orderGraphLayers(layered, edges), [["p1", "p2"], ["q2", "q1"]]);
+  assert.deepEqual(orderGraphLayers(layered, [...edges, { from: "q2", to: "p1", feedback: true }]),
+    [["p1", "p2"], ["q2", "q1"]], "feedback edges do not disturb dependency ordering");
 });
 
 test("dependency layers follow the DAG", () => {

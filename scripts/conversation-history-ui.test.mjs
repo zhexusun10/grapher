@@ -1943,7 +1943,7 @@ test("actual App: first Serial message keeps the footer still through approval a
   const running = { ...approved, nodes: { task: { ...draft.nodes.task, status: "running" } },
     executions: [{ id: "first-execution", node: "task", status: "running", output: "", outputBytes: Buffer.byteLength(header),
       revision: 0, attempt: 1, startedAt: 1, completedAt: null, sessionId: "first-session", worktree: config.repository, before: "", after: null }] };
-  let snapshot = empty, response, approveReceived = false, releaseApproval;
+  let snapshot = empty, response, approveReceived = false, releaseApproval, providerAuthRequests = 0;
   const approval = new Promise(resolve => { releaseApproval = resolve; });
   onPlanStream = (body, res) => {
     assert.equal(body.mode, "serial");
@@ -1964,7 +1964,7 @@ test("actual App: first Serial message keeps the footer still through approval a
       case "list_plannings": result = []; break;
       case "list_files": result = { files: [] }; break;
       case "list_skills": result = { skills: [] }; break;
-      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "provider_auth": providerAuthRequests++; result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
       case "control":
         assert.equal(body.action, "approve");
         approveReceived = true;
@@ -2008,6 +2008,7 @@ test("actual App: first Serial message keeps the footer still through approval a
     await page.waitForFunction(() => window.footerFrames.length >= 8);
     for (let i = 0; !response && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(response, "Serial planning request started");
+    assert.equal(providerAuthRequests, 0, "the first Serial send must not wait for a cold Provider/Auth catalog");
     response.write(`event: run_started\ndata: ${JSON.stringify({ runId: draft.runId })}\n\n`);
     await page.waitForTimeout(80);
     snapshot = draft;

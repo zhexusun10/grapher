@@ -38,7 +38,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const goal = "Build a live topology";
   const runId = "live-graph";
-  let snapshot = empty, textTimer, allowSnapshotPoll = true;
+  let snapshot = empty, textTimer, allowSnapshotPoll = true, providerAuthRequests = 0;
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "no-preference" });
   await context.addInitScript(config => {
     localStorage.setItem("grapher_language_v1", "en");
@@ -61,7 +61,7 @@ test("actual App: node results render before Planner completion; edges rearrange
       case "list_plannings": result = []; break;
       case "list_files": result = { files: [] }; break;
       case "list_skills": result = { skills: [] }; break;
-      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [] }; break;
+      case "provider_auth": providerAuthRequests++; result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [] }; break;
       default: errors.push(`Unexpected API: ${command}`); result = null;
     }
     try { await route.fulfill({ json: { result } }); } catch { /* A superseded poll can be aborted. */ }
@@ -88,6 +88,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     await input.fill(goal); await input.press("Enter");
     for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(planningResponse, "Planner stream started");
+    assert.equal(providerAuthRequests, 0, "the first Graph send must not wait for a cold Provider/Auth catalog");
     snapshot = { ...empty, runId, config, phase: "planning", planType: "graph",
       graph: { ...empty.graph, originalGoal: goal }, events: [{ sequence: 1, timestamp: 1, type: "planning_started", plan_type: "graph" }] };
     send("run_started", { runId });

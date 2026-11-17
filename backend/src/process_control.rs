@@ -343,11 +343,11 @@ pub fn assign_to_current_owner(tree: &ProcessTree) -> Result<(), String> {
 
 /// Move an already-tracked lifecycle boundary to another owner namespace.
 ///
-/// A settled Serial turn parks its process tree instead of terminating it: the
-/// parked tree must stop answering its old execution owner's cancellation
-/// (invalidate/retry would otherwise kill the warm shell and any service it
-/// started), while staying reachable for backend shutdown and explicit cleanup.
-/// Claiming a parked tree re-keys it back to the new execution owner.
+/// A settled Serial turn parks its process tree, and a source Planner can retain
+/// its remaining background services after the Pi worker exits. Their trees
+/// move away from the active execution owner so Run completion cannot kill
+/// them; backend shutdown and explicit Run cleanup still reclaim them.
+/// Claiming a parked Serial tree re-keys it back to the new execution owner.
 pub fn reassign_owner(tree: &ProcessTree, owner: &str) -> Result<(), String> {
     let mut processes = registry().lock().map_err(|error| error.to_string())?;
     let weak = Arc::downgrade(&tree.0);
@@ -479,9 +479,8 @@ impl ProcessTree {
 
     /// Whether any process is still alive inside this lifecycle boundary.
     ///
-    /// Used after a node agent exits: a surviving background service keeps the
-    /// boundary non-empty, so the backend keeps the Job/process group open
-    /// instead of closing it (which would kill the service).
+    /// Used to decide whether a source Planner left background services that
+    /// need a held owner after its Pi worker exits.
     pub fn has_live_members(&self) -> bool {
         #[cfg(windows)]
         unsafe {

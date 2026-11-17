@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { dirname, join, resolve, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -338,13 +338,13 @@ test('workspace cwd restoration works in Bash and Pi fallback POSIX sh', { skip:
         env: { ...process.env, BASH_ENV: startup },
         encoding: 'utf8',
       }).trim();
-      assert.equal(resolve(result), resolve(workspace), executable);
+      assert.equal(realpathSync(result), realpathSync(workspace), executable);
       const previous = execFileSync(executable, ['-c', managedBashCommand('cd - >/dev/null && pwd -P', workspace)], {
         cwd: workspace,
         env: { ...process.env, BASH_ENV: '', OLDPWD: startupCwd },
         encoding: 'utf8',
       }).trim();
-      assert.equal(resolve(previous), resolve(startupCwd), `${executable} must preserve cd -`);
+      assert.equal(realpathSync(previous), realpathSync(startupCwd), `${executable} must preserve cd -`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

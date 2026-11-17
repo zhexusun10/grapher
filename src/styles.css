@@ -1284,7 +1284,7 @@ a,
   text-overflow: ellipsis;
   white-space: normal;
   overflow-wrap: anywhere;
-  word-break: normal;
+  word-break: keep-all;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
@@ -1962,6 +1962,8 @@ a,
   line-height: 1.5;
   resize: none;
   min-width: 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
   overflow-y: auto;
   /* Reserve the scrollbar track from the first draft so growing past the capped
      height cannot narrow the text and visibly rewrap it. */

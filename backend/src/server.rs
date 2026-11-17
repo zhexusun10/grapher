@@ -5391,6 +5391,8 @@ fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {
     let root = runtime.root.clone();
     let id = runtime.state.run_id.clone();
     let result = runtime.reset_workspace()?;
+    crate::engine::stop_lingering_for_run(&id);
+    crate::engine::stop_planner_services_for_run(&id);
     drop(runtime);
     invalidate_service_cache(&root, Some(&id));
     Ok(result)
@@ -5430,7 +5432,12 @@ fn clear_history(service: &Arc<Service>) -> Result<(), String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
+    let run_ids = runtime.store.runs()?;
     runtime.clear_history()?;
+    for run_id in &run_ids {
+        crate::engine::stop_lingering_for_run(run_id);
+        crate::engine::stop_planner_services_for_run(run_id);
+    }
     drop(runtime);
     invalidate_service_cache(&root, None);
     Ok(())
@@ -5443,10 +5450,12 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    // A deleted Run must not leave a warm Serial shell (and its services) behind.
-    crate::engine::stop_lingering_for_run(&run_id);
     let root = runtime.root.clone();
     runtime.delete_run(&run_id)?;
+    // Retire services only after deletion commits; a rejected request must
+    // preserve the existing conversation and its processes.
+    crate::engine::stop_lingering_for_run(&run_id);
+    crate::engine::stop_planner_services_for_run(&run_id);
     drop(runtime);
     invalidate_service_cache(&root, Some(&run_id));
     Ok(())
@@ -5511,10 +5520,11 @@ fn delete_workspace(repository: String, service: &Arc<Service>) -> Result<Vec<St
     }
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
+    runtimes[0].delete_runs(&ids)?;
     for id in &ids {
         crate::engine::stop_lingering_for_run(id);
+        crate::engine::stop_planner_services_for_run(id);
     }
-    runtimes[0].delete_runs(&ids)?;
     for runtime in &mut runtimes {
         runtime.forget_deleted_runs(&ids);
     }

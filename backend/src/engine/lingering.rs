@@ -135,6 +135,102 @@ impl<W: Worker> Lingering<W> {
     }
 }
 
+struct ServiceEntry<W> {
+    run_id: String,
+    worker: W,
+}
+
+/// Process boundaries held for background services without retaining their agent host.
+pub(crate) struct LingeringServices<W> {
+    entries: Mutex<Vec<ServiceEntry<W>>>,
+}
+
+impl<W: Worker> Default for LingeringServices<W> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl<W: Worker> LingeringServices<W> {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<ServiceEntry<W>>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn hold(&self, run_id: String, mut worker: W) {
+        if !worker.alive() {
+            worker.retire();
+            return;
+        }
+        let retired = {
+            let mut entries = self.lock();
+            let mut kept = Vec::with_capacity(entries.len() + 1);
+            let mut retired = Vec::new();
+            for mut entry in entries.drain(..) {
+                if entry.worker.alive() {
+                    kept.push(entry);
+                } else {
+                    retired.push(entry.worker);
+                }
+            }
+            kept.push(ServiceEntry { run_id, worker });
+            *entries = kept;
+            retired
+        };
+        for worker in retired {
+            worker.retire();
+        }
+    }
+
+    pub(crate) fn retire_run(&self, run_id: &str) {
+        let retired = {
+            let mut entries = self.lock();
+            let mut kept = Vec::with_capacity(entries.len());
+            let mut retired = Vec::new();
+            for entry in entries.drain(..) {
+                if entry.run_id == run_id {
+                    retired.push(entry.worker);
+                } else {
+                    kept.push(entry);
+                }
+            }
+            *entries = kept;
+            retired
+        };
+        for worker in retired {
+            worker.retire();
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let drained = {
+            let mut entries = self.lock();
+            entries
+                .drain(..)
+                .map(|entry| entry.worker)
+                .collect::<Vec<_>>()
+        };
+        for worker in drained {
+            worker.retire();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_for_run(&self, run_id: &str) -> usize {
+        self.lock()
+            .iter()
+            .filter(|entry| entry.run_id == run_id)
+            .count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +340,21 @@ mod tests {
         assert_eq!(r1.load(Ordering::SeqCst), 1);
         assert_eq!(r2.load(Ordering::SeqCst), 1);
         assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn held_services_retire_only_with_their_run() {
+        let pool = LingeringServices::new();
+        let (first, _a, r1) = worker();
+        pool.hold("run-a".into(), first);
+        let (second, _b, r2) = worker();
+        pool.hold("run-b".into(), second);
+        assert_eq!(pool.count_for_run("run-a"), 1);
+        pool.retire_run("run-a");
+        assert_eq!(r1.load(Ordering::SeqCst), 1);
+        assert_eq!(r2.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.count_for_run("run-b"), 1);
+        pool.shutdown();
+        assert_eq!(r2.load(Ordering::SeqCst), 1);
     }
 }

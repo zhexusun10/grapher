@@ -1723,7 +1723,14 @@ export default function App() {
       let routeConfirmed = false;
       let failureSummary: PlanningSummary | undefined;
       try {
-        await requireRepository(targetRepo);
+        // The backend performs the authoritative binding check as part of the
+        // planning request. A cached status can still reject a known-invalid
+        // project immediately, but a cold status read must not delay the first
+        // prompt or duplicate the backend's filesystem validation.
+        if (repositoryStatus?.repository === targetRepo && !repositoryStatus.valid) {
+          setError(repositoryStatus.error || t("正在确认项目绑定，请稍后重试。"));
+          return;
+        }
         if (!planningRecovery.current(scope)) return;
         if (!config.repository) {
           setModal("settings");
@@ -1747,8 +1754,11 @@ export default function App() {
             return;
           }
         }
-        try {
-          const cat = await providerAuth.catalog();
+        // The backend performs the authoritative auth/model preflight. Use a
+        // catalog already loaded by Settings or a prior command for an instant
+        // client-side message; never make a cold catalog request part of send.
+        const cat = providerAuth.getCachedCatalog();
+        if (cat) {
           for (const { label, model } of requiredModels) {
             const providerId = providerIdForModel(model, cat.providers);
             const prov = cat.providers.find(p => p.id === providerId);
@@ -1758,8 +1768,6 @@ export default function App() {
               return;
             }
           }
-        } catch {
-          // If provider catalog call fails or times out, proceed to backend preflight.
         }
         if (!planningRecovery.current(scope)) return;
         let partInTag = false;

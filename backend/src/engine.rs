@@ -1519,30 +1519,13 @@ fn run_pi_with_timeout(
             let _ = input_sender.send(stdin.write_all(&task));
         });
     }
-    let (sender, receiver) = mpsc::channel();
     let stdout = child.stdout.take().ok_or("Pi stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("Pi stderr unavailable")?;
-    let error_sender = sender.clone();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if sender
-                .send((false, line.unwrap_or_else(|error| error.to_string())))
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            if error_sender
-                .send((true, line.unwrap_or_else(|error| error.to_string())))
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
+    let receiver = process_output_channels(
+        stdout,
+        stderr,
+        source_role && request.role == PiRole::Planner,
+    );
     let mut channels = SessionChannels {
         receiver,
         input_receiver,
@@ -1582,6 +1565,46 @@ fn run_pi_with_timeout(
         }
     }
     result
+}
+
+fn process_output_channels(
+    stdout: impl Read + Send + 'static,
+    stderr: impl Read + Send + 'static,
+    keep_draining: bool,
+) -> mpsc::Receiver<(bool, String)> {
+    let (sender, receiver) = mpsc::channel();
+    let error_sender = sender.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        for line in reader.by_ref().lines() {
+            if sender
+                .send((false, line.unwrap_or_else(|error| error.to_string())))
+                .is_err()
+            {
+                break;
+            }
+        }
+        // Held Planner services inherit these pipes. Keep consuming after the
+        // turn's receiver closes so logging cannot kill them with a broken pipe.
+        if keep_draining {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        }
+    });
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        for line in reader.by_ref().lines() {
+            if error_sender
+                .send((true, line.unwrap_or_else(|error| error.to_string())))
+                .is_err()
+            {
+                break;
+            }
+        }
+        if keep_draining {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        }
+    });
+    receiver
 }
 
 struct SessionChannels {
@@ -1944,9 +1967,8 @@ fn process_failure_tail(lines: &[String]) -> String {
     tail.join("\n")
 }
 
-/// Commit a finished turn: park the warm Serial shell, or terminate the process
-/// boundary exactly as before. Parking keeps a source-native Serial session's
-/// shell (and any service it started) alive for the next turn.
+/// Commit a finished turn: park a warm Serial shell, retain source Planner
+/// services after its worker exits, or reclaim the process boundary.
 #[allow(clippy::too_many_arguments)]
 fn finish_turn(
     request: &PiRequest<'_>,
@@ -2080,6 +2102,10 @@ fn finish_turn(
                 .into(),
         );
     }
+    #[cfg(not(feature = "fixture"))]
+    if retain_source_planner_services(request, &process_tree, settled_response, source_role) {
+        eprintln!("[Grapher] Retaining source Planner background processes");
+    }
     Ok(outcome.final_text)
 }
 
@@ -2110,10 +2136,40 @@ fn lingering_pool() -> &'static lingering::Lingering<ParkedSerial> {
     LINGER_POOL.get_or_init(lingering::Lingering::new)
 }
 
+#[cfg(not(feature = "fixture"))]
+struct PlannerServiceTree {
+    tree: process_control::ProcessTree,
+}
+
+#[cfg(not(feature = "fixture"))]
+impl Worker for PlannerServiceTree {
+    fn alive(&mut self) -> bool {
+        self.tree.has_live_members()
+    }
+
+    fn retire(self) {
+        self.tree.terminate();
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+static PLANNER_SERVICES: OnceLock<lingering::LingeringServices<PlannerServiceTree>> =
+    OnceLock::new();
+
+#[cfg(not(feature = "fixture"))]
+fn planner_services() -> &'static lingering::LingeringServices<PlannerServiceTree> {
+    PLANNER_SERVICES.get_or_init(lingering::LingeringServices::new)
+}
+
+#[cfg(all(test, not(feature = "fixture")))]
+pub(crate) fn planner_service_count_for_run(run_id: &str) -> usize {
+    planner_services().count_for_run(run_id)
+}
+
 /// Park a throwaway shell for a Run/session so runtime tests can observe that a
 /// history edit retires the conversation's parked process.
 #[cfg(all(test, not(feature = "fixture")))]
-pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
+pub(crate) fn park_test_shell(run_id: &str, session_id: &str) -> process_control::ProcessTree {
     let mut command = if cfg!(windows) {
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "ping 127.0.0.1 -n 30 > NUL"]);
@@ -2148,11 +2204,12 @@ pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
         run_id.into(),
         ParkedSerial {
             child,
-            tree,
+            tree: tree.clone(),
             channels,
             selection: (String::new(), None),
         },
     );
+    tree
 }
 
 #[cfg(all(test, not(feature = "fixture")))]
@@ -2160,16 +2217,17 @@ pub(crate) fn parked_shell_count() -> usize {
     lingering_pool().len()
 }
 
-/// Stop every parked shell. A parked shell has no idle TTL; it is also retired
-/// on Run/workspace deletion or when resuming with different model settings.
+/// Stop every parked shell and held Planner service. Held services have no idle TTL
+/// and are reclaimed on Run/workspace deletion or backend shutdown.
 #[cfg(not(feature = "fixture"))]
 pub fn stop_lingering() {
     if let Some(pool) = LINGER_POOL.get() {
         pool.shutdown();
     }
+    stop_planner_services();
 }
 
-/// Retire a Run's parked shells (Run deletion).
+/// Retire a Run's parked Serial shells (also used when branching its history).
 #[cfg(not(feature = "fixture"))]
 pub fn stop_lingering_for_run(run_id: &str) {
     if run_id.is_empty() {
@@ -2180,12 +2238,70 @@ pub fn stop_lingering_for_run(run_id: &str) {
     }
 }
 
+#[cfg(not(feature = "fixture"))]
+pub fn stop_planner_services() {
+    if let Some(pool) = PLANNER_SERVICES.get() {
+        pool.shutdown();
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+pub fn stop_planner_services_for_run(run_id: &str) {
+    if !run_id.is_empty() {
+        if let Some(pool) = PLANNER_SERVICES.get() {
+            pool.retire_run(run_id);
+        }
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+fn retain_source_planner_services(
+    request: &PiRequest<'_>,
+    process_tree: &process_control::ProcessTree,
+    settled_response: bool,
+    source_role: bool,
+) -> bool {
+    if request.role != PiRole::Planner
+        || !source_role
+        || !settled_response
+        || request.session_id.is_none()
+        || !process_tree.has_live_members()
+    {
+        return false;
+    }
+    let Some(run_id) = request
+        .environment
+        .iter()
+        .find(|(key, _)| *key == "GRAPHER_ACTIVE_RUN_ID")
+        .map(|(_, run_id)| run_id.clone())
+        .filter(|run_id| !run_id.is_empty())
+    else {
+        return false;
+    };
+    let owner = format!("planner-service:{run_id}:{}", uuid::Uuid::new_v4());
+    if let Err(error) = process_control::reassign_owner(process_tree, &owner) {
+        eprintln!("[Grapher] Could not retain source Planner background services: {error}");
+        return false;
+    }
+    planner_services().hold(
+        run_id,
+        PlannerServiceTree {
+            tree: process_tree.clone(),
+        },
+    );
+    true
+}
+
 #[cfg(feature = "fixture")]
 pub fn stop_lingering() {}
 #[cfg(feature = "fixture")]
 pub fn stop_lingering_for_run(_run_id: &str) {}
+#[cfg(feature = "fixture")]
+pub fn stop_planner_services() {}
+#[cfg(feature = "fixture")]
+pub fn stop_planner_services_for_run(_run_id: &str) {}
 
-/// Serial Agent sessions are the only parkable shells. Their Pi model role is
+/// Serial Agent sessions are the only parked Pi shells. Their model role is
 /// `NodeAgent`, but only an explicit Serial identity may enter this pool.
 #[cfg(not(feature = "fixture"))]
 fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
@@ -3135,6 +3251,163 @@ sys.stdin.read()
         );
         stop_lingering_for_run("linger-run");
         assert_eq!(lingering_pool().len(), 0);
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn source_planner_releases_its_worker_but_holds_background_services() {
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                stop_planner_services_for_run(&self.0);
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let run_id = format!("planner-service-test-{}", uuid::Uuid::new_v4());
+        let _cleanup = Cleanup(run_id.clone());
+        let marker = temp.path().join("service-live");
+        let release = temp.path().join("release-planner");
+        let service_script = temp.path().join("planner-service.js");
+        fs::write(
+            &service_script,
+            format!(
+                "const fs=require('node:fs');const marker={};process.stdout.on('error',()=>process.exit(41));process.stderr.on('error',()=>process.exit(42));fs.writeFileSync(marker,'x');setInterval(()=>{{fs.appendFileSync(marker,'x');process.stdout.write('service stdout\\n');process.stderr.write('service stderr\\n');}},25);",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+        let parent_code = format!(
+            "const {{spawn}}=require('node:child_process');const fs=require('node:fs');const child=spawn(process.execPath,[{}],{{stdio:'inherit',detached:process.platform==='win32'}});child.on('error',error=>console.error(error));const timer=setInterval(()=>{{if(fs.existsSync({})){{clearInterval(timer);process.exit(0)}}}},10);",
+            serde_json::to_string(&service_script.to_string_lossy()).unwrap(),
+            serde_json::to_string(&release.to_string_lossy()).unwrap()
+        );
+        let mut command = std::process::Command::new("node");
+        command.args(["-e", parent_code.as_str()]);
+        process_control::configure_command(&mut command);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let owner = process_control::planning_owner(&run_id);
+        let tree = process_control::with_owner(&owner, || process_control::track(&child).unwrap());
+        let started = std::time::Instant::now();
+        while !marker.exists() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            marker.exists(),
+            "the test service must start before handoff"
+        );
+        fs::write(&release, "done").unwrap();
+        let guard = ProcessGuard(tree.clone());
+        let receiver = process_output_channels(
+            child.stdout.take().unwrap(),
+            child.stderr.take().unwrap(),
+            true,
+        );
+        let (_input_tx, input_receiver) = mpsc::channel::<Result<(), std::io::Error>>();
+        let (rpc_tx, _rpc_rx) = mpsc::channel::<String>();
+        let channels = SessionChannels {
+            receiver,
+            input_receiver,
+            rpc_sender: Some(rpc_tx),
+            rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
+            rpc_ui: Arc::new(Mutex::new(composer::CommandUi::default())),
+        };
+        let session_dir = temp.path().join("planner-session");
+        let config = Config {
+            feedback_enabled: false,
+            isolate_parallel_nodes: true,
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            role_models: Default::default(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            post_task_review: false,
+            planner_write_tools: true,
+            environment: None,
+        };
+        let request = PiRequest {
+            role: PiRole::Planner,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &session_dir,
+            extension: None,
+            tools: None,
+            session_id: Some("planner-session"),
+            extra_args: vec![],
+            environment: vec![("GRAPHER_ACTIVE_RUN_ID", run_id.clone())],
+            system_prompt: None,
+            images: None,
+        };
+        let outcome = TurnOutcome {
+            final_text: "done".into(),
+            agent_error: None,
+            input_error: None,
+            timed_out: false,
+            settled: true,
+            stderr_tail: String::new(),
+            stderr_lines: vec![],
+            raw_stdout_lines: vec![],
+            first_output_ms: None,
+        };
+        let mut output = String::new();
+        let result = process_control::with_owner(&owner, || {
+            finish_turn(
+                &request,
+                &mut |line| output.push_str(&line),
+                None,
+                Instant::now(),
+                child,
+                tree,
+                channels,
+                None,
+                outcome,
+                false,
+                true,
+            )
+        })
+        .unwrap();
+        assert_eq!(result, "done");
+        assert!(output.contains("grapher_process_exited"));
+        assert!(!output.contains("grapher_session_parked"));
+        assert_eq!(planner_service_count_for_run(&run_id), 1);
+        drop(guard);
+
+        let started = std::time::Instant::now();
+        while !marker.exists() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let first_size = fs::metadata(&marker).unwrap().len();
+        std::thread::sleep(Duration::from_millis(200));
+        let second_size = fs::metadata(&marker).unwrap().len();
+        assert!(
+            second_size > first_size,
+            "the logging Planner service must survive after its output receiver closes"
+        );
+
+        stop_planner_services_for_run(&run_id);
+        let mut previous_size = fs::metadata(&marker).unwrap().len();
+        let mut stable_samples = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while stable_samples < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            let size = fs::metadata(&marker).unwrap().len();
+            if size == previous_size {
+                stable_samples += 1;
+            } else {
+                stable_samples = 0;
+                previous_size = size;
+            }
+        }
+        assert_eq!(stable_samples, 3, "Run cleanup must stop the held service");
+        assert_eq!(planner_service_count_for_run(&run_id), 0);
     }
 
     #[cfg(feature = "fixture")]

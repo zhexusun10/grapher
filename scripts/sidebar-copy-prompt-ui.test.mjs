@@ -106,6 +106,46 @@ test("the sidebar always opens expanded, even with a stale collapsed preference"
   } finally { await context.close(); }
 });
 
+test("a single CJK character stays with a following URL in sidebar and composer", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await openApp(async () => false);
+  try {
+    const sidebarLines = await page.locator('.run-item[data-run-id="a"] .run-title-text').evaluate(element => {
+      element.textContent = "中https://example.com/a/very/long/path";
+      Object.assign(element.style, { flex: "none", width: "160px" });
+      const topAt = index => {
+        const range = document.createRange();
+        range.setStart(element.firstChild, index);
+        range.setEnd(element.firstChild, index + 1);
+        return Math.round(range.getBoundingClientRect().top);
+      };
+      return { chinese: topAt(0), url: topAt(1) };
+    });
+    assert.equal(sidebarLines.chinese, sidebarLines.url, "the URL must not break away from its leading CJK character");
+
+    const composerLines = await page.evaluate(() => {
+      const textarea = document.createElement("textarea");
+      textarea.className = "prompt-box-textarea";
+      textarea.rows = 1;
+      textarea.value = "中https://example.com/a/very/long/path";
+      Object.assign(textarea.style, { position: "fixed", left: "-10000px", top: "0", width: "220px", height: "0px" });
+      document.body.append(textarea);
+      const lineCount = () => {
+        const style = getComputedStyle(textarea);
+        const contentHeight = textarea.scrollHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+        return Math.round(contentHeight / parseFloat(style.lineHeight));
+      };
+      const urlLines = lineCount();
+      textarea.value = "中文内容会在窄输入框中继续正常折行".repeat(4);
+      const cjkLines = lineCount();
+      textarea.remove();
+      return { urlLines, cjkLines };
+    });
+    assert.equal(composerLines.urlLines, 2, "the composer wraps the URL without stranding its leading CJK character");
+    assert.ok(composerLines.cjkLines > 1, "long CJK input still wraps to the composer width");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("dragging across the sidebar does not select its text", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await openApp(async () => false);
   try {
@@ -252,7 +292,7 @@ for (const reducedMotion of ["reduce", "no-preference"]) {
       for (const id of ["a", "b"]) {
         await deleteHistory(page, id);
         await page.waitForFunction(id => {
-          const index = JSON.parse(localStorage.getItem("grapher_workspace_runs"));
+          const index = JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"));
           return !Object.values(index).flat().includes(id);
         }, id);
         await page.locator(`.run-item[data-run-id="${id}"]`).waitFor({ state: "detached" });
@@ -278,15 +318,15 @@ test("deleting an already missing conversation prunes its card, but genuine fail
       await deleteHistory(page, "a");
       await page.getByRole("alert").getByText(message, { exact: true }).waitFor();
       assert.equal(await page.locator('.run-item[data-run-id="a"]').count(), 1);
-      assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["a", "b"]);
+      assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))[repository], repository), ["a", "b"]);
     }
     failure = "Run not found";
     await deleteHistory(page, "a");
     await page.locator('.run-item[data-run-id="a"]').waitFor({ state: "detached" });
     assert.equal(await page.locator('.run-item[data-run-id="b"]').count(), 1);
-    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["b"]);
+    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))[repository], repository), ["b"]);
     for (const key of ["grapher_run_labels", "grapher_run_modes"]) {
-      assert.equal(await page.evaluate(key => Object.hasOwn(JSON.parse(localStorage.getItem(key)), "a"), key), false);
+      assert.equal(await page.evaluate(key => Object.hasOwn(JSON.parse(localStorage.getItem(`grapher-format-1:/mock:${key}`)), "a"), key), false);
     }
     assert.equal(calls.filter(call => call.command === "delete_run").length, 3);
     await page.getByRole("alert").waitFor({ state: "detached" });
@@ -342,7 +382,7 @@ test("opening a confirmed missing conversation repairs the sidebar without hidin
     failure = "Run not found";
     await page.locator('.run-item[data-run-id="a"]').click();
     await page.locator('.run-item[data-run-id="a"]').waitFor({ state: "detached" });
-    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["b"]);
+    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))[repository], repository), ["b"]);
     assert.equal(await page.locator('.run-item[data-run-id="b"]').count(), 1);
     assert.equal(calls.some(call => call.command === "delete_run"), false, "repairing a missing card never deletes another Run");
     await page.getByRole("alert").waitFor({ state: "detached" });

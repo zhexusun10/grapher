@@ -86,7 +86,7 @@ For Graph with **Auto Approve** off, inspect tasks and dependencies, then choose
 
 On macOS, the backend keeps the display and system awake while it runs and refreshes user activity so the idle screen saver cannot lock the session during a long task. This does not override a manual lock or closing the lid. Set `GRAPHER_KEEP_AWAKE=0` to allow normal sleep and locking.
 
-A completed Serial agent and any server it started stay running for follow-ups. Deleting the Run or workspace, stopping the backend, editing history, or resuming with different model/thinking settings stops them; the saved conversation remains available. Planner and Graph node agents are reclaimed after their turns. See [Process lifecycle](architecture/filesystem-isolation.md#parked-serial-shells).
+A completed Serial agent and any server it started stay running for follow-ups. Editing its history or resuming with different model/thinking settings stops that shell and its services. A successful Planner turn in the source project can also leave background services running, while its Planner worker exits; later planning uses a separate worker. Deleting the Run or workspace, resetting the workspace, clearing history, or stopping the backend stops both retained Serial shells and Planner services. Private Planner and Graph node agents are reclaimed after their turns. See [Process lifecycle](architecture/filesystem-isolation.md#parked-serial-shells-and-held-planner-services).
 
 ### Steers and attachments
 

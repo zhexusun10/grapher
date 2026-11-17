@@ -23,6 +23,68 @@ const ROW_PITCH = 320;
 const PADDING_X = 160;
 const PADDING_Y = 24;
 
+type GraphEdge = Graph["edges"][number];
+
+/**
+ * Keep each layer ordered around the nodes it connects to. A raw planner
+ * response often lists siblings in creation order, which makes a perfectly
+ * valid graph look tangled when branches are interleaved.
+ *
+ * Two median sweeps are enough here: the graph is already compiled into
+ * execution layers, so this only changes visual order inside a layer and
+ * never changes scheduling or edge direction.
+ */
+function orderGraphLayers(layers: string[][], edges: readonly GraphEdge[]): string[][] {
+  const layerOf = new Map<string, number>();
+  const originalOrder = new Map<string, number>();
+  layers.forEach((layer, layerIndex) => layer.forEach((node, index) => {
+    layerOf.set(node, layerIndex);
+    originalOrder.set(node, index);
+  }));
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (edge.feedback || !layerOf.has(edge.from) || !layerOf.has(edge.to)) continue;
+    const fromLayer = layerOf.get(edge.from)!;
+    const toLayer = layerOf.get(edge.to)!;
+    if (fromLayer >= toLayer) continue;
+    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from]);
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge.to]);
+  }
+
+  const ordered = layers.map(layer => [...layer]);
+  const indexOf = () => {
+    const indexes = new Map<string, number>();
+    ordered.forEach(layer => layer.forEach((node, index) => indexes.set(node, index)));
+    return indexes;
+  };
+  const median = (values: number[]) => {
+    values.sort((a, b) => a - b);
+    const middle = Math.floor(values.length / 2);
+    return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+  };
+  const sweep = (layerIndex: number, neighbors: Map<string, string[]>) => {
+    const indexes = indexOf();
+    ordered[layerIndex].sort((left, right) => {
+      const leftNeighbors = (neighbors.get(left) ?? [])
+        .map(node => indexes.get(node)).filter((index): index is number => index !== undefined);
+      const rightNeighbors = (neighbors.get(right) ?? [])
+        .map(node => indexes.get(node)).filter((index): index is number => index !== undefined);
+      const leftMedian = leftNeighbors.length ? median(leftNeighbors) : indexes.get(left) ?? originalOrder.get(left) ?? 0;
+      const rightMedian = rightNeighbors.length ? median(rightNeighbors) : indexes.get(right) ?? originalOrder.get(right) ?? 0;
+      return leftMedian - rightMedian || (originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0);
+    });
+  };
+
+  for (let pass = 0; pass < 2; pass++) {
+    for (let layer = 1; layer < ordered.length; layer++) sweep(layer, incoming);
+    for (let layer = ordered.length - 2; layer >= 0; layer--) sweep(layer, outgoing);
+  }
+  return ordered;
+}
+
+export { orderGraphLayers };
+
 export function graphEdgeId(edge: Pick<Graph["edges"][number], "from" | "to" | "feedback">): string {
   return JSON.stringify([edge.from, edge.feedback ? "fb" : "dep", edge.to]);
 }
@@ -187,7 +249,7 @@ export function useGraphElements(
   // rows. Reserve their own rows so publication never crosses sibling cards or
   // masquerades as a dependency of the next batch.
   const graphLayout = useMemo(() => {
-    const layers = computeExecutionLayers(state.graph, state.plan);
+    const layers = orderGraphLayers(computeExecutionLayers(state.graph, state.plan), state.graph.edges);
     type Position = { x: number; y: number; layer: number };
     const positions = new Map<string, Position>();
     const mergerPlacements = new Map<string, Position>();
@@ -248,15 +310,20 @@ export function useGraphElements(
     const routing = new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
       const from = graphLayout.positions.get(edge.from);
       const to = (!edge.feedback && graphLayout.mergerPlacements.get(edge.to)) || graphLayout.positions.get(edge.to);
-      const side = from && to && (from.x + to.x + NODE_WIDTH) / 2 > center ? "right" : "left";
+      const fromWidth = NODE_WIDTH;
+      const toWidth = graphLayout.mergerPlacements.has(edge.to) ? MERGER_WIDTH : NODE_WIDTH;
+      const edgeCenter = from && to
+        ? (from.x + fromWidth / 2 + to.x + toWidth / 2) / 2
+        : center;
+      const side = edgeCenter > center ? "right" : "left";
       const boundary = side === "left" ? "min" : "max";
       const sideRoute = !!edge.feedback && !!from && !!to &&
         from.x === rowBounds.get(from.layer)?.[boundary] &&
         to.x === rowBounds.get(to.layer)?.[boundary];
       const routed = !!edge.feedback || (!!from && !!to && to.layer - from.layer > 1);
       const routeX = routed
-        ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
-          : graphLayout.maxX + 48 + laneCount.right++ * 14
+        ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 18
+          : graphLayout.maxX + 48 + laneCount.right++ * 18
         : undefined;
       return [graphEdgeId(edge), {
         sourceHandle: sideRoute ? `${side}-source` : "bottom",
@@ -275,8 +342,8 @@ export function useGraphElements(
           sourceHandle: "bottom",
           targetHandle: "top",
           routeX: routed
-            ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
-              : graphLayout.maxX + 48 + laneCount.right++ * 14
+            ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 18
+              : graphLayout.maxX + 48 + laneCount.right++ * 18
             : undefined,
         });
       }

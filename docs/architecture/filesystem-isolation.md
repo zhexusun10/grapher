@@ -168,7 +168,7 @@ still terminate them when the execution exits. The native environment drain
 fixture uses a project-extension child in the owned Unix group or Windows Job;
 a passing group check is not detection or cleanup evidence for detached Bash writers.
 
-### Parked Serial shells
+### Parked Serial shells and held Planner services
 
 A successful **Serial** turn stays resident. It **parks** its whole lifecycle
 boundary — the Pi process, its stdin/stdout channels and the tracked
@@ -180,30 +180,45 @@ service it started (for example a dev server) stay alive. A dead or mismatched
 entry is retired and that turn cold-launches the persisted session instead;
 retirement stops the shell and any services it owns.
 
-Serial is a separate source-native agent: its cwd is the bound source and it has no managed environment. A **Planner is never parked**, even when it runs in the
-source: its launch binding is per planning attempt (`GRAPHER_GRAPH_PATH` is
-`graph-{planningId}.json`), so a reused process would mutate the previous
-attempt's graph. Graph Node Agents are reclaimed at turn end regardless of cwd;
-only Serial conversations are parked.
+A **Planner worker is never parked**: its launch binding is per planning attempt
+(`GRAPHER_GRAPH_PATH` is `graph-{planningId}.json`), so reusing a Planner could
+mutate the previous attempt's graph. After a successful settled Planner reply
+whose cwd is the bound source, Grapher reassigns that worker's process-tree
+boundary to a Run-scoped service owner after closing the Pi worker and RPC
+channels. It does not reuse the old Planner process; the next attempt
+cold-launches with its own graph binding while any child still attached to the
+held boundary can keep running (for example `npm run dev`). Output readers keep
+draining inherited stdout/stderr after the turn's receiver closes, so continuing
+to log does not break the service's pipes; those later bytes are discarded.
 
-Because a parked boundary no longer answers `terminate_node`/`terminate_owner`
+Only source-root Planner descendants are held. Private-workspace/managed
+Planner turns and Graph Node Agents are reclaimed at turn end. Held services
+have no idle TTL: they remain until Run/workspace deletion, workspace reset,
+clearing history, or backend shutdown. A completed Run does not own their process boundary, so
+normal Run completion cannot terminate them. Unix Pi Bash can launch detached
+sessions outside the tracked process group; those escaped descendants cannot
+be retained or cleaned up reliably by this process-tree mechanism.
+
+Because a parked Serial boundary no longer answers `terminate_node`/`terminate_owner`
 for the execution that created it, invalidating or retrying that turn cannot
-kill the resident shell, while `terminate_all()` (backend shutdown) still
-reclaims it. The turn's lifecycle guard terminates a boundary only when it is the
-**last owner**, so a boundary kept by the registry is not torn down when the
-turn's guard drops.
+kill the resident shell. Retained Planner services similarly have a separate
+owner, but no live Planner worker or RPC session. `terminate_all()` (backend
+shutdown) and explicit cleanup reclaim both. The lifecycle guard terminates a
+boundary only when it is the **last owner**, so a boundary kept by either
+registry is not torn down when the turn's guard drops.
 
-A parked boundary has **no idle TTL and no browser-owned deadline**: a Serial
-conversation that ran in this backend stays warm until a history edit, a turn
-with different model/thinking settings, Run/workspace deletion, or backend
-shutdown. There is no capacity eviction, so a long-lived backend accumulates one
-parked shell per Serial conversation that ran; this is bounded by the user's own
-activity, not by an idle timer.
+A Serial shell or retained Planner service boundary has **no idle TTL and no
+browser-owned deadline**. Workspace reset, history clearing, Run/workspace
+deletion and backend shutdown reclaim both. History edits and incompatible
+model/thinking selections additionally retire Serial shells. There is no
+capacity eviction, so a long-lived backend can accumulate one parked shell per
+Serial conversation and one held process boundary per source Planner reply
+that leaves live descendants; this is bounded only by user activity.
 
-Only turns that settle successfully are parked, and parking carries no snapshot
-or delivery obligation, so the drain-before-seal rule above is unchanged for
-Graph turns. Parking keeps a conversation alive; it is not a filesystem access
-policy and does not widen what the parked shell may reach.
+Only settled Serial turns park the Pi worker. Planner service retention carries
+no Planner session or snapshot obligation, so the drain-before-seal rule for
+Graph turns is unchanged. Holding a process boundary is not a filesystem access
+policy and does not widen what a process may reach.
 
 ## Validation
 
