@@ -9,6 +9,8 @@ import { bundledExtensions, bundledExtensionNames, missingBundledExtensions, ver
 import { assertSupportedNode, ensureDependencies, findCargoExecutable, rootDependenciesReady } from './ensure-deps.mjs';
 import { pathValue, prependPath } from './cargo.mjs';
 import { corePackages, dependencyManifest, dependencyProfileHashes, verifyPiDependencies } from './pi-dependencies.mjs';
+import { isPatchedPicomatchAuditException } from './npm-audit.mjs';
+import { patchPicomatch, verifyPicomatchPatch, patchedAdvisoryUrl } from './patch-picomatch.mjs';
 import { piBuildArtifacts, piBuildReady, recordPiBuild } from './pi-build-state.mjs';
 
 function fixture(t) {
@@ -40,6 +42,49 @@ function fixture(t) {
   write('fake-npm.mjs', '');
   return { root, write, installRoot, env: { ...process.env, npm_execpath: join(root, 'fake-npm.mjs') } };
 }
+
+test('the picomatch workaround patches and verifies an explicitly selected install root', async t => {
+  const f = fixture(t);
+  const prefix = 'profile';
+  f.write(`${prefix}/node_modules/picomatch/package.json`, JSON.stringify({ version: '4.0.7' }));
+  f.write(`${prefix}/node_modules/picomatch/lib/parse.js`, `const repeatedExtglobRecursion = pattern => {
+  if (sawStarSequence) {
+    return combinable
+      ? { risky: true, safeOutput: buildCharClassStar([...new Set(safeChars)]) }
+      : { risky: true };
+  }
+
+  return { risky: false };
+}
+const render = () => {
+    let output = token.close + (opts.capture ? ')' : '');
+};
+`);
+  assert.equal(await patchPicomatch(join(f.root, prefix)), true);
+  assert.equal(await verifyPicomatchPatch(join(f.root, prefix)), true);
+  assert.equal(await patchPicomatch(join(f.root, prefix)), true, 'reapplying the patch is idempotent');
+});
+
+test('only the patched picomatch advisory chain is accepted by npm audit policy', () => {
+  const advisory = { url: patchedAdvisoryUrl };
+  const report = { vulnerabilities: {
+    picomatch: { severity: 'high', via: [advisory] },
+    fdir: { severity: 'high', via: ['picomatch'] },
+    tinyglobby: { severity: 'high', via: ['fdir', 'picomatch'] },
+    vite: { severity: 'high', via: ['fdir', 'picomatch', 'tinyglobby'] },
+    vitest: { severity: 'high', via: ['picomatch', 'tinyglobby'] },
+  } };
+  assert.equal(isPatchedPicomatchAuditException(report, 'moderate'), true);
+  assert.equal(isPatchedPicomatchAuditException(report, 'critical'), false);
+  assert.equal(isPatchedPicomatchAuditException({ vulnerabilities: {
+    ...report.vulnerabilities,
+    vite: { severity: 'high', via: [...report.vulnerabilities.vite.via, { url: 'https://example.invalid/advisory' }] },
+  } }), false);
+  assert.equal(isPatchedPicomatchAuditException({ vulnerabilities: {
+    ...report.vulnerabilities,
+    'other-package': { severity: 'high', via: [advisory] },
+  } }), false);
+});
 
 test('picomatch repeated wildcard extglobs remain bounded on long non-matches', () => {
   const probe = `
@@ -312,13 +357,17 @@ test('clean bootstrap initializes submodule, uses locked dev-inclusive npm insta
   assert.deepEqual(calls.slice(2).map(([, args]) => args), [
     ['submodule', 'update', '--init', '--recursive'],
     [f.env.npm_execpath, 'ci', '--ignore-scripts', '--include=dev'],
+    [join(f.root, 'scripts/patch-picomatch.mjs'), f.root],
     [join(f.root, 'scripts/pi-baseline.mjs'), 'setup'],
   ]);
   assert.equal(rootDependenciesReady(f.root), true);
   assert.equal(piBuildReady(f.root), true);
   const second = [];
   await bootstrap(f, (command, args) => second.push([command, args]));
-  assert.deepEqual(second.map(([, args]) => args), [['--version'], ['--version']], 'warm starts perform no downloads or builds');
+  assert.deepEqual(second.map(([, args]) => args), [
+    ['--version'], ['--version'],
+    [join(f.root, 'scripts/patch-picomatch.mjs'), f.root],
+  ], 'warm starts apply the tracked picomatch workaround without downloading or rebuilding');
 });
 
 test('failed npm ci is not retried with an unlocked install and never starts Pi', async t => {
@@ -348,7 +397,10 @@ test('missing, interrupted or stale Pi artifacts rebuild without reinstalling re
       calls.push(args);
       if (args[1] === 'build') installPiFixture(f);
     });
-    assert.deepEqual(calls.slice(2), [[join(f.root, 'scripts/pi-baseline.mjs'), 'build']]);
+    assert.deepEqual(calls.slice(2), [
+      [join(f.root, 'scripts/patch-picomatch.mjs'), f.root],
+      [join(f.root, 'scripts/pi-baseline.mjs'), 'build'],
+    ]);
   }
   f.write('engine/pi-lock.json', JSON.stringify({ modelData: {}, changed: true }));
   assert.equal(piBuildReady(f.root), false, 'baseline updates invalidate the build stamp');

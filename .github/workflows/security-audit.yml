@@ -25,7 +25,9 @@ jobs:
         with:
           node-version: '22.19.0'
           cache: npm
-      - run: npm ci --ignore-scripts
+      - run: |
+          npm ci --ignore-scripts
+          node scripts/patch-picomatch.mjs
       - name: Install the locked Pi baseline and reviewed dependency profile
         id: pi-setup
         if: matrix.scope == 'pi'
@@ -36,14 +38,14 @@ jobs:
           SCOPE: ${{ matrix.scope }}
         run: |
           if [ "$SCOPE" = pi ]; then
-            npm audit --prefix engine/pi-dependencies --audit-level=high --json | tee npm-audit.json
+            node scripts/npm-audit.mjs --prefix engine/pi-dependencies --audit-level high | tee npm-audit.json
           else
-            npm audit --audit-level=high --json | tee npm-audit.json
+            node scripts/npm-audit.mjs --audit-level high | tee npm-audit.json
           fi
       - name: Also report the Pi profile's production dependency view
         if: always() && matrix.scope == 'pi' && steps.pi-setup.outcome == 'success'
         shell: bash
-        run: npm audit --prefix engine/pi-dependencies --omit=dev --audit-level=high --json | tee npm-audit-production.json
+        run: node scripts/npm-audit.mjs --prefix engine/pi-dependencies --audit-level high --omit=dev | tee npm-audit-production.json
       - name: Retain audit evidence even when advisories fail the job
         if: always()
         uses: actions/upload-artifact@v6

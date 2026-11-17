@@ -75,7 +75,9 @@ jobs:
         run: |
           /usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/sh -c ': <>/dev/null'
       - name: Install Grapher and pinned Pi
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          node scripts/patch-picomatch.mjs
       - run: npm run pi:setup
       - name: Verify development scripts and test inventory
         if: runner.os == 'Linux'
@@ -242,7 +244,9 @@ jobs:
         with:
           workspaces: backend
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: npm ci --ignore-scripts
+      - run: |
+          npm ci --ignore-scripts
+          node scripts/patch-picomatch.mjs
       - name: Verify native ACLs, aliases, POSIX links and snapshot integrity on the host volume
         timeout-minutes: 12
         run: npm run test:filesystem

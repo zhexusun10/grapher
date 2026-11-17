@@ -49,7 +49,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y bubblewrap build-essential git
       - name: Install Node dependencies
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          node scripts/patch-picomatch.mjs
       - name: Verify release launcher scripts
         run: npm run test:release
       - name: Install and build Pi

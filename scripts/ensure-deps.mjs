@@ -102,6 +102,7 @@ export async function ensureDependencies({
     catch { throw new Error('Locked npm installation failed. Check the error above, network/proxy access and package-lock.json, then retry npm run dev. Startup does not fall back to npm install or rewrite the lockfile.'); }
     if (!rootDependenciesReady(installationRoot)) throw new Error('npm ci completed but required Grapher dependencies are still missing; check npm omit/optional settings and retry npm run dev.');
   }
+  await run(process.execPath, [join(installationRoot, 'scripts/patch-picomatch.mjs'), installationRoot], options);
   let action = 'build';
   try { verifyPiDependencies(installationRoot); } catch { action = 'setup'; }
   if (action === 'setup' || !piBuildReady(installationRoot)) {

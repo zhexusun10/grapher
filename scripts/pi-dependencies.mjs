@@ -2,6 +2,7 @@
 // lockfile intact; install only core dependencies plus reviewed build/test tools.
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -127,9 +128,10 @@ export function installPiDependencies(root, runNpm) {
   verifyDependencyProfile(root);
   const profile = profileDirectory(root);
   runNpm(profile, 'ci', '--ignore-scripts');
-  // Audit the actual profile (including build/test tools), not an omit=dev or
-  // advisory allowlist view. Fail before replacing the existing installation.
-  runNpm(profile, 'audit', '--audit-level=moderate');
+  // Apply the reviewed workaround to the install that will actually be used,
+  // then audit the entire reviewed profile. An upstream patched release replaces it.
+  execFileSync(process.execPath, [join(root, 'scripts/patch-picomatch.mjs'), profile], { stdio: 'inherit' });
+  execFileSync(process.execPath, [join(root, 'scripts/npm-audit.mjs'), '--prefix', profile, '--audit-level', 'moderate'], { stdio: 'inherit' });
   const source = join(root, 'pi');
   const modules = join(source, 'node_modules');
   rmSync(modules, { recursive: true, force: true });
