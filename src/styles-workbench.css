@@ -619,7 +619,7 @@
   height: 26px;
   border-radius: 8px;
   border: 1px solid var(--border-default, #E2E8F0);
-  background: var(--bg-surface, #F7F7F8);
+  background: var(--bg-surface, #F9F9FA);
   color: var(--text-secondary, #64748B);
   display: inline-flex;
   align-items: center;
