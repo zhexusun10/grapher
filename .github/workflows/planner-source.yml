@@ -87,6 +87,10 @@ jobs:
         run: npm run check
       - name: Verify frontend state, i18n and transcript contracts
         run: npm run test:frontend
+      # Cwd and PATH behavior is host-specific; check these fast cases before
+      # compiling Rust and running the full native environment acceptance.
+      - name: Verify native launch bindings
+        run: node --test scripts/environment-launch.test.mjs
       - name: Verify snapshot inheritance, failed revisions and event replay
         if: runner.os != 'Windows'
         run: npm run test:backend

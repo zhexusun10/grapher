@@ -328,7 +328,8 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     assert.equal(JSON.parse(await readFile(join(source, 'reports/C.json'), 'utf8')).version, 2);
     await assert.rejects(readFile(join(source, '.venv/pyvenv.cfg')), /ENOENT/);
     const proof = JSON.parse(await readFile(join(cachePath(workspace), 'extension.json'), 'utf8'));
-    assert.equal(proof.cwd, workspace); assert.equal(proof.prefix, venvPath(workspace));
+    assert.equal(await realpath(proof.cwd), await realpath(workspace));
+    assert.equal(await realpath(proof.prefix), await realpath(venvPath(workspace)));
     if (ml) {
       for (const execution of initial.executions) {
         const proof = JSON.parse(await readFile(join(data, 'environments', runId, 'proofs', execution.result.generation, 'accelerator.json'), 'utf8'));
