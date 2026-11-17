@@ -143,11 +143,13 @@ try {
         assert.ok(html.includes(t("merger · {0}", "join")) || html.includes(t("publication merger")), "merger card heading must render localized copy");
         if (props.selectedMergerId === "merger-running") {
           assert.ok(html.includes('placeholder="Steer..."'), "a live merger composer is labeled Steer");
-        } else if (props.selectedMergerId === "merger-failed" || props.selected === "merger:publication") {
-          assert.ok(html.includes('placeholder="Type..."'), "a continuable idle merger composer invites typing");
+        } else if (props.selectedMergerId === "merger-failed") {
+          assert.ok(html.includes('placeholder="Type..."'), "a failed merger composer accepts repair input");
         } else {
+          assert.ok(html.includes(`placeholder="${t("Merger 已完成")}"`),
+            "a completed merger composer shows its read-only state");
           assert.ok(!html.includes('placeholder="Type..."') && !html.includes("Steer..."),
-            "a disabled merger composer keeps an empty placeholder");
+            "a completed merger composer does not invite more input");
         }
       }
     }

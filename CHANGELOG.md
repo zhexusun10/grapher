@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Made every successfully completed Merger conversation read-only, including publication Mergers, while preserving repair input and explicit publication retry after failures; the composer shows a completed state and browser tests cover both Merger types (`src/components/views/GraphWorkbench.tsx`, `src/i18n/en.ts`, `scripts/composer-continuation-ui.test.mjs`).
 - Kept cached node-snapshot base comparisons aligned with versioned project-view normalization, so volatile Git index stat-cache changes do not create false metadata changes or redundant snapshots; every immutable record is still checksum-validated (`backend/src/workspace_view.rs`, `backend/src/workspace_view_tests.rs`).
 - Mitigated picomatch's single-branch repeated-extglob ReDoS with the upstream proposed fix and conservatively literalized repeated multi-branch extglobs containing unescaped wildcards; added bounded regression coverage and updated Vite to 7.3.8 (`package.json`, `package-lock.json`, `scripts/patch-picomatch.mjs`, `scripts/ensure-deps.test.mjs`). npm audit may continue to report the affected published picomatch version until upstream releases a fix.
 - Upgraded the bundled `pi-better-web-search` extension from 1.0.3 to 1.0.4 (`package.json`, `package-lock.json`).

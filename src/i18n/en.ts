@@ -578,6 +578,7 @@ export const en: Record<string, string> = {
   "正在保存节点结果": "Saving node result",
   "正在保存节点快照": "Saving node snapshot",
   "正在保存节点运行环境": "Saving node environment",
+  "Merger 已完成": "Merger completed; conversation is read-only",
   "正在准备节点工作区": "Preparing node workspaces",
   "正在复制节点工作区": "Copying node workspaces",
   "正在准备节点工作区（合并上游结果）": "Preparing node workspaces (merging upstream results)",

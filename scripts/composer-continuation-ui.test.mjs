@@ -82,6 +82,16 @@ test("empty composer continues without submitting a message; drafts and stop ret
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=publication-merger&mergerStatus=completed`);
     assert.equal(await page.getByRole("button", { name: "继续当前 Agent（不会追加消息）" }).count(), 0,
       "a settled publication Merger conversation does not retry completed publication");
+    for (const mode of ["publication-merger", "node-merger"]) {
+      await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=${mode}&mergerStatus=completed`);
+      const completedMergerInput = page.locator(".pane-bottom-chat textarea");
+      assert.equal(await completedMergerInput.isDisabled(), true,
+        `${mode} input is read-only after the Merger execution completes`);
+      assert.equal(await completedMergerInput.getAttribute("placeholder"), "Merger 已完成",
+        "the disabled input identifies the completed Merger state");
+      assert.equal(await page.getByTestId("calls").textContent(), "",
+        "a completed Merger cannot submit another instruction");
+    }
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=publication-merger`);
     await page.locator(".pane-bottom-chat textarea").fill("Repair the conflict this way");
     await page.locator(".pane-bottom-chat textarea").press("Enter");

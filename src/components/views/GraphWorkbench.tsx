@@ -2374,8 +2374,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (state.approved && state.phase === "running" && serialNodeState?.status === "waiting")
   );
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialAwaitingStart || isSerialWorking) : isPlanning;
+  const completedMergerReadOnly = selectedMerger?.status === "completed";
   // A disabled composer keeps an empty placeholder; an idle one invites typing.
-  const nodeComposerDisabled = locked || !!editingMessage || !state.approved ||
+  const nodeComposerDisabled = locked || !!editingMessage || !state.approved || completedMergerReadOnly ||
     (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable);
   const mainComposerDisabled = !!editingMessage || (locked && !isPlanning);
   const withdrawMessages = onWithdrawMessages ? (requestId: string) =>
@@ -3119,7 +3120,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 draftStore={composerDrafts}
                 draftKey={composerDraftKey}
                 onSubmit={handleSendMessageWithScroll}
-                placeholder={nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
+                placeholder={completedMergerReadOnly ? t("Merger 已完成") : nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.id); onInterrupt(selectedNode?.id); } : undefined}
