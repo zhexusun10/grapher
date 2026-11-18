@@ -362,8 +362,7 @@ pub(crate) fn actual_path(path: &Path) -> Result<PathBuf, String> {
     Err(format!("Cannot resolve path identity: {}", path.display()))
 }
 
-/// Stable comparison key. Existing paths use the host's actual spelling;
-/// fallback spelling normalization covers paths that do not exist yet.
+/// Drop trailing separators so `/a/b/` and `/a/b` share one key; `/` stays root.
 #[cfg(not(windows))]
 fn trim_posix_trailing_slashes(text: String) -> String {
     if text.len() > 1 {
@@ -376,6 +375,8 @@ fn trim_posix_trailing_slashes(text: String) -> String {
     text
 }
 
+/// Stable comparison key. Existing paths use the host's actual spelling;
+/// fallback spelling normalization covers paths that do not exist yet.
 pub(crate) fn path_key(path: &Path) -> String {
     let text = actual_path(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -502,7 +503,7 @@ pub(crate) fn lexical_key(path: &Path) -> String {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        text
+        trim_posix_trailing_slashes(text)
     }
 }
 

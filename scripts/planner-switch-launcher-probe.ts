@@ -16,6 +16,7 @@ export default async function (pi: any) {
   const target = JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES!).target;
   const switchTool = tools.find(tool => tool.name === 'switch_workspace');
   assert.equal(switchTool.prepareArguments, undefined);
+  assert.equal(switchTool.promptSnippet, undefined);
   assert.deepEqual(Object.keys(switchTool.parameters.properties), ['id']);
   const switched = JSON.parse(text(await call('switch_workspace', { id: 'target' })));
   assert.equal(switched.requestedId, 'target');

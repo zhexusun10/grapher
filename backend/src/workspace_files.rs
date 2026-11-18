@@ -993,7 +993,10 @@ impl Files {
         for (name, entry) in &desired {
             if workspace::tracked_path_matches(Some(workspace), &tracked, name) {
                 if let Entry::File { blob, .. } = entry {
-                    if workspace.join(name).is_file() && hash(&workspace.join(name))? == *blob {
+                    let target = workspace.join(name);
+                    if fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.is_file())
+                        && hash(&target)? == *blob
+                    {
                         continue;
                     }
                 }
@@ -1046,9 +1049,13 @@ impl Files {
                     .filter(|path| !path.as_os_str().is_empty())
                 {
                     let key = path_name(ancestor)?;
-                    if matches!(current.get(&key), Some(Entry::File { .. }))
-                        && matches!(desired.get(&key), Some(Entry::Directory { .. }))
-                    {
+                    if matches!(
+                        lookup_entry_alias(&current, Some(&root), &key),
+                        Ok(Some((_, Entry::File { .. })))
+                    ) && matches!(
+                        lookup_entry_alias(&desired, Some(&root), &key),
+                        Ok(Some((_, Entry::Directory { .. })))
+                    ) {
                         replaced = Some(ancestor);
                         break;
                     }
@@ -1129,24 +1136,20 @@ impl Files {
                 real_child_path(&root, parent, false)?;
             }
             match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    #[cfg(target_os = "macos")]
-                    crate::workspace_cleanup::clear_macos_immutable_flags(&path, &metadata)
-                        .map_err(|e| e.to_string())?;
-                    unlink(&path, metadata.is_dir() || path.is_dir())?
+                Ok(metadata) if crate::workspace_symlinks::is_link(&metadata) => {
+                    crate::workspace_symlinks::remove(&path)?;
                 }
                 Ok(metadata) if metadata.is_dir() => {
                     #[cfg(target_os = "macos")]
                     crate::workspace_cleanup::clear_macos_immutable_flags(&path, &metadata)
                         .map_err(|e| e.to_string())?;
-                    let _ = metadata;
                     // A managed scope may contain tracked descendants.
                     if !tracked.iter().any(|tracked| {
                         workspace::scope_contains_at(&root, Path::new(tracked), Path::new(&name))
                     }) {
                         // Deepest-first removal must not delete managed exclusions
                         // or tracked descendants nested inside a managed scope.
-                        match fs::remove_dir(&path) {
+                        match crate::workspace_cleanup::remove_directory(&path, &metadata) {
                             Ok(()) => {}
                             Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
                             Err(e) => return Err(e.to_string()),
@@ -1259,15 +1262,6 @@ impl Files {
 #[cfg(test)]
 #[path = "workspace_files_tests.rs"]
 mod tests;
-
-fn unlink(path: &Path, directory: bool) -> Result<(), String> {
-    #[cfg(windows)]
-    if directory {
-        return fs::remove_dir(path).map_err(|error| error.to_string());
-    }
-    let _ = directory;
-    fs::remove_file(path).map_err(|error| error.to_string())
-}
 
 fn link(root: &Path, target: &Path, path: &Path, directory: bool) -> Result<(), String> {
     let _ = root;

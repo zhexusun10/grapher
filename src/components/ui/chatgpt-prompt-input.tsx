@@ -25,6 +25,7 @@ import { ComposerNotice } from "./ComposerNotice";
 import { ScopedModelsModal } from "../modals/ScopedModelsModal";
 import { useHideAutoMode } from "../../services/displayPreferences";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
+import { createUuid } from "../../lib/uuid";
 import type { SkillItem, ImageAttachment } from "../../types";
 
 export interface PromptBoxSubmitOptions {
@@ -767,7 +768,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const processIncomingFile = useCallback((file: File) => {
       setAttachmentError("");
       selectedFileRef.current = file;
-      attachmentIdRef.current = crypto.randomUUID();
+      attachmentIdRef.current = createUuid();
       setSelectedFile(file);
       setSelectedImage(null);
       // Selection is local only. Persist a collision-safe attachment on Send.
@@ -929,7 +930,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       let combinedPrompt = trimmed || (restoredImages.length ? t("请查看附图。") : "");
 
       if (currentAttachment) {
-        const attachmentId = attachmentIdRef.current ??= crypto.randomUUID();
+        const attachmentId = attachmentIdRef.current ??= createUuid();
         let uploadedPath: string;
         setIsPreparing(true);
         try {
@@ -959,6 +960,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             submittingRef.current = false;
             setAttachmentError(`${t("无法读取附件，请重新选择文件后重试。")} ${err instanceof Error ? err.message : String(err)}`);
             setIsSubmitting(false);
+            endSendGrace();
           }
           return;
         } finally {

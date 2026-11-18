@@ -49,6 +49,21 @@ test("confirmed language changes persist before reload; auto clears the override
     ...storage, setItem: () => { throw new Error("storage blocked"); },
   }, () => { events.push(["reload"]); }), /storage blocked/);
   assert.deepEqual(events, [], "failure must not reload or discard unsaved settings");
+  assert.throws(() => restartFrontendWithLanguage("en", undefined, () => { events.push(["reload"]); }),
+    /Local storage unavailable/);
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() { throw new Error("blocked getter"); },
+  });
+  try {
+    assert.throws(() => restartFrontendWithLanguage("en", undefined, () => { events.push(["reload"]); }),
+      /Local storage unavailable/);
+  } finally {
+    if (originalDescriptor) Object.defineProperty(globalThis, "localStorage", originalDescriptor);
+    else delete (globalThis as Record<string, unknown>).localStorage;
+  }
+  assert.deepEqual(events, []);
 });
 
 test("Chinese copy and existing English stay unchanged; interpolation preserves user content", () => {

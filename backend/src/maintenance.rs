@@ -172,7 +172,7 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
         .filter(|engine| {
             !sources
                 .iter()
-                .any(|source| source.starts_with(&engine.directory))
+                .any(|source| crate::workspace::scope_contains(source, &engine.directory))
         })
         .collect();
     println!(

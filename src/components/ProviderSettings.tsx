@@ -106,6 +106,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const catalogGeneration = useRef(0);
   const actionInFlight = useRef(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const successTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const credentialInputError = login?.prompt?.type === "secret" && hasUnsupportedCredentialCharacters(answer)
     ? t("API Key 只能包含 ASCII 可见字符，不能包含中文、全角符号或换行。")
     : "";
@@ -138,6 +139,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       authGeneration.current += 1;
       catalogGeneration.current += 1;
       if (copyTimer.current) clearTimeout(copyTimer.current);
+      if (successTimer.current) clearTimeout(successTimer.current);
       if (activeId.current) void providerAuth.cancel(activeId.current).catch(() => {});
     };
   }, []);
@@ -322,7 +324,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           ? t("已在 Grapher 中屏蔽 {0} ({1}) 的环境变量凭据。", p.name, p.id)
           : t("已成功删除 {0} ({1}) 的 API Key 凭据。", p.name, p.id)
       );
-      setTimeout(() => {
+      if (successTimer.current) clearTimeout(successTimer.current);
+      successTimer.current = setTimeout(() => {
+        successTimer.current = null;
         if (mounted.current) setActionSuccess("");
       }, 4500);
     } catch (err) {
@@ -347,6 +351,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   }
 
   async function copyText(text: string) {
+    if (!navigator.clipboard?.writeText) return;
     try {
       await navigator.clipboard.writeText(text);
       if (!mounted.current) return;

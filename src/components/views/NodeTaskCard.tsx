@@ -27,9 +27,9 @@ function fallbackCopy(text: string, onSuccess: () => void) {
     document.body.appendChild(el);
     el.focus();
     el.select();
-    document.execCommand("copy");
+    const successful = document.execCommand("copy");
     document.body.removeChild(el);
-    onSuccess();
+    if (successful) onSuccess();
   } catch {
     // ignore
   }
@@ -54,12 +54,15 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
     if (historyReady) setRevealed(true);
   }, [historyReady]);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const compositionEndedAtRef = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (copyTimeoutRef.current) {
         clearTimeout(copyTimeoutRef.current);
       }
@@ -80,9 +83,10 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
 
     const onSuccess = () => {
+      if (!mountedRef.current) return;
       setCopied(true);
       copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
+        if (mountedRef.current) setCopied(false);
       }, 1500);
     };
 

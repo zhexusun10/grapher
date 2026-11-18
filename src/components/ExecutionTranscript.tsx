@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Loader2 } from "lucide-react";
 import type { Execution, ImageAttachment } from "../types";
 import { runtimeService } from "../services/runtime";
+import { combineAbortSignals } from "../services/requestTimeout";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { WorkspaceImageProvider } from "./WorkspaceImages";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
@@ -202,7 +203,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
 
   useEffect(() => {
     const abort = new AbortController();
-    const signal = AbortSignal.any([abort.signal, lifetime.current!]);
+    const signal = combineAbortSignals(abort.signal, lifetime.current);
     let emptyPages = 0;
     setError("");
     const cached = windowRef.current;

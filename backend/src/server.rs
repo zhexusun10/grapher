@@ -6982,7 +6982,11 @@ fn handle_http_request(
         // This is still an unauthenticated, trusted-user local API.
         let is_json = request.headers().iter().any(|h| {
             h.field.equiv("Content-Type")
-                && h.value.as_str().split(';').next() == Some("application/json")
+                && h.value
+                    .as_str()
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
         });
         if request.method() != &tiny_http::Method::Post || !is_json {
             let _ =

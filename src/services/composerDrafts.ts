@@ -1,4 +1,5 @@
 import type { ImageAttachment } from "../types";
+import { createUuid } from "../lib/uuid";
 
 export interface RecalledMessage { text: string; images?: ImageAttachment[] }
 interface RecallState { revision: number; images: ImageAttachment[]; pending: boolean }
@@ -23,7 +24,7 @@ export class ComposerDrafts extends Map<string, string> {
   }
   setImages(key: string, images: ImageAttachment[]) { this.update(key, { images }); }
   withdraw(key: string, work: (requestId: string) => Promise<RecalledMessage[]>): Promise<void> {
-    const request = this.requests.get(key) ?? { id: crypto.randomUUID() };
+    const request = this.requests.get(key) ?? { id: createUuid() };
     if (request.promise) return request.promise;
     this.requests.set(key, request);
     request.promise = Promise.resolve().then(() => work(request.id)).then(messages => {

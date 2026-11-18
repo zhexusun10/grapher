@@ -60,13 +60,27 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
 
   useLayoutEffect(() => {
     if (open === prevOpenRef.current) return;
-    prevOpenRef.current = open;
     const animator = animatorRef.current;
     const content = contentRef.current;
     const panel = panelRef.current;
-    // Mounting starts collapsed (height 0 in the initial style), so a run with
-    // null refs is a harmless no-op.
-    if (!animator || !content || !panel) return;
+    // Mounting starts collapsed (height 0 in the initial style). Keep the
+    // previous state unrecorded while our own nodes are missing so a later
+    // commit can still apply the change.
+    if (!animator || !content) return;
+    prevOpenRef.current = open;
+    if (!panel) {
+      // An ancestor ref is attached after child layout effects on mount, so a
+      // panel remounted already open (view switch, conversation key change)
+      // has no anchor yet. Show its settled state instead of leaving it
+      // collapsed while `open` stays unchanged.
+      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+      cleanupListenersRef.current?.();
+      cleanupListenersRef.current = null;
+      animator.style.height = open ? "auto" : "0px";
+      animator.style.opacity = open ? "1" : "0";
+      return;
+    }
 
     const container = scrollContainerRef?.current
       ?? (panel.closest(".initial-query-scroll") as HTMLElement | null);

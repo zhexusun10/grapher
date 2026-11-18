@@ -3109,14 +3109,20 @@ sys.stdin.read()
         let temp = tempfile::tempdir().unwrap();
         let bg = temp.path().join("bg.js");
         let pidfile = temp.path().join("pid");
-        fs::write(&bg, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(()=>{}, 60000);").unwrap();
-        let cmd = format!(
-            "(nohup node \"{}\" \"{}\" > /dev/null 2>&1 &); sleep 1",
-            bg.display(),
-            pidfile.display()
-        );
-        let mut command = std::process::Command::new("C:\\Program Files\\Git\\usr\\bin\\bash.exe");
-        command.args(["-c", &cmd]);
+        fs::write(
+            &bg,
+            "require('node:fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(()=>{}, 60000);",
+        )
+        .unwrap();
+        let launcher = r#"const fs=require('node:fs'),{spawn}=require('node:child_process');
+const [bg,pidfile]=process.argv.slice(1);
+const child=spawn(process.execPath,[bg,pidfile],{stdio:'ignore',detached:process.platform==='win32'});
+child.once('error',()=>process.exit(1));
+child.unref();
+const deadline=setTimeout(()=>process.exit(2),5000);
+const ready=setInterval(()=>{if(fs.existsSync(pidfile)){clearInterval(ready);clearTimeout(deadline);}},10);"#;
+        let mut command = std::process::Command::new(crate::native::trusted_node().unwrap());
+        command.args(["-e", launcher]).arg(&bg).arg(&pidfile);
         process_control::configure_command(&mut command);
         command
             .stdin(Stdio::null())
@@ -3124,7 +3130,11 @@ sys.stdin.read()
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
         let tree = process_control::track(&child).unwrap();
-        let _ = child.wait();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            pidfile.is_file(),
+            "the background child must start before its parent exits"
+        );
         // A held boundary keeps a clone, exactly as the registry does.
         let held = tree.clone();
         drop(ProcessGuard(tree.clone()));

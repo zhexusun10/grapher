@@ -124,6 +124,37 @@ test('shared-source Planner exposes no workspace switch even on a follow-up', ()
   }
 });
 
+test('switch_workspace omits promptSnippet so it does not enter generated <tools> prompts', () => {
+  const original = process.cwd();
+  const previous = { ...process.env };
+  const root = mkdtempSync(join(tmpdir(), 'grapher-planner-switch-tool-'));
+  try {
+    const project = join(root, 'source');
+    const workspace = join(root, 'worktree');
+    mkdirSync(project); mkdirSync(workspace);
+    process.chdir(workspace);
+    process.env.GRAPHER_MODE = 'planner';
+    process.env.GRAPHER_EXECUTION_KIND = 'graph';
+    process.env.GRAPHER_ORIGINAL_ROOT = project;
+    process.env.GRAPHER_SOURCE_ALIAS = project;
+    process.env.GRAPHER_PLANNER_FOLLOWUP = 'true';
+    process.env.GRAPHER_PLANNER_WORKSPACES = JSON.stringify({
+      target: { requestedNode: 'target', actualNode: 'target', executionId: 'exec-target', workspace },
+    });
+    const tools: any[] = [];
+    workspacePolicy({ on() {}, registerTool(tool: any) { tools.push(tool); } } as any);
+    const switchTool = tools.find(tool => tool.name === 'switch_workspace');
+    assert.ok(switchTool);
+    assert.equal(switchTool.promptSnippet, undefined);
+    assert.equal(switchTool.promptGuidelines, undefined);
+  } finally {
+    process.chdir(original);
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('shared-source Graph nodes retain the existing Graph rules and feedback protocol', async () => {
   const previous = { ...process.env };
   try {

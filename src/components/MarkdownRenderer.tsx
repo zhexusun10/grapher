@@ -63,7 +63,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       const copyBtn = target instanceof Element ? target.closest<HTMLButtonElement>("button.code-copy-btn") : null;
       if (!copyBtn || !event.currentTarget.contains(copyBtn)) return;
       const codeBlock = copyBtn.closest(".code-block-wrapper")?.querySelector("pre code");
-      if (!codeBlock) return;
+      if (!codeBlock || !navigator.clipboard?.writeText) return;
       event.preventDefault();
       event.stopPropagation();
 

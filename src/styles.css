@@ -246,9 +246,9 @@ h3 {
   display: flex;
   flex-direction: column;
   z-index: 10;
-  overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
+  overflow: clip;
   will-change: width, max-width;
   animation: sidebarEnter 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
   transition:
@@ -613,6 +613,8 @@ h3 {
   gap: var(--workspace-card-gap);
   overflow-y: auto;
   overflow-x: hidden;
+  max-height: min(228px, 30vh, max(54px, 100vh - 310px));
+  max-height: min(228px, 30dvh, max(54px, 100dvh - 310px));
   max-height: max(0px, calc(round(down, calc(min(228px, 30dvh, max(54px, 100dvh - 310px)) + var(--workspace-card-gap)), calc(var(--workspace-card-height) + var(--workspace-card-gap))) - var(--workspace-card-gap)));
   flex-shrink: 1;
   min-height: 0;

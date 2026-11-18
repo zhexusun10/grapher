@@ -199,7 +199,7 @@ fn cleanup_error(operation: &str, path: &Path, error: std::io::Error) -> std::io
 
 /// Try plain removal first. Windows can reject a read-only directory with
 /// access denied, even when its ACL permits deletion.
-fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+pub(crate) fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
     match fs::remove_dir(path) {
         #[cfg(windows)]
         Err(error)

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RequestTimeoutError, withRequestTimeout } from "../src/services/requestTimeout.ts";
+import { RequestTimeoutError, combineAbortSignals, withRequestTimeout } from "../src/services/requestTimeout.ts";
+import { createUuid } from "../src/lib/uuid.ts";
 import { runtimeService } from "../src/services/runtime.ts";
 import { emptySnapshot } from "../src/types.ts";
 import { emptyFileChangeSummary } from "../src/services/fileChanges.ts";
@@ -141,4 +142,50 @@ test("settings body stalls are bounded", async context => {
     await Promise.resolve();
     context.mock.timers.tick(15_000); await rejected;
   } finally { globalThis.fetch = original; }
+});
+
+test("combineAbortSignals falls back when AbortSignal.any is unavailable", () => {
+  const originalAny = AbortSignal.any;
+  Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+  try {
+    const local = new AbortController();
+    const lifetime = new AbortController();
+    const combined = combineAbortSignals(local.signal, lifetime.signal);
+    assert.equal(combined.aborted, false);
+    lifetime.abort("lifetime-ended");
+    assert.equal(combined.aborted, true);
+    assert.equal(combined.reason, "lifetime-ended");
+
+    const local2 = new AbortController();
+    const lifetime2 = new AbortController();
+    const combined2 = combineAbortSignals(local2.signal, lifetime2.signal);
+    local2.abort("local-ended");
+    assert.equal(combined2.aborted, true);
+    assert.equal(combined2.reason, "local-ended");
+
+    const preAborted = new AbortController();
+    preAborted.abort("already");
+    const combined3 = combineAbortSignals(new AbortController().signal, preAborted.signal);
+    assert.equal(combined3.aborted, true);
+    assert.equal(combined3.reason, "already");
+  } finally {
+    Object.defineProperty(AbortSignal, "any", { configurable: true, value: originalAny });
+  }
+});
+
+test("createUuid returns a valid UUID v4 even when crypto.randomUUID is unavailable", () => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  assert.match(createUuid(), uuidRegex);
+  const originalCrypto = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) },
+  });
+  try {
+    assert.match(createUuid(), uuidRegex);
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    assert.match(createUuid(), uuidRegex);
+  } finally {
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: originalCrypto });
+  }
 });

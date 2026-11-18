@@ -195,6 +195,7 @@ fn alias_entry<'a>(
     matched
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn disk_relative_matches(repository: &Path, target: &Path, expected_relative: &str) -> bool {
     let Ok(repo_actual) = crate::path_identity::actual_path(repository) else {
         return false;
@@ -299,11 +300,18 @@ fn strip_untracked_host_metadata(
         return Ok(false);
     }
     for file in files {
+        if let Ok(meta) = fs::symlink_metadata(&file) {
+            let _ = crate::workspace_cleanup::clear_macos_immutable_flags(&file, &meta);
+        }
         fs::remove_file(file).map_err(|e| e.to_string())?;
     }
     for subdir in dirs {
+        if let Ok(meta) = fs::symlink_metadata(&subdir) {
+            let _ = crate::workspace_cleanup::clear_macos_immutable_flags(&subdir, &meta);
+        }
         fs::remove_dir(subdir).map_err(|e| e.to_string())?;
     }
+    let _ = crate::workspace_cleanup::clear_macos_immutable_flags(dir, &meta);
     Ok(true)
 }
 
@@ -725,8 +733,8 @@ fn install_with(
         let mut replaced_ancestor = false;
         for ancestor in Path::new(relative).ancestors().skip(1) {
             if let Some(name) = ancestor.to_str().filter(|name| !name.is_empty()) {
-                if let Some(entry) = new.get(name) {
-                    if matches_entries(repository, name, &[Some(entry)])? {
+                if let Some((matched_name, entry)) = alias_entry(&new, name, case_insensitive) {
+                    if matches_entries(repository, matched_name, &[Some(entry)])? {
                         replaced_ancestor = true;
                         break;
                     }
@@ -1486,5 +1494,50 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn retry_recovers_dir_to_file_transition_under_case_or_nfd_alias() {
+        let (_temp, source, node, journal, _) = fixture();
+        fs::create_dir(source.join("Docs")).unwrap();
+        fs::write(source.join("Docs/b.txt"), "old child").unwrap();
+        git(&source, &["add", "-A"]).unwrap();
+        git(&source, &["commit", "-qm", "docs dir base"]).unwrap();
+        let input = workspace::snapshot_repository(&source).unwrap();
+
+        let node = node.with_file_name("dir-to-file-alias");
+        let run = uuid::Uuid::new_v4().to_string();
+        workspace::prepare_with_merger_expected_for_run(
+            &source,
+            &node,
+            &input,
+            &[],
+            "",
+            Some(&run),
+            || Err("unexpected conflict".into()),
+        )
+        .unwrap();
+
+        let target_file = if crate::path_identity::case_insensitive_volume(&node) {
+            "docs"
+        } else {
+            "Docs"
+        };
+        fs::remove_dir_all(node.join("Docs")).unwrap();
+        fs::write(node.join(target_file), "now a file").unwrap();
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+
+        // Simulate an interrupted first attempt that already removed Docs/b.txt and
+        // Docs/, then installed the `docs` file before crashing.
+        fs::remove_dir_all(source.join("Docs")).unwrap();
+        fs::write(source.join(target_file), "now a file").unwrap();
+
+        install(&source, &journal, &input, &result).unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join(target_file)).unwrap(),
+            "now a file"
+        );
+        assert!(disk_relative_matches(&source, &source.join(target_file), target_file));
     }
 }

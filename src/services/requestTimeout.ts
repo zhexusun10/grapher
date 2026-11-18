@@ -5,6 +5,29 @@ export class RequestTimeoutError extends Error {
   }
 }
 
+/** Combine a local effect signal with a shared lifetime signal without requiring `AbortSignal.any`. */
+export function combineAbortSignals(local: AbortSignal, lifetime?: AbortSignal | null): AbortSignal {
+  if (!lifetime) return local;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([local, lifetime]);
+  if (local.aborted || lifetime.aborted) {
+    const controller = new AbortController();
+    controller.abort(local.aborted ? local.reason : lifetime.reason);
+    return controller.signal;
+  }
+  const controller = new AbortController();
+  const onLocalAbort = () => {
+    lifetime.removeEventListener("abort", onLifetimeAbort);
+    controller.abort(local.reason);
+  };
+  const onLifetimeAbort = () => {
+    local.removeEventListener("abort", onLocalAbort);
+    controller.abort(lifetime.reason);
+  };
+  local.addEventListener("abort", onLocalAbort, { once: true });
+  lifetime.addEventListener("abort", onLifetimeAbort, { once: true });
+  return controller.signal;
+}
+
 /** Bound the whole response (including its body), even if a transport ignores
  * abort. Caller cancellation retains its own reason; all timers/listeners end. */
 export async function withRequestTimeout<T>(

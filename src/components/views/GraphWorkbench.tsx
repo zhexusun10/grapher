@@ -16,6 +16,7 @@ import {
   ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, GraphEvent
 } from "../../types";
 import { graphCardIds, selectedMergerNode } from "../../lib/graphNodeIdentity";
+import { createUuid } from "../../lib/uuid";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -270,12 +271,25 @@ function FooterProgressLabel({ token, disabled, children }: {
  * and copyable instead of collapsing it into a single opaque line. */
 function NodeErrorPanel({ error, paused }: { error: string; paused?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
   const detail = useMemo(() => localizeError(error), [error]);
   const copy = useCallback(() => {
-    if (!navigator.clipboard) return;
+    if (!navigator.clipboard?.writeText) return;
     void navigator.clipboard.writeText(detail).then(() => {
+      if (!mountedRef.current) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) setCopied(false);
+      }, 1500);
     }).catch(() => {});
   }, [detail]);
   return (
@@ -1233,6 +1247,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const failureNoticeRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workspaceDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrolledUpRef = useRef(false);
   // Distinguish a real reader gesture from a layout-induced scroll-up. Only a
   // gesture should prevent later final output from reclaiming the bottom.
@@ -1384,6 +1399,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     previousNodeViewRef.current = Boolean(selected);
     activeConversationViewRef.current = conversationViewKey;
     conversationGenerationRef.current += 1;
+    expandedCardObserverRef.current?.disconnect();
+    expandedCardObserverRef.current = null;
+    if (expandedCardTimerRef.current !== null) {
+      clearTimeout(expandedCardTimerRef.current);
+      expandedCardTimerRef.current = null;
+    }
+    if (workspaceDetailsTimerRef.current !== null) {
+      clearTimeout(workspaceDetailsTimerRef.current);
+      workspaceDetailsTimerRef.current = null;
+    }
     const saved = conversationScrollStateRef.current.get(conversationViewKey);
     isUserScrolledUpRef.current = saved?.isUserScrolledUp ?? false;
     userScrolledAwayRef.current = saved?.isUserScrolledUp ?? false;
@@ -1533,7 +1558,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [failureNoticeKey, hidePlannerResultCards, shouldFollowOutput]);
 
   const handleSendMessageWithScroll = useCallback(async (val: string, options?: PromptBoxSubmitOptions) => {
-    options = { ...options, requestId: options?.requestId ?? crypto.randomUUID() };
+    options = { ...options, requestId: options?.requestId ?? createUuid() };
     const submittedDraft = composerDrafts.get(composerDraftKey);
     const submittedImages = composerDrafts.recall(composerDraftKey).images;
     stopLatestScroll();
@@ -1809,7 +1834,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     // Keep automatic bottom following paused for the full animation; resuming
     // after two frames would fight the reveal and push the header offscreen.
+    const generation = conversationGenerationRef.current;
     const finishResize = () => {
+      if (conversationGenerationRef.current !== generation) return;
       const scroll = chatScrollRef.current;
       if (scroll) {
         if (followOutput && shouldFollowOutput()) {
@@ -2041,8 +2068,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
 
-  const workspaceDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const handleWorkspaceDetailsBeforeToggle = useCallback(() => {
     suppressAutoScrollRef.current = true;
     if (chatScrollRef.current) {
@@ -2053,8 +2078,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       clearTimeout(workspaceDetailsTimerRef.current);
     }
     // Safety fallback in case animation is somehow abruptly interrupted
+    const generation = conversationGenerationRef.current;
     workspaceDetailsTimerRef.current = setTimeout(() => {
       workspaceDetailsTimerRef.current = null;
+      if (conversationGenerationRef.current !== generation) return;
       suppressAutoScrollRef.current = false;
       if (chatScrollRef.current) {
         prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;

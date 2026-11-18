@@ -53,6 +53,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const smoothContent = useSmoothStreamText(rawContent, isStreaming, isExpanded);
     const [isCopied, setIsCopied] = useState(false);
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const mountedRef = useRef(true);
     const cardRef = useRef<HTMLDivElement>(null);
     const bodyRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
@@ -199,10 +200,12 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     };
 
     useEffect(() => {
+      mountedRef.current = true;
       const release = () => { pointerHeldRef.current = false; };
       window.addEventListener("pointerup", release);
       window.addEventListener("pointercancel", release);
       return () => {
+        mountedRef.current = false;
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
         window.removeEventListener("pointerup", release);
         window.removeEventListener("pointercancel", release);
@@ -230,9 +233,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       const textToCopy = rawContent || smoothContent;
       if (!textToCopy || !navigator.clipboard?.writeText) return;
       navigator.clipboard.writeText(textToCopy).then(() => {
+        if (!mountedRef.current) return;
         setIsCopied(true);
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-        copyTimerRef.current = setTimeout(() => setIsCopied(false), 1800);
+        copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setIsCopied(false); }, 1800);
       }).catch(() => {});
     };
 

@@ -3321,3 +3321,65 @@ fn macos_prepare_replaces_dir_with_untracked_ds_store_by_file_and_keeps_tracked_
         "keep"
     );
 }
+
+#[test]
+fn slot_reuse_rebinds_readonly_git_config_and_pack_objects() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    workspace::git(&repo, &["gc", "--quiet"]).unwrap();
+
+    // Mark .git/config and packfiles read-only before capturing view A.
+    let mut cfg_perms = fs::metadata(repo.join(".git/config"))
+        .unwrap()
+        .permissions();
+    cfg_perms.set_readonly(true);
+    fs::set_permissions(repo.join(".git/config"), cfg_perms).unwrap();
+    let base_a = workspace::snapshot_repository(&repo).unwrap();
+
+    // Reused slot prepares base_a (exercises install_git_scoped with read-only config).
+    let reused = slot(&temp, "reused-readonly-git");
+    workspace::prepare(&repo, &reused, &base_a, &[]).unwrap();
+    assert!(reused.join("tracked.txt").is_file());
+
+    // Advance repo to commit B (still read-only .git/config), then reprepare the
+    // same slot so rebind_git_scoped must remove read-only .git/config & packs.
+    fs::write(repo.join("b.txt"), "b").unwrap();
+    workspace::git(&repo, &["add", "-A"]).unwrap();
+    workspace::git(&repo, &["commit", "-qm", "b"]).unwrap();
+    let base_b = workspace::snapshot_repository(&repo).unwrap();
+
+    for entry in fs::read_dir(reused.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+    {
+        let mut perms = fs::metadata(entry.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        let _ = fs::set_permissions(entry.path(), perms);
+    }
+    workspace::prepare(&repo, &reused, &base_b, &[]).unwrap();
+    assert!(reused.join("b.txt").is_file());
+    validate_ready(&reused, &repo).unwrap();
+}
+
+#[test]
+fn validate_nested_bindings_catches_broken_nested_git_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::create_dir(repo.join("sub")).unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+    let node = slot(&temp, "broken-nested-git");
+    workspace::prepare(&repo, &node, &base, &[]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(temp.path().join("missing-git"), node.join("sub/.git")).unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_dir(temp.path().join("missing-git"), node.join("sub/.git"))
+        .is_err()
+    {
+        return;
+    }
+    let err = validate_ready(&node, &repo).unwrap_err();
+    assert!(
+        err.contains("symbolic .git must resolve to a repository directory"),
+        "{err}"
+    );
+}

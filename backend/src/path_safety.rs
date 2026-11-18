@@ -11,28 +11,56 @@ pub(crate) fn real_child_path(
     path: &Path,
     file: bool,
 ) -> Result<Option<PathBuf>, String> {
-    if path
-        .components()
-        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-    {
-        return Err("Child paths must not contain traversal or relative dot segments".into());
-    }
     let relative = path
         .strip_prefix(root)
         .ok()
         .or_else(|| {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             {
+                if path.is_absolute() != root.is_absolute() {
+                    return None;
+                }
+                #[cfg(windows)]
+                let win_lexical = |value: &Path| {
+                    let text = crate::path_identity::lexical_key(value);
+                    if let Some(unc) = text.strip_prefix(r"\\?\unc\") {
+                        format!(r"\\{unc}")
+                    } else {
+                        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+                    }
+                };
+                #[cfg(windows)]
+                let lexical_root = win_lexical(root);
+                #[cfg(target_os = "macos")]
+                let macos_insensitive = crate::path_identity::case_insensitive_volume(root);
                 path.ancestors()
                     .filter(|ancestor| {
-                        !fs::symlink_metadata(ancestor)
-                            .is_ok_and(|meta| meta.file_type().is_symlink())
-                            && crate::path_identity::same_path(ancestor, root)
+                        let same_lexical = {
+                            #[cfg(windows)]
+                            {
+                                win_lexical(ancestor) == lexical_root
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                crate::path_identity::macos_equivalent_path(
+                                    ancestor,
+                                    root,
+                                    macos_insensitive,
+                                )
+                            }
+                        };
+                        same_lexical
+                            || (!ancestor
+                                .components()
+                                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+                                && !fs::symlink_metadata(ancestor)
+                                    .is_ok_and(|meta| crate::workspace_symlinks::is_link(&meta))
+                                && crate::path_identity::same_path(ancestor, root))
                     })
                     .last()
                     .and_then(|ancestor| path.strip_prefix(ancestor).ok())
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             {
                 None
             }
@@ -41,7 +69,7 @@ pub(crate) fn real_child_path(
     let parts = relative
         .components()
         .map(|part| match part {
-            Component::Normal(name) => Ok(name),
+            Component::Normal(name) if name != "." && name != ".." => Ok(name),
             _ => Err("Child paths must not contain traversal or absolute prefixes"),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -183,5 +211,51 @@ mod tests {
         assert!(real_child_path(&root, &root.join("missing"), false)
             .unwrap()
             .is_none());
+
+        // Case-aliased root (including when `root` is itself a directory link) works on
+        // case-insensitive volumes while an inner loop symlink back to `root` still fails.
+        let mixed = temp.path().join("MixedRoot");
+        fs::create_dir_all(mixed.join("sub")).unwrap();
+        fs::write(mixed.join("sub/file"), "ok").unwrap();
+        directory_link(&mixed, &mixed.join("loop"));
+        if crate::path_identity::case_insensitive_volume(&mixed) {
+            let lower_mixed = temp.path().join("mixedroot");
+            assert_eq!(
+                real_child_path(&mixed, &lower_mixed.join("sub/file"), true).unwrap(),
+                Some(mixed.join("sub/file").canonicalize().unwrap())
+            );
+            let link_root = temp.path().join("LinkRoot");
+            directory_link(&mixed, &link_root);
+            let lower_link_root = temp.path().join("linkroot");
+            assert_eq!(
+                real_child_path(&link_root, &lower_link_root.join("sub/file"), true).unwrap(),
+                Some(mixed.join("sub/file").canonicalize().unwrap())
+            );
+        }
+        assert!(real_child_path(&mixed, &mixed.join("loop/sub/file"), true).is_err());
+
+        // A trusted root that itself contains `..` or leading `.` still admits valid
+        // children while rejecting traversal in the child portion or before a root alias.
+        let sibling = temp.path().join("sibling");
+        fs::create_dir(&sibling).unwrap();
+        let dotdot_root = sibling.join("..").join("中文 space # %");
+        assert_eq!(
+            real_child_path(&dotdot_root, &dotdot_root.join("child/marker"), true).unwrap(),
+            Some(root.join("child/marker").canonicalize().unwrap())
+        );
+        assert!(real_child_path(&dotdot_root, &dotdot_root.join("missing/../child"), false).is_err());
+        assert!(real_child_path(
+            Path::new("."),
+            Path::new("./definitely-missing-child-for-path-safety-test"),
+            false
+        )
+        .unwrap()
+        .is_none());
+        assert!(real_child_path(
+            &mixed,
+            &sibling.join("..").join("mixedroot/sub/file"),
+            true
+        )
+        .is_err());
     }
 }

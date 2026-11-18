@@ -94,13 +94,16 @@ export function EditableUserBubble({
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
 
   const { cleanText, attachments, images: allImages } = useMemo(() => {
     return parseMessageAttachmentsAndText(text, files, images);
   }, [text, files, images]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (copyTimeoutRef.current) {
         clearTimeout(copyTimeoutRef.current);
       }
@@ -115,9 +118,12 @@ export function EditableUserBubble({
       clearTimeout(copyTimeoutRef.current);
     }
     const onSuccess = () => {
+      if (!mountedRef.current) return;
       setCopied(true);
       setCopyHold(true);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 1500);
+      copyTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) setCopied(false);
+      }, 1500);
     };
 
     if (navigator?.clipboard?.writeText) {

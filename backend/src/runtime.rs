@@ -4659,7 +4659,10 @@ impl Runtime {
                     fallback_anchor.is_some()
                         || (!initial_recovery
                             && (feedback_rebase
-                                || Some(previous.worktree.as_str()) != Some(worktree.as_str())
+                                || !Self::same_workspace_path(
+                                    Path::new(&previous.worktree),
+                                    Path::new(&worktree),
+                                )
                                 || feedback_workspace.as_ref().is_some_and(|input| {
                                     input.additional_sources.is_empty()
                                         || preserved_workspace.is_none()

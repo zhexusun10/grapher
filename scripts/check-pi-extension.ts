@@ -262,19 +262,20 @@ try {
   assert.match(editTool.parameters.properties.nodes.items.properties.task.description, /Complete non-empty task.*required unless deleting/);
   assert.equal(editTool.executionMode, "sequential");
   assert.equal(extension.handlers.has("tool_result"), false, "Rejections use the result's own isError, not a result hook");
-  // Mutation prompt contracts are independent of the graph inspection tool.
-  const graphDefinitions = [editTool];
+  // Mutation prompt contracts omit promptSnippet so Planner graph tools stay out
+  // of Pi's generated <tools> list while keeping edit_graph guidelines.
+  const readTool = extension.tools.get("read_graph")!.definition;
+  const graphDefinitions = [editTool, readTool];
   const graphPromptOptions = {
     cwd: repository,
     selectedTools: graphDefinitions.map(tool => tool.name),
-    toolSnippets: Object.fromEntries(graphDefinitions.map(tool => [tool.name, tool.promptSnippet!])),
-    toolGuidelines: Object.fromEntries(graphDefinitions.map(tool => [tool.name, tool.promptGuidelines!])),
+    toolSnippets: Object.fromEntries(graphDefinitions.flatMap(tool => tool.promptSnippet ? [[tool.name, tool.promptSnippet]] : [])),
+    toolGuidelines: Object.fromEntries(graphDefinitions.flatMap(tool => tool.promptGuidelines?.length ? [[tool.name, tool.promptGuidelines]] : [])),
   };
-  for (const tool of graphDefinitions) {
-    assert.ok(tool.promptSnippet && tool.promptGuidelines?.length);
-  }
+  assert.equal(editTool.promptSnippet, undefined);
+  assert.ok(editTool.promptGuidelines?.length);
   const generatedPrompt = buildSystemPrompt(graphPromptOptions);
-  assert.match(generatedPrompt, /- edit_graph: Create, replace, or delete one or more graph nodes, dependency edges, or both/);
+  assert.doesNotMatch(generatedPrompt, /- (?:edit_graph|read_graph):/);
   assert.match(generatedPrompt, /Supply the complete task/);
   assert.match(generatedPrompt, /Batch related node and edge changes/);
   const bundledPrompt = readFileSync(join(source, "backend/resources/prompts/planner.md"), "utf8");
@@ -308,14 +309,13 @@ try {
   const node = (edit: Record<string, unknown>) => call("node", edit);
   const edge = (edit: Record<string, unknown>) => call("edge", edit);
   const snapshot = async () => JSON.parse((await call("read_graph", {})).content[0].text);
-  const readTool = extension.tools.get("read_graph")!.definition;
   const readWire = convertResponsesTools([readTool])[0] as any;
   assert.equal(readWire.strict, true);
   assert.deepEqual(readWire.parameters.properties, {});
   assert.equal(readWire.parameters.additionalProperties, false);
   assert.throws(() => validateToolArguments(readTool, { type: "toolCall", id: "read-path", name: "read_graph", arguments: { path: "other.json" } }));
   assert.equal(readTool.promptGuidelines, undefined, "Discovery belongs to the tool description, not an extra reading workflow");
-  assert.ok(readTool.promptSnippet);
+  assert.equal(readTool.promptSnippet, undefined, "read_graph must not inject a <tools> snippet into generated system prompts");
   assert.doesNotMatch(readWire.description, /truncat|full snapshot|full output/i,
     "Overflow guidance belongs to truncated results, not the standing tool description");
   assert.doesNotMatch(readFileSync(join(source, "backend/resources/prompts/planner.md"), "utf8"), /read_graph/);

@@ -59,8 +59,15 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const mountedRef = useRef(true);
     const cardRef = useRef<HTMLDivElement>(null);
-    useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
+    useEffect(() => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      };
+    }, []);
     // Code blocks are scrollable only when their own content overflows. A
     // contained but non-scrollable block would swallow the conversation wheel.
     // One observer per mounted card watches the blocks that exist now and any
@@ -223,9 +230,10 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       const textToCopy = resultText || argsText.text;
       if (!textToCopy || !navigator.clipboard?.writeText) return;
       navigator.clipboard.writeText(textToCopy).then(() => {
+        if (!mountedRef.current) return;
         setIsCopied(true);
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-        copyTimerRef.current = setTimeout(() => setIsCopied(false), 1800);
+        copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setIsCopied(false); }, 1800);
       }).catch(() => {});
     };
 

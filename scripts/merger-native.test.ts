@@ -93,7 +93,8 @@ test('production Planner writes source directly; legacy private Runs retain node
         const system = messages.filter((message: any) => message.role === 'system')
           .map((message: any) => JSON.stringify(message.content)).join('\n');
         assert.ok(system.includes('You are a coding assistant.'), 'Merger must retain the default coding prompt');
-        assert.ok(system.includes('<tools>') && system.includes('<rules>'), 'Merger must retain Pi tool guidance and rules');
+        assert.ok(!system.includes('<tools>') && !system.includes('Additional tools may be available.'), 'Merger defaults to aggressive pi-trim without <tools> summary');
+        assert.ok(system.includes('<rules>'), 'Merger must retain Pi rules');
         const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
         assert.ok(system.includes(pathGuideline), 'all Merger turns retain the shared path convention');
         if (continuation) {

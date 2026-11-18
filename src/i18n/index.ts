@@ -32,11 +32,18 @@ export const locale: Locale = resolveLocale(languagePreference,
 /** Called only after confirmation. Persist first; storage failure must not reload. */
 export function restartFrontendWithLanguage(
   preference: LanguagePreference,
-  storage: Pick<Storage, "setItem" | "removeItem"> = localStorage,
+  storage?: Pick<Storage, "setItem" | "removeItem">,
   reload: () => void = () => window.location.reload(),
 ): void {
-  if (preference === "auto") storage.removeItem(LANGUAGE_PREFERENCE_KEY);
-  else storage.setItem(LANGUAGE_PREFERENCE_KEY, preference);
+  let store = storage;
+  if (store === undefined) {
+    try { store = typeof localStorage === "undefined" ? undefined : localStorage; } catch { store = undefined; }
+  }
+  if (!store || typeof store.setItem !== "function" || typeof store.removeItem !== "function") {
+    throw new Error("Local storage unavailable");
+  }
+  if (preference === "auto") store.removeItem(LANGUAGE_PREFERENCE_KEY);
+  else store.setItem(LANGUAGE_PREFERENCE_KEY, preference);
   reload();
 }
 

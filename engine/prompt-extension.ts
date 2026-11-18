@@ -124,7 +124,6 @@ export default function (pi: ExtensionAPI) {
       parameters: obj({
         id: str({ description: 'Id of the node whose latest workspace state you want to inspect or modify' }),
       }),
-      promptSnippet: 'Switch Planner workspace',
       async execute(_id: string, params: { id: string }) {
         const target = switchPlannerWorkspace(params.id);
         return { content: [{ type: 'text', text: JSON.stringify({

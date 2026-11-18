@@ -5,6 +5,7 @@ import type { ThinkingLevel } from "../types";
 import { providerAuth } from "../services/providerAuth";
 import { piExtensions } from "../services/piExtensions";
 import { runtimeService } from "../services/runtime";
+import { createUuid } from "../lib/uuid";
 import { blockedCommands, ComposerModels, mergeCommands, parseSlashCommand, type ExtensionUIRequest, type PiCommandCatalog } from "../services/composerCommands";
 
 function scoreMatch(candidate: string, query: string): number {
@@ -239,7 +240,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
     const repository = commandRepository;
     if (resolved.standalone) {
       const session: CommandSession = { standalone: true, repository, runId: runId ?? '', node, instance: available.instance,
-        commandId: crypto.randomUUID(), requests: [] };
+        commandId: createUuid(), requests: [] };
       active.current = session;
       const fields = { repository, instance: session.instance, commandId: session.commandId };
       let editorChanged = false;
@@ -268,7 +269,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
     }
     if (!runId) throw new Error(t("此 Pi 指令需要活动会话，请先开始对话。"));
     if (available.commands.some(item => item.name === command.name && item.source === "prompt")) return "prompt";
-    const session = { runId, node, instance: available.instance, commandId: crypto.randomUUID(), requests: [] as ExtensionUIRequest[] };
+    const session = { runId, node, instance: available.instance, commandId: createUuid(), requests: [] as ExtensionUIRequest[] };
     active.current = session;
     let polling: Promise<void> | null = null;
     let editorChanged = false;
@@ -307,6 +308,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       if (isCurrent() && command.name === "copy") {
         const value = (result as { text?: string | null })?.text;
         if (!value) throw new Error(t("当前会话还没有可复制的回复。"));
+        if (!navigator.clipboard?.writeText) throw new Error(t("复制提示词失败，请检查剪贴板权限。"));
         await navigator.clipboard.writeText(value);
         if (isCurrent()) setNotice(t("已复制"));
       }

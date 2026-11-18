@@ -1,4 +1,5 @@
 import type { TranscriptItem } from "../types";
+import { createUuid } from "../lib/uuid";
 
 export type ToolCallPhase = "generating" | "pending" | "executing";
 
@@ -51,7 +52,7 @@ export function upsertToolCall(items: TranscriptItem[], update: ToolCallUpdate, 
   const existing = index >= 0 ? items[index] : undefined;
   const phase = laterToolPhase(existing?.toolPhase, update.phase)!;
   const item: TranscriptItem = {
-    ...(existing ?? { id: id || `tool_${crypto.randomUUID()}`, type: "tool_call", status: "running", timestamp: Date.now() }),
+    ...(existing ?? { id: id || `tool_${createUuid()}`, type: "tool_call", status: "running", timestamp: Date.now() }),
     toolCallId: id || existing?.toolCallId,
     toolName: toolNameUpdate(existing?.toolName, update.toolName),
     args: update.args && Object.keys(update.args).length ? update.args : existing?.args || {},

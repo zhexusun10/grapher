@@ -35,21 +35,111 @@ export { mcpNamespace } from '../pi/packages/mcp/src/index.ts';
 export { CONFIG_DIR_NAME } from '../pi/packages/coding-agent/src/config.ts';
 export { resolveToCwd } from '../pi/packages/coding-agent/src/core/tools/path-utils.ts';
 import type { MainOptions, InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
-import { AgentSession, ModelRuntime, SessionManager, SettingsManager, DefaultPackageManager,
-  createEditToolDefinition as piEditTool } from '../pi/packages/coding-agent/src/index.ts';
+import { AgentSession, ExtensionRunner, ModelRuntime, SessionManager, SettingsManager, DefaultPackageManager,
+  createEditToolDefinition as piEditTool, getAgentDir } from '../pi/packages/coding-agent/src/index.ts';
 import { Agent } from '../pi/packages/agent/src/index.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { stripJsonComments } from '../pi/packages/coding-agent/src/utils/json.ts';
 import { ModelConfig } from '../pi/packages/coding-agent/src/core/model-config.ts';
 import { overlayRuntimeOptions } from './model-config-overlay.mjs';
 import { join } from 'node:path';
-import { existsSync, readFileSync, readdirSync, mkdirSync, openSync, readSync, writeFileSync, closeSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, mkdirSync, openSync, readSync, writeFileSync, closeSync } from 'node:fs';
 import { migrateKeybindingsConfig } from '../pi/packages/coding-agent/src/core/keybindings.ts';
 import { resolvePath as resolvePiPath } from '../pi/packages/coding-agent/src/utils/paths.ts';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { withInheritedSearchCredentials } from './search-credentials.mjs';
+import { samePath } from './path-identity.mjs';
+
+const bundledTrimPath = fileURLToPath(new URL('../node_modules/pi-trim/extensions/index.ts', import.meta.url));
+const PI_TRIM_MODE_ENTRY = 'pi-trim-mode';
+const DEFAULT_GRAPHER_TRIM_ENTRY = Object.freeze({
+  type: 'custom',
+  customType: PI_TRIM_MODE_ENTRY,
+  data: { mode: 'aggressive' },
+});
+
+function hasSavedTrimMode() {
+  const path = join(getAgentDir(), 'pi-trim.json');
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const parsed = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as { mode?: unknown };
+    return parsed?.mode === 'default' || parsed?.mode === 'aggressive';
+  } catch {
+    return false;
+  }
+}
+
+function withAggressiveTrimDefault(sessionManager: any) {
+  if (!sessionManager || typeof sessionManager.getBranch !== 'function') return sessionManager;
+  return new Proxy(sessionManager, {
+    get(target, prop) {
+      if (prop === 'getBranch') {
+        return (...branchArgs: unknown[]) => {
+          const branch = target.getBranch(...branchArgs);
+          if (branchArgs.length > 0 || !Array.isArray(branch)) return branch;
+          if (hasSavedTrimMode() || branch.some((entry: any) =>
+            entry?.type === 'custom' && entry?.customType === PI_TRIM_MODE_ENTRY &&
+            (entry?.data?.mode === 'default' || entry?.data?.mode === 'aggressive'))) {
+            return branch;
+          }
+          return [DEFAULT_GRAPHER_TRIM_ENTRY, ...branch];
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+const wrappedTrimHandlers = new WeakSet<Function>();
+
+// Grapher defaults bundled pi-trim to aggressive mode (<tools> summary stripped
+// while preserving tool schemas and <rules>) without mutating session files on
+// startup; explicit /pi-trim mode entries on the branch still take precedence.
+export function installDefaultAggressiveTrim() {
+  const runnerPrototype = ExtensionRunner.prototype as any;
+  const emit = runnerPrototype.emit;
+  const wrappedHandlers = new WeakMap<Function, Function>();
+  runnerPrototype.emit = function (this: any, event: { type?: string }, ...args: any[]) {
+    if (event?.type === 'session_start' || event?.type === 'session_tree') {
+      for (const ext of this.extensions ?? []) {
+        const extPath = ext?.resolvedPath ?? ext?.path;
+        if (typeof extPath !== 'string' || !samePath(extPath, bundledTrimPath)) continue;
+        const handlers = ext.handlers?.get?.(event.type);
+        if (!Array.isArray(handlers)) continue;
+        for (let i = 0; i < handlers.length; i++) {
+          const original = handlers[i];
+          if (wrappedTrimHandlers.has(original)) continue;
+          let wrapped = wrappedHandlers.get(original);
+          if (!wrapped) {
+            wrapped = (ev: unknown, ctx: any) => {
+              if (!ctx?.sessionManager) return original(ev, ctx);
+              const wrappedCtx = Object.defineProperties({}, {
+                ...Object.getOwnPropertyDescriptors(ctx),
+                sessionManager: {
+                  enumerable: true,
+                  configurable: true,
+                  get() { return withAggressiveTrimDefault(ctx.sessionManager); },
+                },
+              });
+              return original(ev, wrappedCtx);
+            };
+            wrappedHandlers.set(original, wrapped);
+            wrappedTrimHandlers.add(wrapped);
+          }
+          handlers[i] = wrapped;
+        }
+      }
+    }
+    return emit.call(this, event, ...args);
+  };
+  return () => {
+    runnerPrototype.emit = emit;
+  };
+}
 
 const parseModels = (content: string) => JSON.parse(stripJsonComments(content.replace(/^\uFEFF/, '')));
 export function modelRuntimeOptions(options: Parameters<typeof ModelRuntime.create>[0] = {}) {
@@ -430,10 +520,12 @@ export async function runPiCli(args: string[], options: MainOptions = {}) {
   // retaining the original auth and models-store locations.
   const create = ModelRuntime.create;
   const restoreQueueIdentity = installQueueIdentity();
+  const restoreDefaultAggressiveTrim = installDefaultAggressiveTrim();
   ModelRuntime.create = async (runtimeOptions = {}) => create.call(ModelRuntime, await modelRuntimeOptions(runtimeOptions));
   try { await main(args, options); }
   finally {
     ModelRuntime.create = create;
+    restoreDefaultAggressiveTrim();
     restoreQueueIdentity();
   }
 }

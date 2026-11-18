@@ -337,6 +337,15 @@ fn walk_scoped(
     )
 }
 
+fn is_git_entry_name(root: &Path, name: &std::ffi::OsStr) -> bool {
+    if name == ".git" {
+        return true;
+    }
+    (cfg!(windows)
+        || (cfg!(target_os = "macos") && crate::path_identity::case_insensitive_volume(root)))
+        && name.to_string_lossy().eq_ignore_ascii_case(".git")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_scoped_with_nested(
     root: &Path,
@@ -352,7 +361,7 @@ fn walk_scoped_with_nested(
     for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let path = relative.join(item.file_name());
-        if !git && item.file_name() == ".git" {
+        if !git && is_git_entry_name(root, &item.file_name()) {
             if !relative.as_os_str().is_empty() {
                 if let Some(nested) = nested_git.as_deref_mut() {
                     nested.insert(name(relative)?);
@@ -707,9 +716,7 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
     };
     let link = crate::workspace_symlinks::is_link(&metadata);
     if link
-        && !fs::metadata(project.join(".git"))
-            .map_err(|e| e.to_string())?
-            .is_dir()
+        && !fs::metadata(project.join(".git")).is_ok_and(|meta| meta.is_dir())
     {
         return Err(
             "Workspace capability gap: symbolic .git must resolve to a repository directory".into(),
@@ -848,12 +855,10 @@ fn inspect_git(project: &Path) -> Result<InspectedGit, String> {
         let Some(resolved) = resolved else {
             continue;
         };
-        let resolved = resolved.canonicalize().unwrap_or(resolved);
         let matched = records.iter().any(|(_, input_origin, input_key, _)| {
             !directive(input_key)
                 && origin_path(input_origin)
-                    .map(|path| path.canonicalize().unwrap_or(path))
-                    .is_some_and(|path| path == resolved)
+                    .is_some_and(|path| crate::path_identity::same_path(&path, &resolved))
         });
         if matched {
             return Err("Workspace capability gap: matched conditional Git include needs verified private rebinding; host configuration is not copied or silently ignored".into());
@@ -910,7 +915,18 @@ fn inspect_git(project: &Path) -> Result<InspectedGit, String> {
         if !file.is_absolute() {
             continue;
         }
-        let reference = if let Ok(relative) = file.strip_prefix(project) {
+        let actual_file = crate::path_identity::actual_path(&file).ok();
+        let actual_project = host_canonical(project).ok();
+        let relative_to_project = file.strip_prefix(project).ok().or_else(|| {
+            actual_file.as_deref().and_then(|actual| {
+                actual.strip_prefix(project).ok().or_else(|| {
+                    actual_project
+                        .as_deref()
+                        .and_then(|root| actual.strip_prefix(root).ok())
+                })
+            })
+        });
+        let reference = if let Some(relative) = relative_to_project {
             format!("{{workspace}}/{}", name_of(relative)?)
         } else {
             crate::native::host_path(&file)
@@ -1001,17 +1017,22 @@ fn copy_project_git(
             if item.file_type().map_err(|e| e.to_string())?.is_dir() {
                 // Common logs/refs coexist with worktree-specific logs/HEAD;
                 // replacing the entire directory would lose user reflogs.
-                if destination.exists() && !destination.is_dir() {
-                    fs::remove_file(&destination).map_err(|e| e.to_string())?;
+                if let Ok(meta) = fs::symlink_metadata(&destination) {
+                    if crate::workspace_symlinks::is_link(&meta) || !meta.is_dir() {
+                        crate::workspace_symlinks::remove(&destination)?;
+                    }
                 }
                 fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
                 clear_git_overlays(&item.path(), &destination)?;
                 native_copy::copy_tree(&item.path(), &destination, |_| false)?;
             } else {
-                if destination.is_dir() {
-                    fs::remove_dir_all(&destination).map_err(|e| e.to_string())?;
-                } else if destination.exists() {
-                    fs::remove_file(&destination).map_err(|e| e.to_string())?;
+                if let Ok(meta) = fs::symlink_metadata(&destination) {
+                    if meta.is_dir() && !crate::workspace_symlinks::is_link(&meta) {
+                        crate::workspace_cleanup::remove_tree(&destination)
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        crate::workspace_symlinks::remove(&destination)?;
+                    }
                 }
                 native_copy::copy(&item.path(), &destination)?;
             }
@@ -1070,12 +1091,15 @@ fn clear_git_overlays(source: &Path, target: &Path) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e.to_string()),
         };
-        if item.file_type().map_err(|e| e.to_string())?.is_dir() && existing.is_dir() {
+        if item.file_type().map_err(|e| e.to_string())?.is_dir()
+            && existing.is_dir()
+            && !crate::workspace_symlinks::is_link(&existing)
+        {
             clear_git_overlays(&item.path(), &destination)?;
-        } else if existing.is_dir() {
-            fs::remove_dir_all(&destination).map_err(|e| e.to_string())?;
+        } else if existing.is_dir() && !crate::workspace_symlinks::is_link(&existing) {
+            crate::workspace_cleanup::remove_tree(&destination).map_err(|e| e.to_string())?;
         } else {
-            fs::remove_file(&destination).map_err(|e| e.to_string())?;
+            crate::workspace_symlinks::remove(&destination)?;
         }
     }
     Ok(())
@@ -1227,8 +1251,7 @@ fn record_path(repository: &Path, head: &str) -> Result<PathBuf, String> {
         .join("agent-views")
         .join(head))
 }
-/// Versioned checksum/equality projection. Schema 5 retains its exact historic
-/// omissions for validation; schema 6 includes ACLs and all project path names.
+/// Versioned checksum/equality projection including ACLs and all project path names.
 fn normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
     normalization::bytes(view)
 }
@@ -1240,22 +1263,6 @@ fn legacy_normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, String> {
-    fn strip(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                map.remove("security");
-                for item in map.values_mut() {
-                    strip(item);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    strip(item);
-                }
-            }
-            _ => {}
-        }
-    }
     fn remove_git_index(value: &mut serde_json::Value) {
         if let serde_json::Value::Object(map) = value {
             if let Some(entries) = map.get_mut("git_entries").and_then(|v| v.as_object_mut()) {
@@ -1268,11 +1275,7 @@ fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, Stri
             }
         }
     }
-    let legacy = value.get("schema").and_then(serde_json::Value::as_u64) == Some(5);
     remove_git_index(&mut value);
-    if legacy {
-        strip(&mut value);
-    }
     serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
@@ -1954,20 +1957,41 @@ fn rebind_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> R
         if existing.is_dir() && !crate::workspace_symlinks::is_link(&existing) {
             crate::path_safety::real_child_path(path, &binding, false)?
                 .ok_or("Project Git binding disappeared during preparation")?;
-            fs::remove_dir_all(&binding).map_err(|e| e.to_string())?;
+            crate::workspace_cleanup::remove_tree(&binding).map_err(|e| e.to_string())?;
         } else {
-            fs::remove_file(&binding).map_err(|e| e.to_string())?;
+            crate::workspace_symlinks::remove(&binding)?;
         }
     }
     if git_dir != binding {
         let state = crate::workspace_state::process_root(owner)?;
         if state.is_dir() {
             if let Some(external) = crate::path_safety::real_child_path(&state, &git_dir, false)? {
-                fs::remove_dir_all(external).map_err(|e| e.to_string())?;
+                crate::workspace_cleanup::remove_tree(&external).map_err(|e| e.to_string())?;
             }
         }
     }
     install_git_scoped(owner, path, record, view)
+}
+fn ensure_writable_target(path: &Path) -> Result<(), String> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    #[cfg(target_os = "macos")]
+    crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata)
+        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    crate::workspace_cleanup::clear_readonly_attribute(path, &metadata)
+        .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    if !crate::workspace_symlinks::is_link(&metadata) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if mode & 0o200 == 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o600))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 /// Install or, for a reused slot, reinstall the recorded project Git so native
 /// HEAD, index and objects follow the composed project view. Without this the
@@ -2104,7 +2128,9 @@ fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> 
                 &reference.replace("{workspace}", &root),
             ])?;
         }
-        fs::copy(&pending, git_dir.join("config")).map_err(|e| e.to_string())?;
+        let config_destination = git_dir.join("config");
+        ensure_writable_target(&config_destination)?;
+        fs::copy(&pending, &config_destination).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(&pending);
         let worktree_config = git_dir.join("config.worktree");
         if worktree_config.is_file() {
@@ -2125,6 +2151,7 @@ fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> 
                         .to_string_lossy()
                         .replace('\\', "/"),
                 ])?;
+                ensure_writable_target(&worktree_config)?;
                 fs::copy(&scratch, &worktree_config).map_err(|e| e.to_string())?;
             }
             let _ = fs::remove_file(&scratch);
@@ -2324,7 +2351,7 @@ fn validate_git_bindings(path: &Path) -> Result<(), String> {
 fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> {
     for item in fs::read_dir(project).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
-        if item.file_name() == ".git" {
+        if is_git_entry_name(project, &item.file_name()) {
             continue;
         }
         let path = item.path();
@@ -2332,7 +2359,7 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
         if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) {
             continue;
         }
-        if path.join(".git").exists() {
+        if fs::symlink_metadata(path.join(".git")).is_ok() {
             let (common, current, _, _) =
                 git_roots(&path)?.ok_or("Nested project lost its Git binding")?;
             let project = host_canonical(&path)?;
@@ -3329,7 +3356,7 @@ pub(crate) fn prepare(
                 match fs::remove_dir(&dir_path) {
                     Ok(()) => {}
                     Err(_) if view_unobservable(path, Path::new(name), &tracked)? => {
-                        fs::remove_dir_all(&dir_path).map_err(|e| {
+                        crate::workspace_cleanup::remove_tree(&dir_path).map_err(|e| {
                             format!(
                                 "Unrecorded files prevent project directory deletion at {name}: {e}"
                             )
@@ -3351,7 +3378,7 @@ pub(crate) fn prepare(
                 // unrecorded project content. Children are handled first (the
                 // scan is iterated in reverse), so a nested leftover that hid
                 // live entries was already refused above.
-                fs::remove_dir_all(&dir_path).map_err(|e| {
+                crate::workspace_cleanup::remove_tree(&dir_path).map_err(|e| {
                     format!("Cannot remove unrecorded project directory at {name}: {e}")
                 })?;
             }
@@ -3572,7 +3599,7 @@ fn nested_repository_views(project: &Path) -> Result<BTreeMap<String, View>, Str
     ) -> Result<(), String> {
         for item in fs::read_dir(project.join(relative)).map_err(|e| e.to_string())? {
             let item = item.map_err(|e| e.to_string())?;
-            if item.file_name() == ".git" {
+            if is_git_entry_name(project, &item.file_name()) {
                 continue;
             }
             let path = relative.join(item.file_name());
@@ -3924,6 +3951,31 @@ pub(crate) fn seal_composed_view(
             parent = path.parent();
         }
     }
+    let mut folded_keys = std::collections::HashSet::new();
+    for key in entries.keys().chain(directories.iter()) {
+        let folded = if cfg!(windows) {
+            if volume_case_insensitive {
+                key.to_ascii_lowercase()
+            } else {
+                key.clone()
+            }
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                key.split('/')
+                    .map(|part| {
+                        crate::path_identity::macos_fold_component(part, volume_case_insensitive)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            }
+            #[cfg(not(target_os = "macos"))]
+            key.clone()
+        };
+        if !folded_keys.insert(folded) {
+            return Ok(None);
+        }
+    }
     // Git omits empty directories. Compose every recorded directory, not just
     // the ancestors of files present in the result tree.
     let mut canonical_dirs: Vec<String> = directories.iter().cloned().collect();
@@ -4217,7 +4269,6 @@ pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> Resul
     // A matching checksum file is only a claim: validate its view before
     // reusing the reference. Damaged/partial records must fail, not become
     // 'changed metadata' that a new snapshot silently replaces from live files.
-    // Load also validates legacy bytes before upgrading their identity in memory.
     Ok(node_view_identity(&load(&path)?)? == identity)
 }
 

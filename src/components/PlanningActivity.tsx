@@ -3,6 +3,7 @@ import type { ChatMessage } from "../types";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
+import { combineAbortSignals } from "../services/requestTimeout";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribePlanningOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -260,7 +261,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
 
   useEffect(() => {
     const abort = new AbortController();
-    const signal = AbortSignal.any([abort.signal, lifetime.current!]);
+    const signal = combineAbortSignals(abort.signal, lifetime.current);
     let emptyPages = 0;
     // A terminal page can be empty because the writer had not appended its
     // first (or last) bytes yet. Retry such a revision a bounded number of

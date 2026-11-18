@@ -1,5 +1,6 @@
 import type { ChatMessage, GraphEvent } from "../types";
 import { plannerContentSteerId } from "./plannerText";
+import { createUuid } from "../lib/uuid";
 
 export type PlannerSteerStatus = "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown" | "withdrawn";
 export interface PlannerSteerRow { id: string; planningId?: string; message: ChatMessage; status: PlannerSteerStatus; error?: string }
@@ -15,7 +16,7 @@ export function withoutPlannerSteerIdentity<T extends ChatMessage>(message: T): 
 
 /** A live execution edit/version resend is a new delivery, not the old turn's
  * transport identity or its display occurrence. Keep history/version fields. */
-export function newExecutionSteer(message: ChatMessage, executionId: string, requestId = crypto.randomUUID()): ChatMessage {
+export function newExecutionSteer(message: ChatMessage, executionId: string, requestId = createUuid()): ChatMessage {
   const { steerOrdinal: _ordinal, inlineSteerOrdinal: _inlineOrdinal, ...copy } = withoutPlannerSteerIdentity(message);
   return { ...copy, delivery: "steered", executionId, steerRequestId: requestId };
 }

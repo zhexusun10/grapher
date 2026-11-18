@@ -326,3 +326,75 @@ fn macos_case_aliased_workspace_retains_internal_directory_symlinks() {
         }) if target == "Caf\u{00e9}Env/lib" && nfc_loaded.entries.contains_key(target)
     ));
 }
+
+#[test]
+fn materialize_replaces_file_with_case_aliased_directory_and_rejects_tracked_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let store = temp.path().join("store");
+    let insensitive = crate::path_identity::case_insensitive_volume(temp.path());
+
+    // Capture `managed/sub/item` as a directory tree in version_dir.
+    fs::create_dir_all(workspace.join("managed/sub")).unwrap();
+    fs::write(workspace.join("managed/sub/item"), "payload").unwrap();
+    let files = Files::environment(&store, &["managed".into()], &[])
+        .unwrap()
+        .with_project_index(false);
+    let version_dir = Uuid::new_v4().to_string();
+    files.capture(&workspace, &version_dir, "", &[]).unwrap();
+
+    // Replace `managed/sub` with a case-aliased regular file `managed/Sub` on disk.
+    fs::remove_dir_all(workspace.join("managed")).unwrap();
+    fs::create_dir_all(workspace.join("managed")).unwrap();
+    fs::write(workspace.join("managed/Sub"), "old file").unwrap();
+
+    files
+        .materialize(&workspace, &[version_dir], None, false)
+        .unwrap();
+    assert!(workspace.join("managed/sub/item").is_file());
+    assert_eq!(
+        fs::read_to_string(workspace.join("managed/sub/item")).unwrap(),
+        "payload"
+    );
+    if !insensitive {
+        // On case-sensitive volumes `Sub` is an unrelated sibling file that remains.
+        assert!(workspace.join("managed/Sub").is_file());
+    }
+
+    // A tracked regular file check must not accept a symlink pointing to matching bytes.
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join("managed")).unwrap();
+    crate::workspace::git(&repo, &["init", "-q"]).unwrap();
+    fs::write(repo.join("managed/tracked.txt"), "same bytes").unwrap();
+    crate::workspace::git(&repo, &["add", "managed/tracked.txt"]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-qm", "tracked"]).unwrap();
+    let tracked_files = Files::environment(&temp.path().join("store2"), &["managed".into()], &[])
+        .unwrap()
+        .with_project_index(true);
+    let v_tracked = Uuid::new_v4().to_string();
+    tracked_files
+        .capture(&repo, &v_tracked, "", &[])
+        .unwrap();
+
+    fs::write(temp.path().join("external.txt"), "same bytes").unwrap();
+    fs::remove_file(repo.join("managed/tracked.txt")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        temp.path().join("external.txt"),
+        repo.join("managed/tracked.txt"),
+    )
+    .unwrap();
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(
+        temp.path().join("external.txt"),
+        repo.join("managed/tracked.txt"),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let err = tracked_files
+        .materialize(&repo, &[v_tracked], None, false)
+        .unwrap_err();
+    assert!(err.contains("conflicts with tracked path"), "{err}");
+}

@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { estimateTranscriptRowHeight, retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
 import { shareJson } from "../services/structuralSharing";
-import { FOLLOW_LATEST_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 
 export function scrollParent(element: HTMLElement | null): HTMLElement | null {
@@ -11,18 +12,23 @@ export function scrollParent(element: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-const MeasuredListRow = memo(function MeasuredListRow({ id, measure, children }: {
-  id: string; measure: (id: string, height: number) => void; children: React.ReactNode;
+const MeasuredListRow = memo(function MeasuredListRow({ id, measure, rowElements, children }: {
+  id: string; measure: (id: string, height: number, sync?: boolean) => void;
+  rowElements: React.MutableRefObject<Map<string, HTMLElement>>; children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = ref.current!;
-    const update = () => measure(id, Math.round(element.offsetHeight || element.getBoundingClientRect().height));
-    update();
-    const observer = new ResizeObserver(update);
+    rowElements.current.set(id, element);
+    const read = () => Math.round(element.offsetHeight || element.getBoundingClientRect().height);
+    measure(id, read());
+    const observer = new ResizeObserver(() => measure(id, read(), true));
     observer.observe(element);
-    return () => observer.disconnect();
-  }, [id, measure]);
+    return () => {
+      observer.disconnect();
+      if (rowElements.current.get(id) === element) rowElements.current.delete(id);
+    };
+  }, [id, measure, rowElements]);
   return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root" }}>{children}</div>;
 });
 
@@ -40,6 +46,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const ref = useRef<HTMLDivElement>(null);
   const parentRef = useRef<HTMLElement | null>(null);
   const heights = useRef(rowHeights ?? new Map<string, number>());
+  const rowElements = useRef(new Map<string, HTMLElement>());
   // A saved pixel position is only an estimate after a resize or remount. Keep
   // the actual row mounted and align it as its neighbours are remeasured.
   const restoreRef = useRef(restoreAnchor ?? null);
@@ -49,23 +56,36 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const measuredRevisionRef = useRef(0);
   const committedOffsetsRevisionRef = useRef(0);
   const flushScheduled = useRef(false);
+  const syncFlushScheduled = useRef(false);
   const mounted = useRef(false);
   const frame = useRef<number | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 600, hasScroller: true });
   const lastViewportRef = useRef(viewport);
   lastViewportRef.current = viewport;
 
-  const measure = useCallback((id: string, height: number) => {
+  const measure = useCallback((id: string, height: number, sync = false) => {
     if (height <= 0) return;
     const existing = heights.current.get(id);
     if (existing !== undefined && Math.abs(existing - height) < 1) return;
     heights.current.set(id, height);
     measuredRevisionRef.current += 1;
+    if (sync) syncFlushScheduled.current = true;
     if (flushScheduled.current) return;
     flushScheduled.current = true;
     queueMicrotask(() => {
+      const useSync = syncFlushScheduled.current;
       flushScheduled.current = false;
-      if (mounted.current) setHeightVersion(value => value + 1);
+      syncFlushScheduled.current = false;
+      if (!mounted.current) return;
+      if (useSync) {
+        // ResizeObserver runs after layout and before paint. Flushing here
+        // adjusts scrollTop in the same frame so growing CoT never shifts
+        // the answer row below it for a frame before snapping back.
+        try { flushSync(() => setHeightVersion(value => value + 1)); }
+        catch { setHeightVersion(value => value + 1); }
+      } else {
+        setHeightVersion(value => value + 1);
+      }
     });
   }, []);
   const previousIds = useRef<string[]>([]);
@@ -332,12 +352,19 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         });
       }
     };
+    const onContentGrowth = () => {
+      for (const [id, element] of rowElements.current) {
+        if (!element.isConnected) continue;
+        measure(id, Math.round(element.offsetHeight || element.getBoundingClientRect().height), true);
+      }
+    };
     const observer = new ResizeObserver(updateViewport);
     // Measurements and the workbench's initial scroll settle over multiple
     // frames. Never keep ownership after the user starts interacting.
     const restoreTimer = restoreRef.current ? setTimeout(cancelRestore, 300) : null;
     if (parent) {
       parent.addEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
+      parent.addEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
       parent.addEventListener("scroll", schedule, { passive: true });
       parent.addEventListener("wheel", onUserScrollGesture, { passive: true });
       parent.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -351,6 +378,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     return () => {
       mounted.current = false;
       parent?.removeEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
+      parent?.removeEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
       parent?.removeEventListener("scroll", schedule);
       parent?.removeEventListener("wheel", onUserScrollGesture);
       parent?.removeEventListener("touchstart", onTouchStart);
@@ -365,7 +393,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
     };
-  }, [updateViewport]);
+  }, [updateViewport, measure]);
   useEffect(() => {
     const retained = new Set(ids);
     for (const id of heights.current.keys()) if (!retained.has(id)) heights.current.delete(id);
@@ -501,6 +529,6 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     {sourceStarts.map(({ source, index }) => <span key={source} aria-hidden="true" data-transcript-source-start={source}
       style={{ position: "absolute", top: offsets[index] ?? totalHeight, height: 0, pointerEvents: "none" }} />)}
     {items.slice(range.start, range.end).map((item, index) =>
-      <MeasuredListRow key={item.id} id={item.id} measure={measure}>{renderRow(item, range.start + index)}</MeasuredListRow>)}
+      <MeasuredListRow key={item.id} id={item.id} measure={measure} rowElements={rowElements}>{renderRow(item, range.start + index)}</MeasuredListRow>)}
   </div>;
 }

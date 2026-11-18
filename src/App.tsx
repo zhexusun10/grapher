@@ -45,6 +45,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { selectedMergerNode } from "./lib/graphNodeIdentity";
+import { createUuid } from "./lib/uuid";
 import { PlannerGraphEditQueue, plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
 import { runHasActiveExecutions } from "./lib/runPhase";
 import { ComposerDrafts } from "./services/composerDrafts";
@@ -583,7 +584,7 @@ export default function App() {
       ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
       : undefined;
     const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string, plannerSteer = false) => {
-      const id = options?.requestId ?? crypto.randomUUID();
+      const id = options?.requestId ?? createUuid();
       const message: ChatMessage = {
         id: `msg-${id}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
         role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
@@ -1045,6 +1046,7 @@ export default function App() {
     setModal(null);
     setConfirmModal(null);
     setRecentlyAddedEdgeIds(new Set());
+    setRecentlyAddedNodeNames(new Set());
     pendingToolArgsRef.current.clear();
     return scope;
   };
@@ -2475,7 +2477,7 @@ export default function App() {
       }
 
       const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
-      const requestId = running ? crypto.randomUUID() : undefined;
+      const requestId = running ? createUuid() : undefined;
       const { rolledBackEntries } = branchEditedMessageEntries(
         baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments,
         msg => running ? newExecutionSteer(msg, targetMerger.id, requestId) : withoutPlannerSteerIdentity({

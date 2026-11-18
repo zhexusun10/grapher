@@ -17,8 +17,15 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
 }) => {
   const [copiedRepo, setCopiedRepo] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
   const [mergerDetailsOpen, setMergerDetailsOpen] = useState(false);
-  useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
   const [selectedMergerId, setSelectedMergerId] = useState("");
   const mergerSelectId = React.useId();
 
@@ -36,9 +43,10 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
     if (!targetRepo || !navigator.clipboard?.writeText) return;
     try {
       await navigator.clipboard.writeText(targetRepo);
+      if (!mountedRef.current) return;
       setCopiedRepo(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-      copyTimerRef.current = setTimeout(() => setCopiedRepo(false), 2000);
+      copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setCopiedRepo(false); }, 2000);
     } catch { }
   };
 

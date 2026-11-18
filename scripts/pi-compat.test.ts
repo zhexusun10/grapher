@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accessSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { accessSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { SessionManager } from '../pi/packages/coding-agent/src/core/session-manager.ts';
+import { ExtensionRunner } from '../pi/packages/coding-agent/src/core/extensions/runner.ts';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, relative, isAbsolute } from 'node:path';
 import { Agent } from '../pi/packages/agent/src/index.ts';
@@ -14,7 +15,7 @@ import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities, composerCommandsExtension, clearUnreadQueue,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
-  assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager,
+  assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager, installDefaultAggressiveTrim,
 } from '../engine/pi-compat.ts';
 
 test('retired Pi sessions are rejected before migration and current sessions retain Run identity', () => {
@@ -338,16 +339,25 @@ test('bundled pi-trim replaces Grapher prompt trimming', async () => {
     '<docs>\nPi documentation (read only when the user asks about Pi): /path/to/pi/docs\n- Read it when asked about Pi\n</docs>',
     '<cwd>\n/workspace\n</cwd>',
   ].join('\n');
-  const loaded = await loadExtensions([bundledTrim], process.cwd());
-  assert.deepEqual(loaded.errors, []);
-  const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
-  const result = await hook({ messages: [{ role: 'system', content: prompt }] } as any, {} as any) as any;
-  const sanitized = result.messages[0].content;
-  assert.match(sanitized, /^You are an expert coding assistant\. You help users/);
-  assert.match(sanitized, /<rules>[\s\S]*<\/rules>/);
-  assert.doesNotMatch(sanitized, /operating inside pi, a coding agent harness/);
-  assert.doesNotMatch(sanitized, /<docs>|Pi documentation|\/path\/to\/pi\/docs/);
-  assert.match(sanitized, /<cwd>[\s\S]*<\/cwd>/);
+  const trimAgentDir = mkdtempSync(join(tmpdir(), 'grapher-pi-trim-compat-'));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = trimAgentDir;
+  try {
+    const loaded = await loadExtensions([bundledTrim], process.cwd());
+    assert.deepEqual(loaded.errors, []);
+    const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
+    const result = await hook({ messages: [{ role: 'system', content: prompt }] } as any, {} as any) as any;
+    const sanitized = result.messages[0].content;
+    assert.match(sanitized, /^You are an expert coding assistant\. You help users/);
+    assert.match(sanitized, /<rules>[\s\S]*<\/rules>/);
+    assert.doesNotMatch(sanitized, /operating inside pi, a coding agent harness/);
+    assert.doesNotMatch(sanitized, /<docs>|Pi documentation|\/path\/to\/pi\/docs/);
+    assert.match(sanitized, /<cwd>[\s\S]*<\/cwd>/);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(trimAgentDir, { recursive: true, force: true });
+  }
 });
 
 test('pi-trim handles Pi 1.5 prompt sections and mid-turn updates without altering tools, project context or stored messages', async () => {
@@ -371,30 +381,127 @@ test('pi-trim handles Pi 1.5 prompt sections and mid-turn updates without alteri
     { role: 'toolResult', toolCallId: 'read-1', toolName: 'read', content: [{ type: 'text', text: projectText }], timestamp: 5 },
   ];
   const snapshot = structuredClone(messages);
-  const loaded = await loadExtensions([bundledTrim], process.cwd());
-  assert.deepEqual(loaded.errors, []);
-  const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
-  const result = await hook({ type: 'context_with_system', messages } as any, {} as any) as any;
-  assert.deepEqual(messages, snapshot, 'request-time trimming must not mutate stored transcript data');
-  assert.equal(result.messages[0].sections.docs, null);
-  assert.match(result.messages[0].sections.preamble, /^You are a coding assistant\./);
-  assert.ok(!result.messages[0].sections.rules.includes(environmentRule));
-  for (const name of ['tools', 'project_context', 'skills', 'mcp_servers', 'cwd', 'addendum']) {
-    assert.equal(result.messages[0].sections[name], state.sections![name], `preserve ${name}`);
+  const trimAgentDir = mkdtempSync(join(tmpdir(), 'grapher-pi-trim-agent-'));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = trimAgentDir;
+  try {
+    const loaded = await loadExtensions([bundledTrim], process.cwd());
+    assert.deepEqual(loaded.errors, []);
+    const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
+    const result = await hook({ type: 'context_with_system', messages } as any, {} as any) as any;
+    assert.deepEqual(messages, snapshot, 'request-time trimming must not mutate stored transcript data');
+    assert.equal(result.messages[0].sections.docs, null);
+    assert.match(result.messages[0].sections.preamble, /^You are a coding assistant\./);
+    assert.ok(!result.messages[0].sections.rules.includes(environmentRule));
+    for (const name of ['tools', 'project_context', 'skills', 'mcp_servers', 'cwd', 'addendum']) {
+      assert.equal(result.messages[0].sections[name], state.sections![name], `preserve ${name}`);
+    }
+    const delta = result.messages[3];
+    assert.equal(delta.sections.docs, null);
+    assert.equal(delta.sections.obsolete, null);
+    assert.equal(delta.content[0].text, 'You are a coding assistant.');
+    assert.deepEqual(delta.content[0].cacheControl, { type: 'ephemeral' });
+    assert.match(delta.sections.rules, /Keep task instructions/);
+    assert.ok(!delta.sections.rules.includes(environmentRule));
+    for (const index of [0, 3]) {
+      assert.strictEqual(result.messages[index].toolsAdded, messages[index].toolsAdded);
+      assert.strictEqual(result.messages[index].toolsRemoved, messages[index].toolsRemoved);
+    }
+    for (const index of [1, 2, 4]) assert.strictEqual(result.messages[index], messages[index]);
+    assert.equal(await hook({ type: 'context_with_system', messages: result.messages } as any, {} as any), undefined, 'trimming is idempotent');
+
+    const command = loaded.extensions[0].commands.get('pi-trim');
+    assert.ok(command, 'pi-trim command registered');
+    const persisted: Array<{ type: string; customType: string; data: unknown }> = [];
+    loaded.runtime.appendEntry = (customType, data) => { persisted.push({ type: 'custom', customType, data }); };
+    const notices: string[] = [];
+    await command.handler('mode aggressive', { hasUI: true, ui: { notify: (msg: string) => notices.push(msg) }, getSystemPrompt: () => '' } as any);
+    assert.match(notices.at(-1) ?? '', /mode set to aggressive/);
+    assert.deepEqual(persisted, [{ type: 'custom', customType: 'pi-trim-mode', data: { mode: 'aggressive' } }]);
+    const aggressiveResult = await hook({ type: 'context_with_system', messages } as any, {} as any) as any;
+    assert.equal(aggressiveResult.messages[0].sections.tools, null);
+    assert.equal(aggressiveResult.messages[0].sections.docs, null);
+    assert.equal(aggressiveResult.messages[0].sections.rules, result.messages[0].sections.rules);
+    assert.strictEqual(aggressiveResult.messages[0].toolsAdded, messages[0].toolsAdded);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(trimAgentDir, { recursive: true, force: true });
   }
-  const delta = result.messages[3];
-  assert.equal(delta.sections.docs, null);
-  assert.equal(delta.sections.obsolete, null);
-  assert.equal(delta.content[0].text, 'You are a coding assistant.');
-  assert.deepEqual(delta.content[0].cacheControl, { type: 'ephemeral' });
-  assert.match(delta.sections.rules, /Keep task instructions/);
-  assert.ok(!delta.sections.rules.includes(environmentRule));
-  for (const index of [0, 3]) {
-    assert.strictEqual(result.messages[index].toolsAdded, messages[index].toolsAdded);
-    assert.strictEqual(result.messages[index].toolsRemoved, messages[index].toolsRemoved);
+});
+
+test('installDefaultAggressiveTrim defaults bundled pi-trim without double-wrapping or masking saved settings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grapher-trim-default-'));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const restore = installDefaultAggressiveTrim();
+  try {
+    const loaded = await loadExtensions([bundledTrim], process.cwd());
+    assert.deepEqual(loaded.errors, []);
+    const ext = loaded.extensions[0];
+    const startHandlers = ext.handlers.get('session_start')!;
+    const treeHandlers = ext.handlers.get('session_tree')!;
+    let lazyReads = 0;
+    const baseSessionManager = {
+      branch: [] as unknown[],
+      getBranch(...args: unknown[]) { return args.length ? [] : this.branch; },
+    };
+    const errors: unknown[] = [];
+    const fakeRunner = Object.assign(Object.create(ExtensionRunner.prototype), {
+      extensions: [ext],
+      emitError(err: unknown) { errors.push(err); },
+      createContext() {
+        return {
+          get ui() { lazyReads += 1; return undefined; },
+          get sessionManager() { return baseSessionManager; },
+        };
+      },
+    });
+
+    // Calling emit multiple times must not double-wrap handlers or eagerly read lazy getters.
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_start', reason: 'startup' } as any);
+    const wrappedStart = startHandlers[0];
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_start', reason: 'reload' } as any);
+    assert.strictEqual(startHandlers[0], wrappedStart);
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_tree', previousSessionFile: undefined } as any);
+    const wrappedTree = treeHandlers[0];
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_tree', previousSessionFile: undefined } as any);
+    assert.strictEqual(treeHandlers[0], wrappedTree);
+    assert.equal(lazyReads, 0, 'wrapping context must preserve lazy ExtensionContext getters');
+    assert.deepEqual(errors, []);
+
+    const state = buildSystemPromptState({
+      cwd: '/workspace', selectedTools: ['read'], toolSnippets: { read: 'Read files' },
+    });
+    const hook = ext.handlers.get('context_with_system')![0];
+    const aggressive = await hook({ type: 'context_with_system', messages: [{ role: 'system', ...state, timestamp: 1 }] } as any, {} as any) as any;
+    assert.equal(aggressive.messages[0].sections.tools, null, 'default aggressive strips <tools>');
+
+    // Malformed branch entry does not suppress aggressive default; valid branch entry wins.
+    baseSessionManager.branch = [{ type: 'custom', customType: 'pi-trim-mode', data: { mode: 'invalid' } }];
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_tree', previousSessionFile: undefined } as any);
+    const stillAggressive = await hook({ type: 'context_with_system', messages: [{ role: 'system', ...state, timestamp: 1 }] } as any, {} as any) as any;
+    assert.equal(stillAggressive.messages[0].sections.tools, null);
+
+    baseSessionManager.branch = [{ type: 'custom', customType: 'pi-trim-mode', data: { mode: 'default' } }];
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_tree', previousSessionFile: undefined } as any);
+    const branchDefault = await hook({ type: 'context_with_system', messages: [{ role: 'system', ...state, timestamp: 1 }] } as any, {} as any) as any;
+    assert.equal(branchDefault.messages[0].sections.tools, state.sections!.tools);
+
+    // Symlinked pi-trim.json is ignored by pi-trim and must not suppress the aggressive default.
+    baseSessionManager.branch = [];
+    const targetFile = join(dir, 'target.json');
+    writeFileSync(targetFile, JSON.stringify({ mode: 'default' }));
+    try { symlinkSync(targetFile, join(dir, 'pi-trim.json')); } catch { /* ignore on restricted Windows */ }
+    await ExtensionRunner.prototype.emit.call(fakeRunner, { type: 'session_tree', previousSessionFile: undefined } as any);
+    const symlinkIgnored = await hook({ type: 'context_with_system', messages: [{ role: 'system', ...state, timestamp: 1 }] } as any, {} as any) as any;
+    assert.equal(symlinkIgnored.messages[0].sections.tools, null);
+  } finally {
+    restore();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(dir, { recursive: true, force: true });
   }
-  for (const index of [1, 2, 4]) assert.strictEqual(result.messages[index], messages[index]);
-  assert.equal(await hook({ type: 'context_with_system', messages: result.messages } as any, {} as any), undefined, 'trimming is idempotent');
 });
 
 test('Pi SDK surface required by Grapher remains available', () => {

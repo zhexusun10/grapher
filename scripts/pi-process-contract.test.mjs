@@ -259,7 +259,8 @@ test('pi-trim transforms actual provider requests for every role without removin
         assert.ok(system.includes('You are a coding assistant.'), `${role}: trim Pi identity; provider roles=${body.messages.map(message => message.role)}\n${system}`);
         assert.ok(!system.includes(identity), `${role}: no Pi identity in provider system prompt`);
         assert.ok(!system.includes('Pi documentation (read only'), `${role}: no Pi docs in provider system prompt`);
-        assert.ok(system.includes('<tools>') && system.includes('<rules>'), `${role}: retain tool and rule sections`);
+        assert.ok(!system.includes('<tools>') && !system.includes('Additional tools may be available.'), `${role}: default aggressive mode strips <tools> summary`);
+        assert.ok(system.includes('<rules>'), `${role}: retain rule section`);
       }
       if (role === 'merger') assert.ok(system.includes(addendum), 'preserve conflict-repair instructions');
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
@@ -268,6 +269,51 @@ test('pi-trim transforms actual provider requests for every role without removin
       assert.ok(events.some(event => event.type === 'message_end' && event.message?.role === 'assistant' &&
         event.message.content.some(part => part.type === 'text' && part.text === 'audit complete')), `${role}: request completes successfully`);
     }
+
+    // Verify /pi-trim mode can still toggle back from Grapher's aggressive default to default mode.
+    await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session',
+        '--no-context-files', '--no-prompt-templates', '--no-themes', '--model', 'pi-trim-audit/local', '--thinking', 'off', '--approve'], {
+        cwd: directory, stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
+          GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1' },
+      });
+      let stderr = '';
+      let sawDefaultNotify = false;
+      const lines = createInterface({ input: child.stdout });
+      const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`mode toggle timed out: ${stderr}`)); }, 20000);
+      child.stderr.on('data', value => { stderr += value.toString(); });
+      lines.on('line', line => {
+        let event;
+        try { event = JSON.parse(line); } catch { return; }
+        if (event.type === 'extension_ui_request' && event.method === 'notify' && /mode set to default/.test(event.message)) {
+          sawDefaultNotify = true;
+          child.stdin.write(`${JSON.stringify({ id: 'after-toggle', type: 'prompt', message: 'TRIM_AUDIT[toggle]' })}\n`);
+        }
+        if (event.type === 'agent_settled') settleRpc(child, 'node');
+      });
+      child.once('error', error => { clearTimeout(timeout); lines.close(); reject(error); });
+      child.once('close', code => {
+        clearTimeout(timeout);
+        lines.close();
+        if (code !== 0) reject(new Error(`mode toggle exited ${code}: ${stderr}`));
+        else {
+          assert.ok(sawDefaultNotify, 'toggling /pi-trim mode from aggressive default switches to default');
+          resolve(undefined);
+        }
+      });
+      child.stdin.write(`${JSON.stringify({ id: 'mode-toggle', type: 'prompt', message: '/pi-trim mode' })}\n`);
+    });
+    const toggledBody = requests.at(-1);
+    const toggledSystem = toggledBody.messages.filter(message => message.role === 'system').map(message => text(message.content)).join('\n');
+    assert.ok(toggledSystem.includes('<tools>') && toggledSystem.includes('Additional tools may be available.'), 'default mode restores <tools> section');
+
+    // Verify a brand-new Grapher Pi session honors the persisted pi-trim.json choice instead of overriding it back to aggressive.
+    const nextSessionBefore = requests.length;
+    await run('node', ['--approve'], 'TRIM_AUDIT[persisted-default]');
+    const nextSessionBody = requests[nextSessionBefore];
+    const nextSessionSystem = nextSessionBody.messages.filter(message => message.role === 'system').map(message => text(message.content)).join('\n');
+    assert.ok(nextSessionSystem.includes('<tools>') && nextSessionSystem.includes('Additional tools may be available.'), 'new Grapher session preserves user-saved default mode');
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

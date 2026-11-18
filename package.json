@@ -63,7 +63,7 @@
     "motion": "^13.2.0",
     "pi-better-web-search": "1.0.4",
     "pi-continuity": "0.5.0",
-    "pi-trim": "0.2.2",
+    "pi-trim": "0.3.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "sanitize-html": "^2.18.1",

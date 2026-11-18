@@ -313,7 +313,6 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   pi.registerTool(defineTool({
     name: "read_graph", label: "Read graph",
-    promptSnippet: "Read the current planning candidate",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description: "Read the graph you have planned as JSON containing nodes and edges.",
     parameters: Type.Object({}, { additionalProperties: false }),
@@ -487,7 +486,6 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }, { additionalProperties: false });
   pi.registerTool(defineTool({
     name: "edit_graph", label: "Edit graph",
-    promptSnippet: "Create, replace, or delete one or more graph nodes, dependency edges, or both",
     promptGuidelines: ["Batch related node and edge changes in one edit_graph call. Supply the complete task when creating or replacing a node."],
     executionMode: "sequential",
     constrainedSampling: { type: "json_schema", strict: "prefer" },

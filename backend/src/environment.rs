@@ -1452,7 +1452,7 @@ impl Environments {
             && self.scope_root(launch) == "workspace"
     }
 
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "fixture"))]
     fn scope_paths(&self, reference: &str) -> Result<Vec<String>, String> {
         self.scope_paths_impl(None, reference)
     }
