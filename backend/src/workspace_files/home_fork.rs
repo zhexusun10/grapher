@@ -4,9 +4,7 @@ use super::*;
 
 impl Files {
     pub(crate) fn home_target_is_empty(&self, workspace: &Path) -> Result<bool, String> {
-        let root = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let root = canonical_host_path(workspace)?;
         let mut entries = Entries::new();
         let untouched = RefCell::default();
         for path in self.scoped_paths(&root)? {

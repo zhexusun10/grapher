@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { globalAgentDir } from './global-extensions.ts';
+import { samePath } from './path-identity.mjs';
 
 type Event = Record<string, any>;
 type Job = {
@@ -162,7 +163,8 @@ export class ExtensionCommands {
       return { status: job.status };
     }
     const job = this.jobs.get(id);
-    if (!job || job.repository !== repository) throw new Error('Command expired or project changed; start it again');
+    const sameRepository = job && (job.repository === repository || (job.repository && repository && samePath(job.repository, repository)));
+    if (!sameRepository) throw new Error('Command expired or project changed; start it again');
     this.touch(id, job);
     if (request.operation === 'cancel') { this.cancel(job); return { status: job.status }; }
     if (request.operation === 'poll') return { status: job.status, events: job.events.splice(0), error: job.error };

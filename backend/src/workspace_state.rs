@@ -5,27 +5,56 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) fn is_managed_worktrees_bucket(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            if cfg!(windows)
+                || (cfg!(target_os = "macos")
+                    && crate::path_identity::case_insensitive_volume(path))
+            {
+                name.eq_ignore_ascii_case(".grapher-worktrees")
+            } else {
+                name == ".grapher-worktrees"
+            }
+        })
+}
+
+pub(crate) fn slot_digest_for_name(slot: &str) -> Result<String, String> {
+    let id = git2::Oid::hash_object(git2::ObjectType::Blob, slot.as_bytes())
+        .map_err(|e| e.to_string())?
+        .to_string();
+    Ok(id[..16].to_string())
+}
+
+pub(crate) fn slot_digest(workspace: &Path) -> Result<String, String> {
+    // Resolve non-symlinked existing slots to their host directory spelling so
+    // macOS/Windows case or Unicode aliases map to the same state/git digest.
+    let resolved_name = if fs::symlink_metadata(workspace)
+        .is_ok_and(|meta| !meta.file_type().is_symlink())
+    {
+        crate::path_identity::actual_path(workspace)
+            .ok()
+            .and_then(|actual| actual.file_name().map(std::ffi::OsStr::to_os_string))
+    } else {
+        None
+    };
+    let slot = resolved_name
+        .as_deref()
+        .or_else(|| workspace.file_name())
+        .ok_or("Workspace has no slot identity")?;
+    slot_digest_for_name(&slot.to_string_lossy())
+}
+
 pub(crate) fn root(workspace: &Path) -> Result<PathBuf, String> {
     let run = workspace
         .parent()
         .ok_or("Workspace has no owner directory")?;
     let bucket = run.parent().ok_or("Workspace has no managed parent")?;
-    if !bucket
-        .file_name()
-        .is_some_and(|name| name == ".grapher-worktrees")
-    {
+    if !is_managed_worktrees_bucket(bucket) {
         return Err("External runtime state requires a recorded managed workspace slot".into());
     }
-    let slot = workspace
-        .file_name()
-        .ok_or("Workspace has no slot identity")?;
-    // The slot name already carries a full execution UUID. Repeat it in the
-    // external state path only as a fixed-length digest so Windows MAX_PATH
-    // still leaves room for Git config/index lock files and agent caches.
-    let id = git2::Oid::hash_object(git2::ObjectType::Blob, slot.to_string_lossy().as_bytes())
-        .map_err(|e| e.to_string())?
-        .to_string();
-    Ok(run.join(".grapher-state").join(&id[..16]))
+    Ok(run.join(".grapher-state").join(slot_digest(workspace)?))
 }
 
 pub(crate) fn process_root(workspace: &Path) -> Result<PathBuf, String> {
@@ -37,7 +66,7 @@ pub(crate) fn reclaim(workspace: &Path) -> Result<(), String> {
     let root = root(workspace)?;
     let run = workspace.parent().ok_or("Missing workspace owner")?;
     if let Some(path) = crate::path_safety::real_child_path(run, &root, false)? {
-        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        crate::workspace_cleanup::remove_tree(&path).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

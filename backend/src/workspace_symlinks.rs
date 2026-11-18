@@ -148,6 +148,9 @@ pub(crate) fn remove(path: &Path) -> Result<(), String> {
         Err(e) => return Err(e.to_string()),
     };
     if is_link(&metadata) {
+        #[cfg(target_os = "macos")]
+        crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata)
+            .map_err(|e| e.to_string())?;
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
@@ -165,6 +168,9 @@ pub(crate) fn remove(path: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     crate::workspace_cleanup::clear_readonly_attribute(path, &metadata)
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata)
         .map_err(|e| e.to_string())?;
     fs::remove_file(path).map_err(|e| e.to_string())
 }

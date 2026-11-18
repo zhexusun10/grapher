@@ -185,19 +185,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               </div>
               <label className="settings-toggle-row">
                 <span>
-                  <strong>{t("隐藏 Auto 模式")}</strong>
-                  <small>{t("保存后隐藏输入框中的 Auto 和 Partitioner 模型配置，仅在此浏览器中生效。")}</small>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={hideAutoMode}
-                  disabled={saving}
-                  onChange={(event) => setHideAutoModeDraft(event.target.checked)}
-                  aria-label={t("隐藏 Auto 模式")}
-                />
-              </label>
-              <label className="settings-toggle-row">
-                <span>
                   <strong>Auto Approve</strong>
                   <small>{t("自动批准 Planner 生成的图纸并开始执行")}</small>
                 </span>
@@ -314,6 +301,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <Wallpaper size={16} />
                 <h4 id="ui-settings-title">{t("UI设置")}</h4>
               </div>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("隐藏 Auto 模式")}</strong>
+                  <small>{t("保存后隐藏输入框中的 Auto 和 Partitioner 模型配置，仅在此浏览器中生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideAutoMode}
+                  disabled={saving}
+                  onChange={(event) => setHideAutoModeDraft(event.target.checked)}
+                  aria-label={t("隐藏 Auto 模式")}
+                />
+              </label>
               <label className="settings-toggle-row">
                 <span>
                   <strong>{t("执行时自动展开思维链")}</strong>

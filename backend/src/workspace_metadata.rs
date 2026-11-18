@@ -112,16 +112,16 @@ fn normalize_empty_acl(security: &mut Vec<u8>) {
 }
 
 fn is_system_managed(name: &str) -> bool {
-    (cfg!(target_os = "macos") && name == "com.apple.provenance")
+    (cfg!(target_os = "macos") && matches!(name, "com.apple.provenance" | "com.apple.macl"))
         || (cfg!(target_os = "linux") && name == "security.selinux")
 }
 
 #[cfg(target_os = "macos")]
-// Storage/revision/security flags the host owns. Apple's copyfile also omits
-// UF_TRACKED, UF_DATAVAULT, SF_RESTRICTED and SF_NOUNLINK when copying stat
-// information; compression and dataless state describe the physical store.
+// Storage/revision/security flags the host owns, plus all superuser/synthetic
+// `SF_*` flags (0xffff_0000) that unprivileged user processes cannot set via
+// `lchflags`. Apple's copyfile also omits UF_COMPRESSED, UF_TRACKED and UF_DATAVAULT.
 const MACOS_HOST_MANAGED_FLAGS: u32 =
-    0x0000_0020 | 0x0000_0040 | 0x0000_0080 | 0x0008_0000 | 0x0010_0000 | 0x4000_0000;
+    0xffff_0000 | 0x0000_0020 | 0x0000_0040 | 0x0000_0080;
 #[cfg(not(target_os = "macos"))]
 const MACOS_HOST_MANAGED_FLAGS: u32 = 0;
 
@@ -401,6 +401,18 @@ mod platform {
         // Legacy UID/GID values are not replayed, including on symlinks; mode,
         // ACLs, xattrs and flags are still restored and verified below.
         let p = path(value)?;
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::macos::fs::MetadataExt;
+            let blocked = libc::UF_IMMUTABLE | libc::UF_APPEND;
+            let flags = initial_metadata.st_flags();
+            if flags & blocked != 0 && unsafe { lchflags(p.as_ptr(), flags & !blocked) } != 0 {
+                return Err(format!(
+                    "Cannot clear macOS immutable flags before restoring metadata: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
         for name in xattr_names(value)? {
             if !extra
                 .attributes
@@ -442,7 +454,7 @@ mod platform {
                 // already carries its own system-assigned value; retrying cannot
                 // preserve the source marker and must not fail the copy.
                 #[cfg(target_os = "macos")]
-                if name == "com.apple.provenance"
+                if matches!(name.as_str(), "com.apple.provenance" | "com.apple.macl")
                     && matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES))
                 {
                     continue;
@@ -477,9 +489,11 @@ mod platform {
             }
         }
         if let Some(mode) = mode {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(value, fs::Permissions::from_mode(mode))
-                .map_err(|e| e.to_string())?;
+            if !initial_metadata.file_type().is_symlink() {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(value, fs::Permissions::from_mode(mode))
+                    .map_err(|e| e.to_string())?;
+            }
         }
         #[cfg(target_os = "macos")]
         {
@@ -1180,6 +1194,43 @@ mod macos_tests {
             vec![("com.example.project".into(), b"project".to_vec())]
         );
         assert_ne!(flags(&target) & 0x40, 0, "host-managed flag was cleared");
+    }
+
+    #[test]
+    fn macos_immutable_destination_can_have_metadata_updated_and_sf_archived_is_masked() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, "project bytes").unwrap();
+        fs::write(&target, "project bytes").unwrap();
+        set_xattr(&source, "com.example.project", b"new");
+        set_flags(&target, libc::UF_IMMUTABLE);
+
+        let mut expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        // Verify legacy SF_ARCHIVED / com.apple.macl strip cleanly.
+        let mut legacy = expected.clone();
+        legacy.flags |= 0x0001_0000;
+        legacy
+            .attributes
+            .push(("com.apple.macl".into(), vec![1, 2, 3]));
+        legacy.strip_system_managed();
+        assert_eq!(legacy, expected);
+
+        restore(&target, &expected).unwrap();
+        expected = capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap();
+        assert_eq!(expected.flags & libc::UF_IMMUTABLE, 0);
+        assert_eq!(
+            expected.attributes,
+            vec![("com.example.project".into(), b"new".to_vec())]
+        );
+
+        // Restoring UF_IMMUTABLE onto target also succeeds.
+        set_flags(&source, libc::UF_IMMUTABLE);
+        let immutable_extra = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        restore(&target, &immutable_extra).unwrap();
+        assert_ne!(flags(&target) & libc::UF_IMMUTABLE, 0);
+        set_flags(&source, 0);
+        set_flags(&target, 0);
     }
 }
 

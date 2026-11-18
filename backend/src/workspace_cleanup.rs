@@ -130,9 +130,14 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
     if is_link_or_reparse(&metadata) {
         // Never follow a link to clear the target's attributes; the link itself
         // (junctions, symlinks) is removed without needing that.
+        #[cfg(target_os = "macos")]
+        clear_macos_immutable_flags(path, &metadata)
+            .map_err(|error| cleanup_error("clear immutable flags on link", path, error))?;
         return remove_link(path, &metadata).map_err(|error| cleanup_error("unlink", path, error));
     }
     if metadata.is_dir() {
+        ensure_removable_directory(path, &metadata)
+            .map_err(|error| cleanup_error("prepare directory", path, error))?;
         let entries = fs::read_dir(path).map_err(|error| cleanup_error("list", path, error))?;
         for entry in entries {
             let entry = entry.map_err(|error| cleanup_error("list entry in", path, error))?;
@@ -145,6 +150,44 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
             .map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
         fs::remove_file(path).map_err(|error| cleanup_error("remove file", path, error))
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_macos_immutable_flags(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> std::io::Result<()> {
+    use std::{ffi::CString, os::macos::fs::MetadataExt, os::unix::ffi::OsStrExt};
+    extern "C" {
+        fn lchflags(path: *const libc::c_char, flags: u32) -> libc::c_int;
+    }
+    let blocked = libc::UF_IMMUTABLE | libc::UF_APPEND;
+    let flags = metadata.st_flags();
+    if flags & blocked == 0 {
+        return Ok(());
+    }
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if unsafe { lchflags(c_path.as_ptr(), flags & !blocked) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn ensure_removable_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    clear_macos_immutable_flags(path, metadata)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, metadata);
+    Ok(())
 }
 
 fn cleanup_error(operation: &str, path: &Path, error: std::io::Error) -> std::io::Error {
@@ -247,10 +290,48 @@ pub(crate) fn clear_readonly_attribute(
     Ok(())
 }
 
-/// A read-only attribute blocks `remove_file` on Windows.
+/// A read-only attribute blocks `remove_file` on Windows; BSD user immutable
+/// and append flags block unlinking on macOS.
 fn clear_readonly(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
     #[cfg(windows)]
     clear_readonly_attribute(path, metadata)?;
+    #[cfg(target_os = "macos")]
+    clear_macos_immutable_flags(path, metadata)?;
     let _ = (path, metadata);
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn set_immutable(path: &Path) {
+        extern "C" {
+            fn lchflags(path: *const libc::c_char, flags: u32) -> libc::c_int;
+        }
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { lchflags(c_path.as_ptr(), libc::UF_IMMUTABLE) }, 0);
+    }
+
+    #[test]
+    fn remove_tree_clears_readonly_dirs_and_macos_immutable_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("locked-tree");
+        let nested = target.join("read-only-dir/sub");
+        let file = nested.join("immutable.txt");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(&file, b"locked").unwrap();
+        set_immutable(&file);
+        let link = nested.join("immutable-link");
+        std::os::unix::fs::symlink("immutable.txt", &link).unwrap();
+        set_immutable(&link);
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+        set_immutable(&nested);
+        fs::set_permissions(target.join("read-only-dir"), fs::Permissions::from_mode(0o555)).unwrap();
+
+        remove_tree(&target).unwrap();
+        assert!(!target.exists());
+    }
 }

@@ -784,7 +784,7 @@ pub(super) fn policy() -> EnvironmentConfig {
 /// State-bound variant of [`policy`] for fixtures that exercise the current
 /// external process-state contract. `GTEST_STATE` is the `{state}` root the
 /// agent must use instead of writing `.env`/`.cache` into the project tree.
-#[cfg(feature = "fixture")]
+#[cfg_attr(not(feature = "fixture"), allow(dead_code))]
 pub(super) fn state_policy() -> EnvironmentConfig {
     let mut config = policy();
     config
@@ -2560,4 +2560,84 @@ if (name === 'A') {
     assert_eq!(b_retry.execution.worktree, b_job.execution.worktree);
     run(&mut runtime, &b_retry);
     assert_eq!(runtime.state.nodes["B"].status, "completed");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exclusions_at_and_history_checks_fold_volume_case_and_unicode_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = crate::path_identity::actual_path(temp.path()).unwrap();
+    let data = workspace.join(".data");
+    fs::create_dir_all(workspace.join(".venv")).unwrap();
+    let probe_file = workspace.join(".venv/python");
+    fs::write(&probe_file, b"py").unwrap();
+    let blob = git2::Oid::hash_file(git2::ObjectType::Blob, &probe_file)
+        .unwrap()
+        .to_string();
+    let evidence: crate::environment_discovery::RuntimeEvidence = serde_json::from_value(
+        serde_json::json!({
+            "schema": 1,
+            "roots": { "workspace": workspace.to_string_lossy() },
+            "files": [{
+                "location": "root",
+                "root": "workspace",
+                "path": ".venv/python",
+                "blob": blob,
+            }],
+        }),
+    )
+    .unwrap();
+
+    let mut state_cfg = state_policy();
+    state_cfg.scopes = vec![".agent-home".into()];
+    let store = Environments::new(&data, &Uuid::new_v4().to_string(), &state_cfg).unwrap();
+
+    let mut launch = state_cfg.launch.clone();
+    launch.environment = Some(crate::environment_discovery::Binding {
+        kind: "venv".into(),
+        prefix: ".Venv".into(),
+        abi: "0".repeat(40),
+        root: Some("workspace".into()),
+        runtime_evidence: Some(evidence),
+    });
+    launch.owned_scopes = Some(vec![
+        EnvironmentScope {
+            root: "workspace".into(),
+            path: ".venv".into(),
+        },
+        EnvironmentScope {
+            root: "workspace".into(),
+            path: "Cafe\u{0301}".into(),
+        },
+        EnvironmentScope {
+            root: "workspace".into(),
+            path: "Caf\u{00e9}".into(),
+        },
+    ]);
+    let launch_ref = store.launch(&launch).unwrap();
+    let exclusions = store.exclusions_at(&workspace, &launch_ref).unwrap();
+    assert_eq!(
+        exclusions.iter().filter(|s| s.starts_with("Caf")).count(),
+        1,
+        "NFD and NFC aliases must deduplicate: {exclusions:?}"
+    );
+    if crate::path_identity::case_insensitive_volume(&workspace) {
+        assert_eq!(
+            exclusions
+                .iter()
+                .filter(|s| s.eq_ignore_ascii_case(".venv"))
+                .count(),
+            1,
+            "case aliases must deduplicate on case-insensitive APFS: {exclusions:?}"
+        );
+    } else {
+        assert_eq!(
+            exclusions
+                .iter()
+                .filter(|s| s.eq_ignore_ascii_case(".venv"))
+                .count(),
+            2,
+            "case-sensitive APFS must preserve distinct case scopes: {exclusions:?}"
+        );
+    }
 }

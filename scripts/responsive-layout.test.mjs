@@ -277,7 +277,11 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(await page.locator(".graph-pane").isVisible(), false);
     assert.equal(await page.locator(".graph-canvas .react-flow__node").first().isVisible(), false,
       "React Flow's inline node visibility cannot expose the hidden graph");
+    assert.equal(Math.round((await page.locator(".sidebar").boundingBox()).width), 260,
+      "expanded sidebar keeps its 260px width at 900px instead of shrinking early");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width > 600);
+    assert.ok((await page.locator(".pane-bottom-chat .prompt-box-container").boundingBox()).width < 680,
+      "composer narrows to fit the 900px single-pane conversation");
     await expectConversationCentered(page, "single-pane layout");
     // Latest explicitly sets visibility and pointer events when active.
     await page.locator(".scroll-to-bottom-btn").evaluate(button => button.classList.add("visible"));
@@ -369,12 +373,16 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.ok(composerFit.box <= 0 && composerFit.row <= 0, `narrow composer controls wrap instead of overflowing: ${JSON.stringify(composerFit)}`);
     const mainWidth = await page.locator(".main").evaluate(element => element.getBoundingClientRect().width);
     await page.getByRole("button", { name: "Expand sidebar" }).click();
-    const overlay = await page.evaluate(() => ({
+    await expect.poll(() => page.evaluate(() => ({
       position: getComputedStyle(document.querySelector(".sidebar")).position,
+      sidebar: Math.round(document.querySelector(".sidebar").getBoundingClientRect().width),
       main: document.querySelector(".main").getBoundingClientRect().width,
-    }));
-    assert.equal(overlay.position, "absolute", "the narrow sidebar opens as an overlay");
-    assert.ok(overlay.main >= mainWidth, "opening the overlay must not squeeze the workspace");
+    })), { message: "overlay sidebar expands to 260px" }).toMatchObject({
+      position: "absolute",
+      sidebar: 260,
+    });
+    const overlayMain = await page.locator(".main").evaluate(element => element.getBoundingClientRect().width);
+    assert.ok(overlayMain >= mainWidth, "opening the overlay must not squeeze the workspace");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
     // Restore the expanded sidebar before testing the short desktop window.

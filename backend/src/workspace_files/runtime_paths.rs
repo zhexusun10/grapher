@@ -108,23 +108,8 @@ impl RuntimePaths {
             }
             &self.value.entries
         };
-        let found = if let Some(entry) = entries.get_key_value(path) {
-            Some(entry)
-        } else if cfg!(windows) {
-            let key = inspection_key(path);
-            let mut aliases = entries
-                .iter()
-                .filter(|(name, _)| inspection_key(name) == key);
-            let first = aliases.next();
-            if aliases.next().is_some() {
-                return Err(format!(
-                    "Ambiguous recorded native selector path: {root}:{path}"
-                ));
-            }
-            first
-        } else {
-            None
-        };
+        let found = lookup_entry_alias(entries, self.roots.get(root).map(PathBuf::as_path), path)
+            .map_err(|()| format!("Ambiguous recorded native selector path: {root}:{path}"))?;
         let Some((name, entry)) = found else {
             return Err(format!("Native runtime selector lacks a captured entry: {root}:{path}; live entries cannot repair history"));
         };

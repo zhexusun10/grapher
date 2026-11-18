@@ -192,8 +192,7 @@ pub(crate) fn deliver_prepared(
         let owned = workspace.join(PROJECT_DIRECTORY).join(&id);
         let path = owned.join(&input.name);
         let workspace_key = hash(
-            workspace
-                .canonicalize()
+            crate::path_identity::actual_path(workspace)
                 .map_err(|error| error.to_string())?
                 .to_string_lossy()
                 .as_bytes(),

@@ -279,3 +279,31 @@ fn nested_cache_paths_are_left_out_of_the_snapshot() {
     // The live cache directory is left untouched.
     assert!(workspace.join(".venv/cache/INetCache/blob").is_file());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_case_aliased_workspace_retains_internal_directory_symlinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("MixedCaseSlot");
+    fs::create_dir_all(workspace.join(".venv/lib")).unwrap();
+    fs::write(workspace.join(".venv/lib/mod.py"), "ok").unwrap();
+    std::os::unix::fs::symlink(workspace.join(".venv/lib"), workspace.join(".venv/lib64")).unwrap();
+
+    let files = Files::environment(&temp.path().join("env-files"), &[".venv".into()], &[]).unwrap();
+    let aliased = if crate::path_identity::case_insensitive_volume(&workspace) {
+        temp.path().join("mixedcaseslot")
+    } else {
+        workspace.clone()
+    };
+    let version = Uuid::new_v4().to_string();
+    files.capture(&aliased, &version, "", &[]).unwrap();
+    let loaded = files.load(&version).unwrap();
+    assert!(matches!(
+        loaded.entries.get(".venv/lib64"),
+        Some(Entry::Link {
+            target,
+            internal: true,
+            directory: true
+        }) if target == ".venv/lib"
+    ));
+}

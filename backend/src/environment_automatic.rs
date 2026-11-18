@@ -116,6 +116,11 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
     } else {
         caches.push(".agent-home/.cache".to_string());
         caches.push(".agent-home/.npm".to_string());
+        if cfg!(target_os = "macos") {
+            // macOS tools (uv, pip, clang/swift, Playwright/Chromium, PyTorch MPS)
+            // write directly under $HOME/Library/Caches ignoring XDG_CACHE_HOME.
+            caches.push(".agent-home/Library/Caches".to_string());
+        }
     }
     let config = EnvironmentConfig {
         mode: "native-workspace".into(),
@@ -474,5 +479,40 @@ mod tests {
         assert!(resolve(source.path(), true).unwrap().0.is_none());
         fs::remove_dir_all(source.path().join(".git")).unwrap();
         assert!(resolve(source.path(), false).unwrap().0.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_automatic_policy_excludes_library_caches() {
+        let source = project();
+        let policy = resolve(source.path(), false).unwrap().0.unwrap();
+        assert!(
+            policy
+                .caches
+                .contains(&".agent-home/Library/Caches".to_string()),
+            "{:?}",
+            policy.caches
+        );
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir_all(state.join(".agent-home/Library/Caches/com.apple.metal")).unwrap();
+        fs::create_dir_all(state.join(".agent-home/bin")).unwrap();
+        fs::write(state.join(".agent-home/bin/keep"), b"keep").unwrap();
+        // Hardlinks inside ~/Library/Caches must be skipped rather than failing capture.
+        let cached_a = state.join(".agent-home/Library/Caches/com.apple.metal/a.metallib");
+        let cached_b = state.join(".agent-home/Library/Caches/com.apple.metal/b.metallib");
+        fs::write(&cached_a, b"cache").unwrap();
+        fs::hard_link(&cached_a, &cached_b).unwrap();
+
+        let files = crate::workspace_files::Files::environment(
+            &root.path().join("store"),
+            &policy.scopes,
+            &policy.caches,
+        )
+        .unwrap();
+        let version = uuid::Uuid::new_v4().to_string();
+        files
+            .capture(&state, &version, &"0".repeat(40), &[])
+            .unwrap();
     }
 }

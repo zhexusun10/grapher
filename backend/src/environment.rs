@@ -741,6 +741,14 @@ impl Environments {
         }
     }
 
+    pub(crate) fn state_root_path(&self, path: &Path) -> Result<PathBuf, String> {
+        if self.config.launch.state_bound() {
+            crate::workspace_state::process_root(path)
+        } else {
+            Ok(path.to_path_buf())
+        }
+    }
+
     fn discovery_roots(&self, path: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
         let workspace = path.to_path_buf();
         let state = if self.config.launch.state_bound() {
@@ -781,7 +789,7 @@ impl Environments {
             self.files
                 .verify_roots(&self.snapshot_targets(path, &layouts)?, version)
         } else {
-            self.scoped_files(launch)?.verify(
+            self.scoped_files_at(Some(path), launch)?.verify(
                 &self.environment_root_for(path, launch)?,
                 version,
                 "",
@@ -1105,7 +1113,7 @@ impl Environments {
         let root_layouts =
             self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?;
         let project_exclusions = if root_layouts.is_some() {
-            self.exclusions(&selected.launch_ref)?
+            self.exclusions_at(path, &selected.launch_ref)?
         } else {
             Vec::new()
         };
@@ -1118,7 +1126,7 @@ impl Environments {
             None
         };
         if history_edit {
-            self.validate_history_result(selected, &selected.launch_ref)?;
+            self.validate_history_result_at(path, selected, &selected.launch_ref)?;
         }
         if self.baseline()? != selected.domain {
             return Err("Native baseline/domain changed; refusing unsafe environment reuse".into());
@@ -1135,7 +1143,7 @@ impl Environments {
         let same_view = selected.layout.as_deref().is_some_and(|original| {
             crate::path_identity::same_path(Path::new(original), Path::new(&layout))
         });
-        let scoped = self.scoped_files(&selected.launch_ref)?;
+        let scoped = self.scoped_files_at(Some(path), &selected.launch_ref)?;
         let unbound_best_effort = self.config.best_effort
             && selected.layout.is_none()
             && self
@@ -1267,8 +1275,18 @@ impl Environments {
         Ok(input)
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_history_scopes(
         &self,
+        selected: &str,
+        previous: &str,
+    ) -> Result<(), String> {
+        self.validate_history_scopes_impl(None, selected, previous)
+    }
+
+    pub(super) fn validate_history_scopes_impl(
+        &self,
+        path: Option<&Path>,
         selected: &str,
         previous: &str,
     ) -> Result<(), String> {
@@ -1297,12 +1315,31 @@ impl Environments {
                     return Err(format!("Historical rollback has ownership only, not captured bytes, for {}:{}; refusing unsafe partial scope restoration", scope.root, scope.path));
                 }
             }
-            let target_scopes = self.scope_paths(selected)?;
-            if self.scope_paths(previous)?.iter().any(|previous| {
-                !target_scopes
-                    .iter()
-                    .any(|scope| workspace::scope_contains(Path::new(previous), Path::new(scope)))
-            }) {
+            let owner_root = match (self.scope_root(&before), path) {
+                ("workspace", Some(path)) => Some(path.to_path_buf()),
+                ("state", Some(path)) => Some(self.state_root_path(path)?),
+                ("state", None) => Some(self.directory.clone()),
+                _ => None,
+            };
+            let target_scopes = self.scope_paths_for_owner(owner_root.as_deref(), selected)?;
+            if self
+                .scope_paths_for_owner(owner_root.as_deref(), previous)?
+                .iter()
+                .any(|previous| {
+                    !target_scopes.iter().any(|scope| {
+                        owner_root.as_deref().map_or_else(
+                            || workspace::scope_contains(Path::new(previous), Path::new(scope)),
+                            |root| {
+                                workspace::scope_contains_at(
+                                    root,
+                                    Path::new(previous),
+                                    Path::new(scope),
+                                )
+                            },
+                        )
+                    })
+                })
+            {
                 return Err("Historical rollback drops a dynamic environment scope outside the frozen roots; refusing unsafe partial scope restoration".into());
             }
         }
@@ -1314,7 +1351,40 @@ impl Environments {
             && (!self.config.discovery || self.load_launch(reference)?.environment.is_some()))
     }
 
+    fn dedup_scopes(root: Option<&Path>, mut paths: Vec<String>) -> Vec<String> {
+        paths.sort();
+        let mut unique: Vec<String> = Vec::with_capacity(paths.len());
+        for candidate in paths {
+            let duplicate = unique.iter().any(|existing| {
+                if existing == &candidate {
+                    return true;
+                }
+                let a = Path::new(existing);
+                let b = Path::new(&candidate);
+                root.map_or_else(
+                    || workspace::scope_contains(a, b) && workspace::scope_contains(b, a),
+                    |root| {
+                        workspace::scope_contains_at(root, a, b)
+                            && workspace::scope_contains_at(root, b, a)
+                    },
+                )
+            });
+            if !duplicate {
+                unique.push(candidate);
+            }
+        }
+        unique
+    }
+
     pub(crate) fn exclusions(&self, reference: &str) -> Result<Vec<String>, String> {
+        self.exclusions_impl(None, reference)
+    }
+
+    pub(crate) fn exclusions_at(&self, root: &Path, reference: &str) -> Result<Vec<String>, String> {
+        self.exclusions_impl(Some(root), reference)
+    }
+
+    fn exclusions_impl(&self, root: Option<&Path>, reference: &str) -> Result<Vec<String>, String> {
         if self.config.launch.state_bound() {
             let launch = self.load_launch(reference)?;
             if let Some(scopes) = &launch.owned_scopes {
@@ -1328,9 +1398,7 @@ impl Environments {
                         paths.push(binding.prefix.clone());
                     }
                 }
-                paths.sort();
-                paths.dedup();
-                return Ok(paths);
+                return Ok(Self::dedup_scopes(root, paths));
             }
             // A genuine project environment stays in the visible workspace, so
             // its project-relative scopes must remain excluded from Git. An
@@ -1345,17 +1413,25 @@ impl Environments {
             }
             let mut paths = self.config.scopes.clone();
             if let Some(binding) = &launch.environment {
-                if !paths.iter().any(|scope| {
-                    workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
-                }) {
+                let covered = paths.iter().any(|scope| {
+                    root.map_or_else(
+                        || workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope)),
+                        |root| {
+                            workspace::scope_contains_at(
+                                root,
+                                Path::new(&binding.prefix),
+                                Path::new(scope),
+                            )
+                        },
+                    )
+                });
+                if !covered {
                     paths.push(binding.prefix.clone());
                 }
             }
-            paths.sort();
-            paths.dedup();
-            return Ok(paths);
+            return Ok(Self::dedup_scopes(root, paths));
         }
-        self.scope_paths(reference)
+        self.scope_paths_impl(root, reference)
     }
 
     fn scope_root<'a>(&self, launch: &'a LaunchConfig) -> &'a str {
@@ -1376,11 +1452,43 @@ impl Environments {
             && self.scope_root(launch) == "workspace"
     }
 
+    #[allow(dead_code)]
     fn scope_paths(&self, reference: &str) -> Result<Vec<String>, String> {
+        self.scope_paths_impl(None, reference)
+    }
+
+    pub(super) fn scope_paths_impl(
+        &self,
+        root: Option<&Path>,
+        reference: &str,
+    ) -> Result<Vec<String>, String> {
         let launch = self.load_launch(reference)?;
+        let owner_root = if self.scope_root(&launch) == "state" {
+            root.and_then(|path| self.state_root_path(path).ok())
+                .or_else(|| Some(self.directory.clone()))
+        } else {
+            root.map(Path::to_path_buf)
+        };
+        self.scope_paths_for_owner_launch(owner_root.as_deref(), &launch)
+    }
+
+    pub(super) fn scope_paths_for_owner(
+        &self,
+        owner_root: Option<&Path>,
+        reference: &str,
+    ) -> Result<Vec<String>, String> {
+        let launch = self.load_launch(reference)?;
+        self.scope_paths_for_owner_launch(owner_root, &launch)
+    }
+
+    fn scope_paths_for_owner_launch(
+        &self,
+        owner_root: Option<&Path>,
+        launch: &LaunchConfig,
+    ) -> Result<Vec<String>, String> {
         // State HOME/cache names must never become project exclusions simply
         // because the selected interpreter lives in the project.
-        let mut paths: Vec<_> = if self.uses_project_scopes(&launch) {
+        let mut paths: Vec<_> = if self.uses_project_scopes(launch) {
             Vec::new()
         } else {
             self.config
@@ -1397,26 +1505,52 @@ impl Environments {
             paths.extend(
                 scopes
                     .iter()
-                    .filter(|scope| scope.root == self.scope_root(&launch))
+                    .filter(|scope| scope.root == self.scope_root(launch))
                     .map(|scope| scope.path.clone()),
             );
         }
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
+        Ok(Self::dedup_scopes(owner_root, paths))
     }
 
     pub(crate) fn scoped_files(&self, reference: &str) -> Result<Files, String> {
+        self.scoped_files_at(None, reference)
+    }
+
+    pub(crate) fn scoped_files_at(
+        &self,
+        path: Option<&Path>,
+        reference: &str,
+    ) -> Result<Files, String> {
         let launch = self.load_launch(reference)?;
         let caches = if self.uses_project_scopes(&launch) {
             &[][..]
         } else {
             &self.config.caches
         };
+        let owner_root = if self.scope_root(&launch) == "state" {
+            path.and_then(|path| self.state_root_path(path).ok())
+                .or_else(|| Some(self.directory.clone()))
+        } else {
+            path.map(Path::to_path_buf)
+        };
         let scopes: Vec<_> = self
-            .scope_paths(reference)?
+            .scope_paths_for_owner_launch(owner_root.as_deref(), &launch)?
             .into_iter()
-            .filter(|scope| !caches.contains(scope))
+            .filter(|scope| {
+                !caches.iter().any(|cache| {
+                    owner_root.as_deref().map_or_else(
+                        || cache == scope,
+                        |root| {
+                            workspace::scope_contains_at(root, Path::new(scope), Path::new(cache))
+                                && workspace::scope_contains_at(
+                                    root,
+                                    Path::new(cache),
+                                    Path::new(scope),
+                                )
+                        },
+                    )
+                })
+            })
             .collect();
         Ok(
             Files::environment(&self.directory.join("files"), &scopes, caches)?
@@ -1432,7 +1566,7 @@ impl Environments {
                 parent,
             )
         } else {
-            self.scoped_files(reference)?
+            self.scoped_files_at(Some(path), reference)?
                 .capture_reusing(&self.environment_root_for(path, reference)?, parent)
         }
     }
@@ -1457,7 +1591,7 @@ impl Environments {
             self.config.best_effort,
         )?;
         let reference = self.launch(&launch)?;
-        let exclusions = self.exclusions(&reference)?;
+        let exclusions = self.exclusions_at(path, &reference)?;
         if self.config.launch.state_bound() && launch.owned_scopes.is_some() {
             // Inspect authored project Git, not the force-collected graph index.
             // Ordinary folders have no native index. Never silently hide a
@@ -1491,7 +1625,16 @@ impl Environments {
             let mut policy = self.config.clone();
             policy.scopes = exclusions
                 .into_iter()
-                .filter(|scope| !policy.caches.contains(scope))
+                .filter(|scope| {
+                    !policy.caches.iter().any(|cache| {
+                        workspace::scope_contains_at(path, Path::new(scope), Path::new(cache))
+                            && workspace::scope_contains_at(
+                                path,
+                                Path::new(cache),
+                                Path::new(scope),
+                            )
+                    })
+                })
                 .collect();
             policy.check_tracked(path)?;
         }

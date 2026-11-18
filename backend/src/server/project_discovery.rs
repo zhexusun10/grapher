@@ -166,7 +166,11 @@ pub(super) fn collect_files_from_dir(dir: &Path) -> Vec<String> {
     let mut files = Vec::new();
     let is_git = dir.join(".git").exists() || crate::workspace::is_standard_git(dir);
     if is_git {
-        if let Ok(output) = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        crate::native::clear_git_environment(&mut command);
+        #[cfg(target_os = "macos")]
+        command.args(["-c", "core.precomposeunicode=false"]);
+        if let Ok(output) = command
             .arg("ls-files")
             .arg("-z")
             .arg("--cached")
@@ -267,7 +271,7 @@ pub(super) fn list_skills(
     // 2. Grapher 宿主内置技能规范 (Grapher Host App: .agents/skills, .pi/skills, skills)
     {
         let grapher_root = crate::native::installation_root();
-        if grapher_root != repo_path {
+        if !crate::path_identity::same_path(&grapher_root, &repo_path) {
             search_dirs.push((grapher_root.join(".agents").join("skills"), "builtin"));
             search_dirs.push((grapher_root.join(".pi").join("skills"), "builtin"));
             search_dirs.push((grapher_root.join("skills"), "builtin"));

@@ -48,7 +48,7 @@ impl Environments {
     ) -> Result<Option<CompositeResult>, String> {
         if !self.home_fork_candidate(selected)?
             || self
-                .scoped_files(&selected.launch_ref)?
+                .scoped_files_at(Some(path), &selected.launch_ref)?
                 .home_target_is_empty(&self.state_root(path)?)?
         {
             return Ok(None);

@@ -78,10 +78,40 @@ impl Environments {
             .collect()
     }
 
+    /// Derive root paths without creating S or requiring W to exist on disk.
+    /// Used by read-only preflight before missing-W reconstruction.
+    pub(super) fn snapshot_target_paths(
+        &self,
+        path: &Path,
+        layouts: &Layouts,
+    ) -> Result<BTreeMap<String, PathBuf>, String> {
+        layouts
+            .keys()
+            .map(|root| {
+                let path = match root.as_str() {
+                    "workspace" => path.to_path_buf(),
+                    "state" => self.state_root_path(path)?,
+                    _ => return Err("Unsupported environment snapshot root".into()),
+                };
+                Ok((root.clone(), path))
+            })
+            .collect()
+    }
+
     /// A launch alone is not recovery evidence. New manifests can restore both
     /// roots only if their recorded coverage contains all previous ownership.
-    pub(crate) fn validate_history_result(
+    pub(crate) fn validate_history_result_at(
         &self,
+        path: &Path,
+        selected: &CompositeResult,
+        previous: &str,
+    ) -> Result<(), String> {
+        self.validate_history_result_impl(Some(path), selected, previous)
+    }
+
+    fn validate_history_result_impl(
+        &self,
+        path: Option<&Path>,
         selected: &CompositeResult,
         previous: &str,
     ) -> Result<(), String> {
@@ -89,32 +119,65 @@ impl Environments {
         let Some(target) =
             self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?
         else {
-            return self.validate_history_scopes(&selected.launch_ref, previous);
+            return self.validate_history_scopes_impl(path, &selected.launch_ref, previous);
         };
+        let targets = path
+            .map(|path| self.snapshot_target_paths(path, &target))
+            .transpose()?;
         let before = self.load_launch(previous)?;
         let Some(before) = self.root_layouts_for_launch(&before)? else {
             // An explicit policy can use a current single-root L/E pair. Only
             // the target's captured coverage authorizes restoration.
             let label = self.scope_root(&before);
-            for scope in self.scope_paths(previous)? {
-                if self.config.caches.contains(&scope) {
+            let owner_root = targets
+                .as_ref()
+                .and_then(|map| map.get(label))
+                .map(PathBuf::as_path);
+            let previous_root = match label {
+                "workspace" => path,
+                "state" => owner_root.or(Some(self.directory.as_path())),
+                _ => owner_root,
+            };
+            for scope in self.scope_paths_for_owner(previous_root, previous)? {
+                let in_caches = previous_root.map_or_else(
+                    || self.config.caches.contains(&scope),
+                    |root| {
+                        self.config.caches.iter().any(|cache| {
+                            workspace::scope_contains_at(root, Path::new(&scope), Path::new(cache))
+                                && workspace::scope_contains_at(
+                                    root,
+                                    Path::new(cache),
+                                    Path::new(&scope),
+                                )
+                        })
+                    },
+                );
+                if in_caches {
                     continue;
                 }
-                if !target
-                    .get(label)
-                    .is_some_and(|layout| layout.covers(&scope))
-                {
+                if !target.get(label).is_some_and(|layout| {
+                    previous_root.map_or_else(
+                        || layout.covers(&scope),
+                        |root| layout.covers_at(root, &scope),
+                    )
+                }) {
                     return Err(format!("Historical rollback lacks captured coverage for {label}:{scope}; refusing partial restoration"));
                 }
             }
             return Ok(());
         };
         for (label, layout) in before {
+            let root_path = targets
+                .as_ref()
+                .and_then(|map| map.get(&label))
+                .map(PathBuf::as_path);
             for scope in layout.scopes {
-                if !target
-                    .get(&label)
-                    .is_some_and(|target| target.covers(&scope))
-                {
+                if !target.get(&label).is_some_and(|target| {
+                    root_path.map_or_else(
+                        || target.covers(&scope),
+                        |root| target.covers_at(root, &scope),
+                    )
+                }) {
                     return Err(format!("Historical rollback lacks captured coverage for {label}:{scope}; refusing partial restoration"));
                 }
             }
@@ -130,7 +193,7 @@ impl Environments {
         selected: &CompositeResult,
         previous: &str,
     ) -> Result<(), String> {
-        self.validate_history_result(selected, previous)?;
+        self.validate_history_result_at(path, selected, previous)?;
         self.preflight_runtime_evidence(path, selected)?;
         if let Some(layouts) =
             self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?
@@ -227,7 +290,7 @@ impl Environments {
             }
             roots.insert("state".into(), state);
         }
-        let files = self.scoped_files(&selected.launch_ref)?;
+        let files = self.scoped_files_at(Some(path), &selected.launch_ref)?;
         if project_ready {
             evidence.preflight_prepared(
                 &files,

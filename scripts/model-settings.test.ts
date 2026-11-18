@@ -467,16 +467,10 @@ test('Harness settings preserve defaults and explicit selections, with feedback 
       'the Harness settings card sits above UI settings and the language selector');
     const planningCard = markup.match(/<section\b[^>]*aria-labelledby="execution-planning-settings-title"[^>]*>([\s\S]*?)<\/section>/)?.[1];
     assert.ok(planningCard, 'the combined execution planning card is present');
-    assert.equal(planningCard.match(/type="checkbox"/g)?.length, 6);
-    for (const label of ['隐藏 Auto 模式', 'Auto Approve Planner 图纸', '任务后 Planner 复盘', '并行节点独立工作区', '挂载 Planner write 和 edit 工具']) {
+    assert.equal(planningCard.match(/type="checkbox"/g)?.length, 5);
+    for (const label of ['Auto Approve Planner 图纸', '任务后 Planner 复盘', '并行节点独立工作区', '挂载 Planner write 和 edit 工具']) {
       assert.ok(planningCard.includes(`aria-label="${t(label)}"`), `${label} is inside the combined card`);
       assert.match(checkbox(defaultConfig, label), /checked=""/, `${label} is checked by default`);
-    }
-    try {
-      prefs.setHideAutoMode(false);
-      assert.doesNotMatch(checkbox(defaultConfig, '隐藏 Auto 模式'), /checked=""/, 'the stored Auto visibility opt-out is preserved');
-    } finally {
-      prefs.setHideAutoMode(true);
     }
     assert.ok(planningCard.includes(t('空闲时派发不超过 3 个节点共用源目录，超过 3 个启用独立工作区。共享执行中按依赖补位，不等待无关节点。关闭后始终共享源码，并发修改可能互相覆盖。')));
     const maxParallelMarkup = (config: Config) => {
@@ -530,15 +524,23 @@ test('Harness settings preserve defaults and explicit selections, with feedback 
     }
     const uiCard = markup.match(/<section\b[^>]*aria-labelledby="ui-settings-title"[^>]*>([\s\S]*?)<\/section>/)?.[1];
     assert.ok(uiCard, 'the UI settings card is present');
+    assert.ok(uiCard.includes(`aria-label="${t('隐藏 Auto 模式')}"`), 'Hide Auto mode is inside UI settings');
+    assert.match(checkbox(defaultConfig, '隐藏 Auto 模式'), /checked=""/, 'Hide Auto mode is checked by default');
+    try {
+      prefs.setHideAutoMode(false);
+      assert.doesNotMatch(checkbox(defaultConfig, '隐藏 Auto 模式'), /checked=""/, 'the stored Auto visibility opt-out is preserved');
+    } finally {
+      prefs.setHideAutoMode(true);
+    }
     const overviewToggle = uiCard.match(/<input\b[^>]*>/g)
       ?.find(input => input.includes(`aria-label="${t('显示执行拓扑概览')}"`));
     assert.ok(overviewToggle, 'execution graph overview checkbox is inside UI settings');
     assert.doesNotMatch(overviewToggle ?? '', /checked=""/, 'execution graph overview is off by default');
-    const uiOrder = [t('执行时自动展开思维链'), t('显示执行拓扑概览'), t('首页背景')]
+    const uiOrder = [t('隐藏 Auto 模式'), t('执行时自动展开思维链'), t('显示执行拓扑概览'), t('首页背景')]
       .map(label => uiCard.indexOf(label));
     assert.ok(uiOrder.every(index => index >= 0), 'all UI settings items are present');
     assert.deepEqual([...uiOrder].sort((a, b) => a - b), uiOrder,
-      'execution graph overview sits between reasoning auto-expand and home background');
+      'Hide Auto mode sits above reasoning auto-expand and execution graph overview sits between reasoning auto-expand and home background');
     try {
       prefs.setExecutionOverview(true);
       const enabled = renderToStaticMarkup(React.createElement(SettingsModal, {

@@ -135,7 +135,15 @@ pub fn data_root() -> PathBuf {
     // The server canonicalizes this directory after creating it. Other
     // callers (notably the execution sandbox) must resolve the same root,
     // including configured relative paths and platform aliases.
-    path.canonicalize().unwrap_or(path)
+    #[cfg(target_os = "macos")]
+    {
+        crate::path_identity::actual_path(&path)
+            .unwrap_or_else(|_| path.canonicalize().unwrap_or(path))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.canonicalize().unwrap_or(path)
+    }
 }
 
 /// Large disposable workspace/engine caches must not live beside the checkout.
@@ -170,7 +178,15 @@ fn absolute_path(path: PathBuf) -> PathBuf {
 
 fn absolute_cache_path(path: PathBuf) -> PathBuf {
     let path = absolute_path(path);
-    path.canonicalize().unwrap_or(path)
+    #[cfg(target_os = "macos")]
+    {
+        crate::path_identity::actual_path(&path)
+            .unwrap_or_else(|_| path.canonicalize().unwrap_or(path))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.canonicalize().unwrap_or(path)
+    }
 }
 
 /// Host-user resource locks must not follow a per-backend cache override.
@@ -494,27 +510,31 @@ fn prohibited_workspace_reason(candidate: &Path) -> Option<String> {
 fn private_slot_layout(path: &Path) -> bool {
     path.parent()
         .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".grapher-worktrees")
+        .is_some_and(crate::workspace_state::is_managed_worktrees_bucket)
 }
 
 fn graph_metadata_name(slot: &str) -> Result<String, String> {
-    let id = git2::Oid::hash_object(git2::ObjectType::Blob, slot.as_bytes())
-        .map_err(|error| error.to_string())?
-        .to_string();
-    Ok(format!("{}.git", &id[..16]))
+    Ok(format!(
+        "{}.git",
+        crate::workspace_state::slot_digest_for_name(slot)?
+    ))
+}
+
+fn slot_metadata_dir(path: &Path) -> Result<PathBuf, String> {
+    let run = path.parent().ok_or("Missing slot owner")?;
+    if path.file_name().and_then(|name| name.to_str()).is_none() {
+        return Err("Non-UTF-8 slot".into());
+    }
+    Ok(run
+        .join(".grapher-git")
+        .join(format!("{}.git", crate::workspace_state::slot_digest(path)?)))
 }
 
 pub(crate) fn private_git_dir(path: &Path) -> Option<PathBuf> {
     if !private_slot_layout(path) {
         return None;
     }
-    let run = path.parent()?;
-    let name = path.file_name()?.to_str()?;
-    let metadata = run
-        .join(".grapher-git")
-        .join(graph_metadata_name(name).ok()?);
+    let metadata = slot_metadata_dir(path).ok()?;
     fs::symlink_metadata(&metadata)
         .ok()
         .filter(|m| m.is_dir() && !m.file_type().is_symlink())?;
@@ -604,12 +624,7 @@ fn allocate_private_git(path: &Path) -> Result<(), String> {
         );
     }
     let run = path.parent().ok_or("Missing slot owner")?;
-    let target = run.join(".grapher-git").join(graph_metadata_name(
-        path.file_name()
-            .ok_or("Missing slot")?
-            .to_str()
-            .ok_or("Non-UTF-8 slot")?,
-    )?);
+    let target = slot_metadata_dir(path)?;
     crate::path_safety::real_child_path(run, &target, false)?;
     if target.join("HEAD").exists() && !target.join("workspace-layout-v4").is_file() {
         return Err(
@@ -629,24 +644,17 @@ fn allocate_private_git(path: &Path) -> Result<(), String> {
 /// directory itself is removed by the caller; this keeps its object database
 /// from accumulating after the physical workspace is released.
 pub(crate) fn remove_private_git(path: &Path) -> Result<(), String> {
+    if !private_slot_layout(path) {
+        return Ok(());
+    }
     let Some(run) = path.parent() else {
         return Ok(());
     };
-    let Some(root) = run.parent() else {
-        return Ok(());
-    };
-    if !root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".grapher-worktrees")
-    {
+    if path.file_name().and_then(|name| name.to_str()).is_none() {
         return Ok(());
     }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(());
-    };
     let metadata_root = run.join(".grapher-git");
-    let metadata = metadata_root.join(graph_metadata_name(name)?);
+    let metadata = slot_metadata_dir(path)?;
     match fs::symlink_metadata(&metadata) {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(format!(
@@ -655,7 +663,7 @@ pub(crate) fn remove_private_git(path: &Path) -> Result<(), String> {
             ));
         }
         Ok(meta) if meta.is_dir() => {
-            fs::remove_dir_all(&metadata).map_err(|error| error.to_string())?;
+            crate::workspace_cleanup::remove_tree(&metadata).map_err(|error| error.to_string())?;
         }
         Ok(_) => {
             return Err(format!(
@@ -731,7 +739,7 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
             remaining = true;
             continue;
         }
-        fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+        crate::workspace_cleanup::remove_tree(&path).map_err(|error| error.to_string())?;
     }
     if !remaining {
         let _ = fs::remove_dir(&metadata_root);
@@ -929,14 +937,13 @@ pub(crate) fn normalize_workspace_display_path(path: &Path) -> String {
     crate::native::host_path(path).to_string_lossy().to_string()
 }
 
-pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
-    let canonical = canonical_workspace_path(target)?;
+fn shadow_repo_path_for(resolved: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     // Keep the historical hash input stable: changing it would orphan
     // existing shadow repositories and their snapshots.
-    canonical.to_string_lossy().hash(&mut hasher);
+    resolved.to_string_lossy().hash(&mut hasher);
     let hash = hasher.finish();
-    let name = canonical
+    let name = resolved
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".into());
@@ -950,9 +957,28 @@ pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
             }
         })
         .collect();
-    Ok(data_root()
+    data_root()
         .join("shadow_repos")
-        .join(format!("{}_{:016x}.git", safe_name, hash)))
+        .join(format!("{}_{:016x}.git", safe_name, hash))
+}
+
+pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
+    let canonical = canonical_workspace_path(target)?;
+    #[cfg(target_os = "macos")]
+    {
+        let actual =
+            crate::path_identity::actual_path(&canonical).unwrap_or_else(|_| canonical.clone());
+        let preferred = shadow_repo_path_for(&actual);
+        if actual != canonical && !checked_shadow_directory(&preferred)? {
+            let legacy = shadow_repo_path_for(&canonical);
+            if checked_shadow_directory(&legacy)? {
+                return Ok(legacy);
+            }
+        }
+        return Ok(preferred);
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(shadow_repo_path_for(&canonical))
 }
 
 fn checked_shadow_directory(path: &Path) -> Result<bool, String> {
@@ -1108,6 +1134,17 @@ fn ensure_shadow_metadata(target: &Path) -> Result<PathBuf, String> {
         if is_standard_git(&canonical_target) {
             copy_shadow_git_settings(&canonical_target, &shadow_dir)?;
         }
+        #[cfg(target_os = "macos")]
+        git(
+            &canonical_target,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "config",
+                "core.precomposeunicode",
+                "false",
+            ],
+        )?;
     }
     if !checked_shadow_directory(&shadow_dir)? {
         return Err(format!(
@@ -1306,8 +1343,12 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
         let mut output = Command::new("osascript").arg("-e").arg(script).output();
 
         if !matches!(&output, Ok(out) if out.status.success()) {
+            // Without Automation permission for the frontmost app, the dialog
+            // belongs to this background osascript process; activate it so the
+            // picker is not hidden behind the browser.
             let fallback_script = r#"
                 try
+                    activate
                     set chosenFolder to choose folder with prompt "请选择本地项目文件夹"
                     return POSIX path of chosenFolder
                 on error number -128
@@ -1474,6 +1515,8 @@ pub(crate) fn detect_with_size_check(
             Ok(top) => PathBuf::from(top),
             Err(_) => return Ok(None),
         };
+        #[cfg(target_os = "macos")]
+        let top_level = crate::path_identity::actual_path(&top_level).unwrap_or(top_level);
         let path_str = normalize_workspace_display_path(&top_level);
         let name = top_level
             .file_name()
@@ -1498,8 +1541,10 @@ pub(crate) fn detect_with_size_check(
         // A pure filesystem report: never create, read or delete shadow Git
         // metadata here. The snapshot is materialized lazily on first dispatch.
         let canonical = canonical_workspace_path(&candidate)?;
+        #[cfg(target_os = "macos")]
+        let canonical = crate::path_identity::actual_path(&canonical).unwrap_or(canonical);
         let path_str = normalize_workspace_display_path(&canonical);
-        let name = candidate
+        let name = canonical
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
@@ -1958,6 +2003,10 @@ fn run_git_bytes_allowing(
     if !project_view {
         command.args(["-c", "core.longpaths=true"]);
     }
+    #[cfg(target_os = "macos")]
+    if !project_view {
+        command.args(["-c", "core.precomposeunicode=false"]);
+    }
     if !project_view {
         command.args([
             "-c",
@@ -2113,9 +2162,9 @@ pub fn verify(repository: &Path) -> Result<String, String> {
     validate_binding(repository)?;
     if is_standard_git(repository) {
         let root = git(repository, &["rev-parse", "--show-toplevel"])?;
-        if fs::canonicalize(repository).map_err(|error| error.to_string())?
-            != fs::canonicalize(&root).map_err(|error| error.to_string())?
-        {
+        canonical_workspace_path(repository)?;
+        canonical_workspace_path(Path::new(&root))?;
+        if !crate::path_identity::same_path(repository, Path::new(&root)) {
             return Err("Choose the Git repository root".into());
         }
 
@@ -2452,6 +2501,8 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     // Native agent Bash/Git must also handle the deeper AppData checkouts.
     #[cfg(windows)]
     git(path, &["config", "core.longpaths", "true"])?;
+    #[cfg(target_os = "macos")]
+    git(path, &["config", "core.precomposeunicode", "false"])?;
     // A source with its own alternates or promisor packs may need additional
     // object databases (or lazy network fetches). Exposing those paths to an
     // agent would bypass the sandbox's narrowly scoped object-store grant.
@@ -2905,26 +2956,32 @@ pub(crate) fn scope_contains_at(root: &Path, path: &Path, scope: &Path) -> bool 
         return Path::new(&crate::path_identity::lexical_key(path))
             .starts_with(Path::new(&crate::path_identity::lexical_key(scope)));
     }
-    let insensitive = crate::path_identity::case_insensitive_volume(root);
-    if insensitive {
-        let key = |value: &Path| value.to_string_lossy().to_lowercase();
-        if Path::new(&key(path)).starts_with(Path::new(&key(scope))) {
-            return true;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        let insensitive = crate::path_identity::case_insensitive_volume(root);
+        let normalize = |value: &Path| -> PathBuf {
+            let mut out = PathBuf::new();
+            for component in value.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::Normal(part) => {
+                        out.push(crate::path_identity::macos_fold_component(
+                            &part.to_string_lossy(),
+                            insensitive,
+                        ));
+                    }
+                    other => out.push(other.as_os_str()),
+                }
+            }
+            out
+        };
+        return normalize(path).starts_with(normalize(scope));
     }
-    // macOS filesystems also resolve canonically equivalent Unicode spellings
-    // (for example composed and decomposed `é`). `Path::starts_with` and case
-    // folding alone cannot represent that rule. Only pay for filesystem
-    // identity lookups when the scope itself has a non-ASCII component.
-    if !scope.to_string_lossy().is_ascii() {
-        if let (Ok(path), Ok(scope)) = (
-            crate::path_identity::actual_path(&root.join(path)),
-            crate::path_identity::actual_path(&root.join(scope)),
-        ) {
-            return path.starts_with(scope);
-        }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        false
     }
-    false
 }
 
 pub(crate) fn validate_scope_layout_at(
@@ -3021,6 +3078,90 @@ pub(crate) fn project_tracked_paths(root: &Path) -> std::collections::BTreeSet<S
         .unwrap_or_default()
 }
 
+pub(crate) fn tracked_path_matches(
+    root: Option<&Path>,
+    tracked: &std::collections::BTreeSet<String>,
+    relative: &str,
+) -> bool {
+    if tracked.contains(relative) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let insensitive = root.is_some_and(crate::path_identity::case_insensitive_volume);
+        if !insensitive && relative.is_ascii() {
+            return false;
+        }
+        let target = Path::new(relative);
+        return tracked.iter().any(|candidate| {
+            if candidate.is_ascii() && relative.is_ascii() {
+                insensitive && candidate.eq_ignore_ascii_case(relative)
+            } else {
+                crate::path_identity::macos_equivalent_path(
+                    Path::new(candidate),
+                    target,
+                    insensitive,
+                )
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+fn resolved_existing_path(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(crate::path_identity::actual_path(&canonical).unwrap_or(canonical))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Some(canonical)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_disk_relative(root: &Path, relative: &Path) -> Option<String> {
+    let insensitive = crate::path_identity::case_insensitive_volume(root);
+    let mut dir = root.to_path_buf();
+    let mut resolved = PathBuf::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return None;
+        };
+        if !resolved.as_os_str().is_empty() {
+            let metadata = fs::symlink_metadata(&dir).ok()?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return None;
+            }
+        }
+        let wanted = part.to_string_lossy();
+        let wanted_folded = crate::path_identity::macos_fold_component(&wanted, insensitive);
+        let mut matched: Option<std::ffi::OsString> = None;
+        for item in fs::read_dir(&dir).ok()?.flatten() {
+            let name = item.file_name();
+            if name == part {
+                matched = Some(name);
+                break;
+            }
+            if matched.is_none()
+                && crate::path_identity::macos_fold_component(
+                    &name.to_string_lossy(),
+                    insensitive,
+                ) == wanted_folded
+            {
+                matched = Some(name);
+            }
+        }
+        let actual_name = matched?;
+        dir.push(&actual_name);
+        resolved.push(actual_name);
+    }
+    resolved.to_str().map(str::to_owned)
+}
+
 /// One collection-boundary decision shared by every snapshot/scan/copy path.
 /// Managed environment/cache scopes are always excluded. A generated artifact
 /// is excluded only when the project's own Git does not track it, so committed
@@ -3060,7 +3201,7 @@ fn collection_excluded_inner(
         .and_then(|name| name.strip_prefix(".grapher-publish-"))
         .and_then(|name| name.strip_suffix(".tmp"))
         .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+        && !tracked_path_matches(root, tracked, &relative.to_string_lossy().replace('\\', "/"))
     {
         return true;
     }
@@ -3073,10 +3214,10 @@ fn collection_excluded_inner(
         return true;
     }
     let portable = relative.to_string_lossy().replace('\\', "/");
-    if is_host_metadata(&portable) && !tracked.contains(&portable) {
+    if is_host_metadata(&portable) && !tracked_path_matches(root, tracked, &portable) {
         return true;
     }
-    if is_generated_artifact(relative) && !tracked.contains(&portable) {
+    if is_generated_artifact(relative) && !tracked_path_matches(root, tracked, &portable) {
         return true;
     }
     false
@@ -3194,16 +3335,26 @@ fn restore_tracked_generated(
     if generated.is_empty() {
         return Ok(());
     }
-    let present: Vec<&str> = generated
-        .iter()
-        .filter(|name| path.join(name).exists())
-        .map(|name| name.as_str())
-        .collect();
-    let missing: Vec<&str> = generated
-        .iter()
-        .filter(|name| !path.join(name).exists())
-        .map(|name| name.as_str())
-        .collect();
+    let mut present: Vec<String> = Vec::new();
+    let mut missing: Vec<&str> = Vec::new();
+    for name in generated {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(disk_name) = resolve_disk_relative(path, Path::new(name.as_str())) {
+                present.push(disk_name);
+            } else {
+                missing.push(name.as_str());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if fs::symlink_metadata(path.join(name)).is_ok() {
+                present.push(name.to_string());
+            } else {
+                missing.push(name.as_str());
+            }
+        }
+    }
     let run = |args: Vec<String>| -> Result<(), String> {
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
         if local {
@@ -3215,7 +3366,7 @@ fn restore_tracked_generated(
     };
     if !present.is_empty() {
         let mut args = vec!["add".to_string(), "-f".to_string(), "--".to_string()];
-        args.extend(present.iter().map(|name| (*name).to_string()));
+        args.extend(present);
         run(args)?;
     }
     if !missing.is_empty() {
@@ -3248,13 +3399,15 @@ fn status_path_excluded(
     }) {
         return true;
     }
-    if is_generated_artifact(Path::new(name)) && !tracked.contains(&name.replace('\\', "/")) {
+    if is_generated_artifact(Path::new(name))
+        && !tracked_path_matches(root, tracked, &name.replace('\\', "/"))
+    {
         return true;
     }
     root.zip(data).is_some_and(|(root, data)| {
         data.strip_prefix(root).ok().is_some_and(|relative| {
             let relative = relative.to_string_lossy().replace('\\', "/");
-            !relative.is_empty() && (name == relative || name.starts_with(&format!("{relative}/")))
+            !relative.is_empty() && scope_contains_at(root, Path::new(name), Path::new(&relative))
         })
     })
 }
@@ -3268,8 +3421,8 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
         return raw;
     }
     let tracked = project_tracked_paths(root);
-    let root = root.canonicalize().ok();
-    let data = data_root().canonicalize().ok();
+    let root = resolved_existing_path(root);
+    let data = resolved_existing_path(&data_root());
     let mut lines = Vec::new();
     let mut fields = raw.split('\0');
     while let Some(entry) = fields.next() {
@@ -3317,8 +3470,8 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
 
 fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> String {
     let tracked = project_tracked_paths(root);
-    let root = root.canonicalize().ok();
-    let data = data_root().canonicalize().ok();
+    let root = resolved_existing_path(root);
+    let data = resolved_existing_path(&data_root());
     raw.split('\0')
         .filter(|path| {
             !path.is_empty()
@@ -3362,9 +3515,14 @@ fn host_metadata_exclusions() -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn stage_tracked_host_metadata_impl(path: &Path, local: bool) -> Result<(), String> {
-    // The exclusion above also hides metadata the user explicitly tracked.
-    // Re-stage only paths already in the index, never newly discovered files.
+fn capture_tracked_host_metadata(
+    path: &Path,
+    exclusions: &[String],
+    local: bool,
+) -> Result<Vec<String>, String> {
+    // The exclusion below also hides metadata the user explicitly tracked.
+    // Capture paths already in the index before clearing/refreshing it, never
+    // newly discovered files, while keeping managed scopes excluded.
     let run = |args: &[&str]| {
         if local {
             git(path, args)
@@ -3381,13 +3539,53 @@ fn stage_tracked_host_metadata_impl(path: &Path, local: bool) -> Result<(), Stri
         "._*",
         "**/._*",
     ])?;
-    let tracked: Vec<&str> = tracked
+    let mut seen: std::collections::BTreeSet<String> = tracked
         .split('\0')
-        .filter(|name| !name.is_empty())
+        .filter(|name| {
+            !name.is_empty()
+                && !crate::path_identity::is_runtime_metadata_path(Path::new(name))
+                && !exclusions
+                    .iter()
+                    .any(|scope| scope_contains_at(path, Path::new(name), Path::new(scope)))
+        })
+        .map(str::to_owned)
         .collect();
-    for chunk in tracked.chunks(100) {
-        let mut args = vec!["add", "-f", "-A", "--"];
-        args.extend(chunk.iter().copied());
+    if !local && is_standard_git(path) {
+        for name in project_tracked_paths(path) {
+            if is_host_metadata(&name)
+                && !crate::path_identity::is_runtime_metadata_path(Path::new(&name))
+                && !exclusions
+                    .iter()
+                    .any(|scope| scope_contains_at(path, Path::new(&name), Path::new(scope)))
+                && !tracked_path_matches(Some(path), &seen, &name)
+            {
+                seen.insert(name);
+            }
+        }
+    }
+    Ok(seen.into_iter().collect())
+}
+
+#[cfg(target_os = "macos")]
+fn stage_tracked_host_metadata_list(
+    path: &Path,
+    tracked: &[String],
+    local: bool,
+) -> Result<(), String> {
+    let run = |args: &[&str]| {
+        if local {
+            git(path, args)
+        } else {
+            repository_git(path, args)
+        }
+    };
+    let present: Vec<String> = tracked
+        .iter()
+        .filter_map(|name| resolve_disk_relative(path, Path::new(name)))
+        .collect();
+    for chunk in present.chunks(100) {
+        let mut args = vec!["add", "-f", "--"];
+        args.extend(chunk.iter().map(String::as_str));
         run(&args)?;
     }
     Ok(())
@@ -3423,18 +3621,38 @@ pub(crate) fn unstage_scoped(path: &Path, exclusions: &[String]) -> Result<(), S
     if exclusions.is_empty() {
         return Ok(());
     }
-    let mut args = vec![
-        "rm".to_string(),
-        "-r".to_string(),
-        "--cached".to_string(),
-        "--ignore-unmatch".to_string(),
-        "-q".to_string(),
-        "--".to_string(),
-    ];
-    args.extend(scope_pathspecs(exclusions));
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git(path, &args)?;
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let matched = matched_tracked_scoped(path, exclusions)?;
+        for chunk in matched.chunks(100) {
+            let mut args = vec![
+                "rm".to_string(),
+                "--cached".to_string(),
+                "--ignore-unmatch".to_string(),
+                "-q".to_string(),
+                "--".to_string(),
+            ];
+            args.extend(chunk.iter().map(|entry| format!(":(literal){entry}")));
+            let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+            git(path, &args)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut args = vec![
+            "rm".to_string(),
+            "-r".to_string(),
+            "--cached".to_string(),
+            "--ignore-unmatch".to_string(),
+            "-q".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(scope_pathspecs(exclusions));
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        git(path, &args)?;
+        Ok(())
+    }
 }
 
 /// Whether the index currently tracks a managed environment/cache scope.
@@ -3442,12 +3660,35 @@ pub(crate) fn has_tracked_scoped(path: &Path, exclusions: &[String]) -> Result<b
     if exclusions.is_empty() {
         return Ok(false);
     }
-    let mut args = vec!["ls-files".to_string(), "-z".to_string(), "--".to_string()];
-    args.extend(scope_pathspecs(exclusions));
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    Ok(!git(path, &args)?.trim_matches('\0').is_empty())
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(!matched_tracked_scoped(path, exclusions)?.is_empty());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut args = vec!["ls-files".to_string(), "-z".to_string(), "--".to_string()];
+        args.extend(scope_pathspecs(exclusions));
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        Ok(!git(path, &args)?.trim_matches('\0').is_empty())
+    }
 }
 
+#[cfg(target_os = "macos")]
+fn matched_tracked_scoped(path: &Path, exclusions: &[String]) -> Result<Vec<String>, String> {
+    let raw = git(path, &["ls-files", "-z"])?;
+    Ok(raw
+        .split('\0')
+        .filter(|entry| {
+            !entry.is_empty()
+                && exclusions
+                    .iter()
+                    .any(|scope| scope_contains_at(path, Path::new(entry), Path::new(scope)))
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn scope_pathspecs(exclusions: &[String]) -> Vec<String> {
     exclusions
         .iter()
@@ -3462,6 +3703,51 @@ fn scope_pathspecs(exclusions: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn push_exclude_scope_specs(path: &Path, scope: &str, pathspecs: &mut Vec<String>) {
+    let scope = scope.replace('\\', "/");
+    let scope = scope.trim_end_matches('/');
+    if scope.is_empty() {
+        return;
+    }
+    let mut variants = Vec::new();
+    let mut push_variant = |candidate: String| {
+        if !variants.contains(&candidate) {
+            variants.push(candidate);
+        }
+    };
+    push_variant(scope.to_string());
+    #[cfg(target_os = "macos")]
+    {
+        let insensitive = crate::path_identity::case_insensitive_volume(path);
+        if !scope.is_ascii() {
+            push_variant(crate::path_identity::macos_nfd(scope));
+            push_variant(crate::path_identity::macos_nfc(scope));
+        }
+        if let Some(disk_rel) = resolve_disk_relative(path, Path::new(scope)) {
+            push_variant(disk_rel.replace('\\', "/"));
+        }
+        for variant in variants {
+            if insensitive {
+                pathspecs.push(format!(":(exclude,literal,icase){variant}"));
+            } else {
+                pathspecs.push(format!(":(exclude,literal){variant}"));
+            }
+        }
+        return;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        for variant in variants {
+            if cfg!(windows) {
+                pathspecs.push(format!(":(exclude,literal,icase){variant}"));
+            } else {
+                pathspecs.push(format!(":(exclude,literal){variant}"));
+            }
+        }
+    }
+}
+
 fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<(), String> {
     if crate::workspace_view::is_bound(path) && exclusions.is_empty() {
         return crate::workspace_view::stage_project(
@@ -3469,6 +3755,8 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
             &private_git_dir(path).ok_or("Missing graph Git")?,
         );
     }
+    #[cfg(target_os = "macos")]
+    let tracked_host_metadata = capture_tracked_host_metadata(path, exclusions, local)?;
     // Runtime deliberately overrides Git's ignore rules for project files:
     // every ordinary project file becomes part of the node/source Git snapshot.
     // Only Grapher internals, Runtime data, managed environment scopes and
@@ -3480,23 +3768,21 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
         ":(exclude,glob)**/.grapher*/**".to_string(),
     ];
     pathspecs.extend(host_metadata_exclusions());
-    if let (Ok(root), Ok(data)) = (path.canonicalize(), data_root().canonicalize()) {
+    if let (Some(root), Some(data)) = (
+        resolved_existing_path(path),
+        resolved_existing_path(&data_root()),
+    ) {
         if let Ok(relative) = data.strip_prefix(&root) {
             if !relative.as_os_str().is_empty() {
                 let relative = relative.to_string_lossy().replace('\\', "/");
-                pathspecs.push(format!(":(exclude,literal){relative}"));
+                push_exclude_scope_specs(path, &relative, &mut pathspecs);
                 pathspecs.push(format!(":(exclude,glob){relative}/**"));
             }
         }
     }
-    pathspecs.extend(exclusions.iter().map(|scope| {
-        let scope = scope.replace('\\', "/");
-        if cfg!(windows) {
-            format!(":(exclude,literal,icase){scope}")
-        } else {
-            format!(":(exclude,literal){scope}")
-        }
-    }));
+    for scope in exclusions {
+        push_exclude_scope_specs(path, scope, &mut pathspecs);
+    }
     // Generated dependency/bytecode artifacts are not collected unless the
     // project's own Git tracks them (re-added after the add below).
     let tracked = project_tracked_paths(path);
@@ -3511,28 +3797,22 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
     args.extend(pathspecs);
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     if local {
+        #[cfg(target_os = "macos")]
+        git(path, &["read-tree", "--empty"])?;
         git(path, &args)?;
         if !exclusions.is_empty() {
             // Even when an agent staged a managed scope itself, a node snapshot
             // must not carry it. Keep the live files and stage only their removal.
-            let mut unstage = vec![
-                "rm".to_string(),
-                "-r".to_string(),
-                "--cached".to_string(),
-                "--ignore-unmatch".to_string(),
-                "-q".to_string(),
-                "--".to_string(),
-            ];
-            unstage.extend(scope_pathspecs(exclusions));
-            let unstage = unstage.iter().map(String::as_str).collect::<Vec<_>>();
-            git(path, &unstage)?;
+            unstage_scoped(path, exclusions)?;
         }
     } else {
+        #[cfg(target_os = "macos")]
+        repository_git(path, &["read-tree", "--empty"])?;
         repository_git(path, &args)?;
     }
     restore_tracked_generated(path, &tracked, exclusions, local)?;
     #[cfg(target_os = "macos")]
-    stage_tracked_host_metadata_impl(path, local)?;
+    stage_tracked_host_metadata_list(path, &tracked_host_metadata, local)?;
     Ok(())
 }
 
@@ -3542,14 +3822,14 @@ pub(crate) fn copy_ordinary_files(
     exclusions: &[String],
     runtime_data: &Path,
 ) -> Result<(), String> {
-    let source = source.canonicalize().map_err(|error| error.to_string())?;
-    let destination = destination
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
+    let source = resolved_existing_path(source)
+        .ok_or_else(|| format!("Cannot resolve source directory: {}", source.display()))?;
+    let destination = resolved_existing_path(destination)
+        .ok_or_else(|| format!("Cannot resolve destination directory: {}", destination.display()))?;
     let source_tracked = tracked_paths(&source)?;
     let destination_tracked = tracked_paths(&destination)?;
     let project_tracked = project_tracked_paths(&source);
-    let runtime_data = runtime_data.canonicalize().ok();
+    let runtime_data = resolved_existing_path(runtime_data);
     crate::native_copy::copy_tree(&source, &destination, |relative| {
         let Some(name) = relative.to_str().map(|name| {
             if cfg!(windows) {
@@ -3561,21 +3841,23 @@ pub(crate) fn copy_ordinary_files(
             return false;
         };
         crate::path_identity::is_runtime_metadata_path(relative)
-            || source_tracked.contains(&name)
-            || (is_generated_artifact(relative) && !project_tracked.contains(&name))
+            || tracked_path_matches(Some(&source), &source_tracked, &name)
+            || (is_generated_artifact(relative)
+                && !tracked_path_matches(Some(&source), &project_tracked, &name))
             || is_host_metadata(&name)
             || destination_tracked.iter().any(|tracked| {
-                tracked == &name
-                    || tracked.starts_with(&format!("{name}/"))
-                    || name.starts_with(&format!("{tracked}/"))
+                scope_contains_at(&destination, Path::new(&name), Path::new(tracked))
+                    || scope_contains_at(&destination, Path::new(tracked), Path::new(&name))
             })
             || exclusions
                 .iter()
                 .any(|scope| scope_contains_at(&source, relative, Path::new(scope)))
             || runtime_data.as_ref().is_some_and(|data| {
                 data != &source
-                    && data.starts_with(&source)
-                    && source.join(relative).starts_with(data)
+                    && data
+                        .strip_prefix(&source)
+                        .ok()
+                        .is_some_and(|data_rel| scope_contains_at(&source, relative, data_rel))
             })
     })
 }

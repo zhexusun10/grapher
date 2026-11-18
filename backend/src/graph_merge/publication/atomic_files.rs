@@ -149,11 +149,188 @@ fn matches_entries(
     Ok(blob == entry.blob || candidates.any(|candidate| blob == candidate.blob))
 }
 
-fn verify_target(
+fn same_publication_path(left: &str, right: &str, case_insensitive: bool) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !case_insensitive && left.is_ascii() && right.is_ascii() {
+            return false;
+        }
+        return crate::path_identity::macos_equivalent_path(
+            Path::new(left),
+            Path::new(right),
+            case_insensitive,
+        );
+    }
+    #[cfg(windows)]
+    {
+        return case_insensitive && left.eq_ignore_ascii_case(right);
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = case_insensitive;
+        false
+    }
+}
+
+fn alias_entry<'a>(
+    entries: &'a BTreeMap<String, Entry>,
+    relative: &str,
+    case_insensitive: bool,
+) -> Option<(&'a String, &'a Entry)> {
+    if let Some((key, exact)) = entries.get_key_value(relative) {
+        return Some((key, exact));
+    }
+    let mut matched: Option<(&'a String, &'a Entry)> = None;
+    for (candidate, entry) in entries {
+        if same_publication_path(candidate, relative, case_insensitive) {
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some((candidate, entry));
+        }
+    }
+    matched
+}
+
+fn disk_relative_matches(repository: &Path, target: &Path, expected_relative: &str) -> bool {
+    let Ok(repo_actual) = crate::path_identity::actual_path(repository) else {
+        return false;
+    };
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    let Ok(parent_actual) = crate::path_identity::actual_path(parent) else {
+        return false;
+    };
+    let Ok(parent_rel) = parent_actual.strip_prefix(&repo_actual) else {
+        return false;
+    };
+    let expected_path = Path::new(expected_relative);
+    let expected_parent = expected_path.parent().unwrap_or(Path::new(""));
+    if parent_rel.to_string_lossy().replace('\\', "/")
+        != expected_parent.to_string_lossy().replace('\\', "/")
+    {
+        return false;
+    }
+    let Some(expected_leaf) = expected_path.file_name() else {
+        return false;
+    };
+    // Read the directory entry directly instead of opening/canonicalizing
+    // `target`, which would follow a leaf symlink to its destination path.
+    let Ok(entries) = fs::read_dir(&parent_actual) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.file_name() == expected_leaf)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_untracked_host_metadata(
+    repository: &Path,
+    dir: &Path,
+    tracked: &BTreeSet<String>,
+    files: &mut Vec<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+) -> Result<bool, String> {
+    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child = entry.path();
+        let meta = fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if meta.is_dir() {
+            if entry.file_name() == ".git" {
+                return Ok(false);
+            }
+            if !collect_untracked_host_metadata(repository, &child, tracked, files, dirs)? {
+                return Ok(false);
+            }
+            dirs.push(child);
+            continue;
+        }
+        let rel = child
+            .strip_prefix(repository)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if workspace::is_host_metadata(&rel)
+            && !workspace::tracked_path_matches(Some(repository), tracked, &rel)
+        {
+            files.push(child);
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn strip_untracked_host_metadata(
+    repository: &Path,
+    dir: &Path,
+    tracked: Option<&std::cell::OnceCell<BTreeSet<String>>>,
+) -> Result<bool, String> {
+    if dir == repository
+        || crate::path_safety::real_child_path(repository, dir, false)?.is_none()
+    {
+        return Ok(false);
+    }
+    let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+    if !meta.is_dir() || crate::workspace_symlinks::is_link(&meta) {
+        return Ok(false);
+    }
+    let local_tracked;
+    let tracked = match tracked {
+        Some(cell) => cell.get_or_init(|| workspace::project_tracked_paths(repository)),
+        None => {
+            local_tracked = workspace::project_tracked_paths(repository);
+            &local_tracked
+        }
+    };
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    if !collect_untracked_host_metadata(repository, dir, tracked, &mut files, &mut dirs)? {
+        return Ok(false);
+    }
+    for file in files {
+        fs::remove_file(file).map_err(|e| e.to_string())?;
+    }
+    for subdir in dirs {
+        fs::remove_dir(subdir).map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+fn remove_publication_dir(
+    repository: &Path,
+    dir: &Path,
+    tracked: Option<&std::cell::OnceCell<BTreeSet<String>>>,
+) -> std::io::Result<()> {
+    match fs::remove_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(original) => {
+            #[cfg(target_os = "macos")]
+            {
+                if strip_untracked_host_metadata(repository, dir, tracked).unwrap_or(false) {
+                    return fs::remove_dir(dir);
+                }
+            }
+            let _ = (repository, tracked);
+            Err(original)
+        }
+    }
+}
+
+fn verify_target_candidates(
     repository: &Path,
     relative: &str,
-    old: Option<&Entry>,
-    new: Option<&Entry>,
+    candidates: &[Option<&Entry>],
 ) -> Result<(), String> {
     let parent = repository
         .join(relative)
@@ -163,7 +340,7 @@ fn verify_target(
     if parent != repository {
         crate::path_safety::real_child_path(repository, &parent, false)?;
     }
-    if matches_entries(repository, relative, &[old, new])? {
+    if matches_entries(repository, relative, candidates)? {
         Ok(())
     } else {
         Err(format!(
@@ -172,20 +349,61 @@ fn verify_target(
     }
 }
 
+fn verify_target(
+    repository: &Path,
+    relative: &str,
+    old: Option<&Entry>,
+    new: Option<&Entry>,
+) -> Result<(), String> {
+    verify_target_candidates(repository, relative, &[old, new])
+}
+
 fn ensure_parent(repository: &Path, relative: &Path) -> Result<PathBuf, String> {
     let mut parent = repository.to_path_buf();
     if let Some(ancestors) = relative.parent() {
         for component in ancestors.components() {
-            if !matches!(component, std::path::Component::Normal(_)) {
+            let std::path::Component::Normal(wanted_name) = component else {
                 return Err("Unsafe publication path".into());
-            }
-            parent.push(component);
+            };
+            let enclosing = parent.clone();
+            parent.push(wanted_name);
             match fs::symlink_metadata(&parent) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     fs::create_dir(&parent).map_err(|e| e.to_string())?
                 }
                 Err(error) => return Err(error.to_string()),
-                Ok(_) => {}
+                Ok(meta) => {
+                    #[cfg(any(target_os = "macos", windows))]
+                    if meta.is_dir() && !crate::workspace_symlinks::is_link(&meta) {
+                        if let Ok(actual) = crate::path_identity::actual_path(&parent) {
+                            if actual.file_name().is_some_and(|name| name != wanted_name) {
+                                let hop_parent = actual.parent().unwrap_or(&enclosing);
+                                let mut hop = hop_parent.join(format!(
+                                    ".grapher-publish-rename-{}-{}",
+                                    std::process::id(),
+                                    uuid::Uuid::new_v4()
+                                ));
+                                while fs::symlink_metadata(&hop).is_ok() {
+                                    hop = hop_parent.join(format!(
+                                        ".grapher-publish-rename-{}-{}",
+                                        std::process::id(),
+                                        uuid::Uuid::new_v4()
+                                    ));
+                                }
+                                #[cfg(target_os = "macos")]
+                                let _ = crate::workspace_cleanup::clear_macos_immutable_flags(
+                                    &actual, &meta,
+                                );
+                                fs::rename(&actual, &hop).map_err(|e| e.to_string())?;
+                                if let Err(error) = fs::rename(&hop, &parent) {
+                                    let _ = fs::rename(&hop, &actual);
+                                    return Err(error.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let _ = (&enclosing, &meta);
+                }
             }
             crate::path_safety::real_child_path(repository, &parent, false)?
                 .ok_or("Publication parent disappeared")?;
@@ -196,8 +414,7 @@ fn ensure_parent(repository: &Path, relative: &Path) -> Result<PathBuf, String> 
 
 fn temporary_path(parent: &Path, journal: &Path, relative: &str) -> PathBuf {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    journal
-        .canonicalize()
+    crate::path_identity::actual_path(journal)
         .unwrap_or_else(|_| journal.to_path_buf())
         .hash(&mut hash);
     relative.hash(&mut hash);
@@ -214,12 +431,25 @@ fn sync_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn install_file(
     repository: &Path,
     journal: &Path,
     staged: &Path,
     relative: &str,
     mode: &str,
+    before_rename: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    install_file_with_tracked(repository, journal, staged, relative, mode, None, before_rename)
+}
+
+fn install_file_with_tracked(
+    repository: &Path,
+    journal: &Path,
+    staged: &Path,
+    relative: &str,
+    mode: &str,
+    tracked: Option<&std::cell::OnceCell<BTreeSet<String>>>,
     before_rename: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let parent = ensure_parent(repository, Path::new(relative))?;
@@ -283,11 +513,20 @@ pub(super) fn install_file(
     if fs::symlink_metadata(&target)
         .is_ok_and(|m| m.is_dir() && !crate::workspace_symlinks::is_link(&m))
     {
-        fs::remove_dir(&target).map_err(|e| e.to_string())?;
+        remove_publication_dir(repository, &target, tracked).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        crate::workspace_cleanup::clear_macos_immutable_flags(&target, &metadata)
+            .map_err(|e| e.to_string())?;
+        if !disk_relative_matches(repository, &target, relative) {
+            crate::workspace_symlinks::remove(&target)?;
+        }
     }
     #[cfg(windows)]
     if let Ok(metadata) = fs::symlink_metadata(&target) {
         if crate::workspace_symlinks::is_link(&metadata)
+            || !disk_relative_matches(repository, &target, relative)
             || mode == "120000"
                 && fs::symlink_metadata(&temporary)
                     .is_ok_and(|temp| crate::workspace_symlinks::is_link(&temp) && temp.is_dir())
@@ -462,6 +701,7 @@ fn install_with(
     let changed = diff_paths(repository, input, result)?;
     let old = entries(repository, input, &changed)?;
     let new = entries(repository, result, &changed)?;
+    let case_insensitive = crate::path_identity::case_insensitive_volume(repository);
     // `new` contains only changed result entries; deleted paths have no entry.
     // Neither the staging index nor checkout needs unrelated project files.
     let staged = stage_entries(repository, journal, &new)?;
@@ -473,6 +713,7 @@ fn install_with(
         .filter(|p| old.contains_key(*p) && !new.contains_key(*p))
         .collect();
     removed.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    let tracked_cell = std::cell::OnceCell::new();
     for relative in removed {
         crate::process_control::check_current_owner_stop()?;
         let target = repository.join(relative);
@@ -499,9 +740,22 @@ fn install_with(
         {
             continue;
         }
-        verify_target(repository, relative, old.get(relative), None)?;
+        let new_candidate = alias_entry(&new, relative, case_insensitive);
+        verify_target_candidates(
+            repository,
+            relative,
+            &[old.get(relative), None, new_candidate.map(|(_, entry)| entry)],
+        )?;
+        // An entry renamed only in case or Unicode normalization is replaced in
+        // the install pass below, so it stays on disk until its replacement
+        // temporary is staged and verified.
+        if new_candidate.is_some() {
+            continue;
+        }
         match fs::symlink_metadata(&target) {
-            Ok(metadata) if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) => {
+            Ok(metadata)
+                if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) =>
+            {
                 crate::workspace_symlinks::remove(&target)?;
                 sync_directory(parent)?;
             }
@@ -510,25 +764,37 @@ fn install_with(
             Err(e) => return Err(e.to_string()),
         }
         let mut empty = parent;
-        while empty != repository && fs::remove_dir(empty).is_ok() {
+        while empty != repository
+            && remove_publication_dir(repository, empty, Some(&tracked_cell)).is_ok()
+        {
             empty = empty.parent().ok_or("Missing publication ancestor")?;
         }
     }
     for relative in changed.iter().filter(|p| new.contains_key(*p)) {
         crate::process_control::check_current_owner_stop()?;
+        let old_alias = alias_entry(&old, relative, case_insensitive).map(|(_, entry)| entry);
         // Validate before copying and again afterward, including files that
         // have already reached the result during an interrupted attempt.
         // A missing parent is created by install_file only after this check.
-        verify_target(repository, relative, old.get(relative), new.get(relative))?;
-        install_file(
+        verify_target_candidates(
+            repository,
+            relative,
+            &[old.get(relative), old_alias, new.get(relative)],
+        )?;
+        install_file_with_tracked(
             repository,
             journal,
             &staged.join(relative),
             relative,
             &new[relative].mode,
+            Some(&tracked_cell),
             &mut |temporary| {
                 before_rename(temporary)?;
-                verify_target(repository, relative, old.get(relative), new.get(relative))
+                verify_target_candidates(
+                    repository,
+                    relative,
+                    &[old.get(relative), old_alias, new.get(relative)],
+                )
             },
         )?;
     }
@@ -1058,5 +1324,166 @@ mod tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         install(&source, &journal, &input, &result).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "published");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_install_and_retry_handle_case_and_nfd_renames_with_ds_store() {
+        let (_temp, source, node, journal, _) = fixture();
+        fs::create_dir(source.join("Caf\u{00e9}")).unwrap();
+        fs::write(source.join("Caf\u{00e9}/note.txt"), "v1").unwrap();
+        fs::write(source.join("README.md"), "readme v1").unwrap();
+        fs::create_dir(source.join("PureDeleted")).unwrap();
+        fs::write(source.join("PureDeleted/gone.txt"), "gone").unwrap();
+        fs::create_dir(source.join("DirToFile")).unwrap();
+        fs::write(source.join("DirToFile/inside.txt"), "inside").unwrap();
+        git(&source, &["add", "-A"]).unwrap();
+        git(&source, &["commit", "-qm", "unicode base"]).unwrap();
+        let input = workspace::snapshot_repository(&source).unwrap();
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let node = node.with_file_name("rename-node");
+        workspace::prepare_with_merger_expected_for_run(
+            &source,
+            &node,
+            &input,
+            &[],
+            "",
+            Some(&run),
+            || Err("unexpected conflict".into()),
+        )
+        .unwrap();
+
+        // Rename Caf\u{00e9} -> cafe\u{0301}, README.md -> readme.md, delete PureDeleted/,
+        // and replace DirToFile/ with a regular file.
+        let tmp_dir = node.join(".tmp-dir");
+        fs::rename(node.join("Caf\u{00e9}"), &tmp_dir).unwrap();
+        let renamed_dir = if crate::path_identity::case_insensitive_volume(&node) {
+            "cafe\u{0301}"
+        } else {
+            "Cafe\u{0301}"
+        };
+        fs::rename(&tmp_dir, node.join(renamed_dir)).unwrap();
+        fs::write(node.join(renamed_dir).join("note.txt"), "v2").unwrap();
+        fs::remove_dir_all(node.join("PureDeleted")).unwrap();
+        fs::remove_dir_all(node.join("DirToFile")).unwrap();
+        fs::write(node.join("DirToFile"), "now a file").unwrap();
+
+        if crate::path_identity::case_insensitive_volume(&node) {
+            let tmp_readme = node.join(".tmp-readme");
+            fs::rename(node.join("README.md"), &tmp_readme).unwrap();
+            fs::rename(&tmp_readme, node.join("readme.md")).unwrap();
+            fs::write(node.join("readme.md"), "readme v2").unwrap();
+        }
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+
+        // Finder leaves untracked .DS_Store / ._ files inside source dirs that should be
+        // renamed, purely deleted, or replaced by a file.
+        fs::write(source.join("Caf\u{00e9}/.DS_Store"), "finder").unwrap();
+        fs::write(source.join("PureDeleted/.DS_Store"), "finder").unwrap();
+        fs::write(source.join("DirToFile/.DS_Store"), "finder").unwrap();
+        fs::write(source.join("DirToFile/._inside.txt"), "appledouble").unwrap();
+
+        // Interrupted first attempt before rename must keep README.md on disk.
+        assert!(install_with(&source, &journal, &input, &result, &mut |_| {
+            if crate::path_identity::case_insensitive_volume(&source) {
+                assert!(
+                    source.join("README.md").is_file(),
+                    "first attempt must not delete alias target before staging/verification completes"
+                );
+            }
+            Err("interrupted before rename".into())
+        })
+        .is_err());
+        assert_eq!(fs::read_to_string(source.join("README.md")).unwrap(), "readme v1");
+
+        install(&source, &journal, &input, &result).unwrap();
+        assert!(!source.join("PureDeleted").exists());
+        assert_eq!(fs::read_to_string(source.join("DirToFile")).unwrap(), "now a file");
+        if crate::path_identity::case_insensitive_volume(&source) {
+            assert!(disk_relative_matches(&source, &source.join("readme.md"), "readme.md"));
+        }
+
+        // Retry after completed install must verify without deleting already-installed readme.md.
+        install_with(&source, &journal, &input, &result, &mut |_| {
+            if crate::path_identity::case_insensitive_volume(&source) {
+                assert!(
+                    source.join("readme.md").is_file(),
+                    "retry must not delete already-installed alias target before atomic replace"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            workspace::live_tree_scoped(&source, &[]).unwrap(),
+            super::super::tree(&source, &result).unwrap()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_dir_removal_never_deletes_unrecorded_or_tracked_ds_store() {
+        let (_temp, source, _, journal, _) = fixture();
+        fs::create_dir(source.join("TrackedDir")).unwrap();
+        fs::write(source.join("TrackedDir/.DS_Store"), "tracked meta").unwrap();
+        fs::write(source.join("TrackedDir/file.txt"), "v1").unwrap();
+        git(&source, &["add", "-A"]).unwrap();
+        git(&source, &["commit", "-qm", "tracked ds_store"]).unwrap();
+        let tracked = workspace::project_tracked_paths(&source);
+        assert!(tracked.contains("TrackedDir/.DS_Store"));
+
+        // Attempting to remove TrackedDir with strip helper must refuse because .DS_Store is tracked.
+        let cell = std::cell::OnceCell::new();
+        assert!(!strip_untracked_host_metadata(&source, &source.join("TrackedDir"), Some(&cell)).unwrap());
+        assert!(source.join("TrackedDir/.DS_Store").is_file());
+        let _ = journal;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_retry_preserves_already_installed_case_or_nfd_renamed_symlink() {
+        let (_temp, source, node, journal, _) = fixture();
+        fs::create_dir(source.join("TargetDir")).unwrap();
+        fs::write(source.join("TargetDir/item.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink("TargetDir", source.join("Caf\u{00e9}Link")).unwrap();
+        git(&source, &["add", "-A"]).unwrap();
+        git(&source, &["commit", "-qm", "symlink base"]).unwrap();
+        let input = workspace::snapshot_repository(&source).unwrap();
+
+        let node = node.with_file_name("link-node");
+        let run = uuid::Uuid::new_v4().to_string();
+        workspace::prepare_with_merger_expected_for_run(
+            &source,
+            &node,
+            &input,
+            &[],
+            "",
+            Some(&run),
+            || Err("unexpected conflict".into()),
+        )
+        .unwrap();
+
+        let renamed = if crate::path_identity::case_insensitive_volume(&node) {
+            "cafe\u{0301}link"
+        } else {
+            "Cafe\u{0301}Link"
+        };
+        fs::remove_file(node.join("Caf\u{00e9}Link")).unwrap();
+        std::os::unix::fs::symlink("TargetDir", node.join(renamed)).unwrap();
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+
+        install(&source, &journal, &input, &result).unwrap();
+        assert!(disk_relative_matches(&source, &source.join("Caf\u{00e9}Link"), renamed));
+
+        install_with(&source, &journal, &input, &result, &mut |_| {
+            assert!(
+                fs::symlink_metadata(source.join(renamed))
+                    .is_ok_and(|meta| meta.file_type().is_symlink()),
+                "retry must not delete already-installed renamed symlink"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 }

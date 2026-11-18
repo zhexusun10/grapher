@@ -18,6 +18,18 @@ pub(crate) use runtime_paths::{RuntimePath, RuntimePaths};
 mod home_fork;
 pub(crate) use rooted::RootScope;
 
+fn canonical_host_path(path: &Path) -> Result<PathBuf, String> {
+    let resolved = path.canonicalize().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::path_identity::actual_path(&resolved).unwrap_or(resolved))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(resolved)
+    }
+}
+
 type Entries = BTreeMap<String, Entry>;
 
 #[derive(Clone, Copy)]
@@ -33,24 +45,66 @@ enum Collection<'a> {
 }
 
 impl Collection<'_> {
-    fn note_untouched(self, path: &Path) -> Result<(), String> {
+    fn note_untouched(self, root: Option<&Path>, path: &Path) -> Result<(), String> {
         if let Self::Inspect(paths) = self {
-            paths.borrow_mut().insert(inspection_key(&path_name(path)?));
+            paths
+                .borrow_mut()
+                .insert(inspection_key_at(root, &path_name(path)?));
         }
         Ok(())
     }
 }
 
-// Match native Windows aliases without normalizing any persisted manifest.
-fn inspection_key(name: &str) -> String {
+// Match native volume aliases without normalizing any persisted manifest.
+fn inspection_key_at(root: Option<&Path>, name: &str) -> String {
     if cfg!(windows) {
         name.to_lowercase()
     } else {
-        name.into()
+        #[cfg(target_os = "macos")]
+        {
+            let insensitive = root.is_some_and(crate::path_identity::case_insensitive_volume);
+            name.split('/')
+                .map(|part| crate::path_identity::macos_fold_component(part, insensitive))
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = root;
+            name.into()
+        }
+    }
+}
+
+fn lookup_entry_alias<'a>(
+    entries: &'a Entries,
+    root: Option<&Path>,
+    name: &str,
+) -> Result<Option<(&'a String, &'a Entry)>, ()> {
+    if let Some(exact) = entries.get_key_value(name) {
+        return Ok(Some(exact));
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let key = inspection_key_at(root, name);
+        let mut aliases = entries
+            .iter()
+            .filter(|(candidate, _)| inspection_key_at(root, candidate) == key);
+        let first = aliases.next();
+        if aliases.next().is_some() {
+            return Err(());
+        }
+        Ok(first)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = root;
+        Ok(None)
     }
 }
 
 fn untouched_blocker<'a>(
+    root: Option<&Path>,
     untouched: &'a BTreeSet<String>,
     name: &str,
     directory: bool,
@@ -58,7 +112,7 @@ fn untouched_blocker<'a>(
     if untouched.is_empty() {
         return None;
     }
-    let key = inspection_key(name);
+    let key = inspection_key_at(root, name);
     let mut ancestor = key.as_str();
     loop {
         if let Some(path) = untouched.get(ancestor) {
@@ -496,7 +550,7 @@ impl Files {
             ));
         }
         if self.is_excluded(root, name) || path == self.excluded_data {
-            collection.note_untouched(name)?;
+            collection.note_untouched(Some(root), name)?;
             return Ok(());
         }
         let metadata = fs::symlink_metadata(path)
@@ -518,20 +572,20 @@ impl Files {
                 // Some Windows reparse points expose no readable link target.
                 // There is no content to inherit, so pass the live entry through
                 // untouched instead of failing the whole environment snapshot.
-                collection.note_untouched(Path::new(&name))?;
+                collection.note_untouched(Some(root), Path::new(&name))?;
                 eprintln!(
                     "Skipping unreadable environment link (not inherited): {}",
                     path.display()
                 );
                 return Ok(());
             };
-            let Ok(resolved) = path.canonicalize() else {
+            let Ok(resolved) = canonical_host_path(path) else {
                 // The system cannot resolve the target: a broken junction, a
                 // link cycle, or inaccessible target (for example Chrome's
                 // INetCache\Content.IE5 junction, whose malformed print name
                 // makes Windows report path-not-found). Pass the live entry
                 // through untouched instead of failing the snapshot.
-                collection.note_untouched(Path::new(&name))?;
+                collection.note_untouched(Some(root), Path::new(&name))?;
                 eprintln!(
                     "Skipping unresolvable environment link (not inherited): {}",
                     path.display()
@@ -652,9 +706,7 @@ impl Files {
         parents: &[String],
         checked: &RefCell<BTreeSet<String>>,
     ) -> Result<Version, String> {
-        let root = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let root = canonical_host_path(workspace)?;
         let mut entries = Entries::new();
         for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut entries, Collection::Capture(checked))?;
@@ -861,9 +913,7 @@ impl Files {
         if value.head != head {
             return Err("Feedback file snapshot does not match its Git head".into());
         }
-        let root = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let root = canonical_host_path(workspace)?;
         let mut entries = Entries::new();
         let checked = RefCell::default();
         for path in self.scoped_paths(&root)? {
@@ -944,9 +994,7 @@ impl Files {
                 }
             }
         }
-        let root = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
+        let root = canonical_host_path(workspace)?;
         let mut current = Entries::new();
         let untouched = RefCell::new(BTreeSet::new());
         for path in self.scoped_paths(&root)? {
@@ -958,9 +1006,12 @@ impl Files {
         // traversal: removal precedes creation. Links remain forbidden, even
         // when the snapshot would replace them with a directory.
         for (name, entry) in &desired {
-            if let Some(blocker) =
-                untouched_blocker(&untouched, name, matches!(entry, Entry::Directory { .. }))
-            {
+            if let Some(blocker) = untouched_blocker(
+                Some(&root),
+                &untouched,
+                name,
+                matches!(entry, Entry::Directory { .. }),
+            ) {
                 return Err(format!(
                     "Cannot restore managed path {}: conflicts with untouched excluded cache or unreadable/unresolvable link at {blocker}; preserving live state",
                     root.join(name).display()
@@ -1001,7 +1052,7 @@ impl Files {
             previous
                 .entries
                 .keys()
-                .filter(|name| untouched_blocker(&untouched, name, true).is_none())
+                .filter(|name| untouched_blocker(Some(&root), &untouched, name, true).is_none())
                 .map(|name| root.join(name))
                 .collect()
         } else {

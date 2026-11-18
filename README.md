@@ -91,7 +91,7 @@ Goal → Planner → Compiled Graph → Deterministic Rust Runtime
 | **Workspace** | Direct in your project | Adaptive at idle boundaries: shared source for ≤3 dispatched nodes, private workspaces for >3 when isolation is enabled |
 | **Scheduling** | Sequential | Dependency-aware, bounded parallelism in Rust |
 
-> **Tip:** Not sure which mode fits? Enable **Auto** in **Settings → Harness settings** (turn off *Hide Auto mode*) to let the Partitioner route each goal automatically, or toggle **Enable Feedback** to unlock bounded rework edges. See the [User Guide](docs/user-guide.md) for workspace isolation and batch delivery details.
+> **Tip:** Not sure which mode fits? Enable **Auto** in **Settings → UI settings** (turn off *Hide Auto mode*) to let the Partitioner route each goal automatically, or toggle **Enable Feedback** in **Settings → Harness settings** to unlock bounded rework edges. See the [User Guide](docs/user-guide.md) for workspace isolation and batch delivery details.
 
 ## How it works
 

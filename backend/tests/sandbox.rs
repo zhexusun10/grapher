@@ -343,3 +343,70 @@ fn standalone_workspace_exposes_project_git_while_protecting_source() {
         "sandbox allowed reading source repository"
     );
 }
+
+#[test]
+fn seatbelt_allows_workspace_when_configured_with_case_alias() {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let source = base.join("source");
+    let root = base.join(".grapher-worktrees");
+    let current = root.join("run/CurrentSlot");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&current).unwrap();
+    fs::write(source.join("secret.txt"), "top secret").unwrap();
+    fs::write(current.join("marker.txt"), "workspace ok").unwrap();
+
+    // If volume folds case, pass mismatched case spelling to sandbox profile builder.
+    let alias_current = if current.with_file_name("currentslot").exists() {
+        root.join("run/currentslot")
+    } else {
+        current.clone()
+    };
+    let alias_root = if base.join(".GRAPHER-WORKTREES").exists() {
+        base.join(".GRAPHER-WORKTREES")
+    } else {
+        root.clone()
+    };
+    let profile = base.join("profile.sb");
+    sandbox::write_graph_profile(&profile, &source, &alias_root, &alias_current).unwrap();
+
+    let ok = run(
+        &profile,
+        &current,
+        "test \"$(/bin/cat marker.txt)\" = 'workspace ok' && echo written > written.txt",
+        &[],
+    );
+    assert!(
+        ok.status.success(),
+        "workspace read/write blocked under Seatbelt with case alias: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(fs::read_to_string(current.join("written.txt")).unwrap(), "written\n");
+    assert!(!run(&profile, &current, "/bin/cat \"$1/secret.txt\"", &[&source])
+        .status
+        .success());
+}
+
+#[test]
+fn seatbelt_rejects_nested_symlink_loop_back_to_worktree_root() {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let source = base.join("source");
+    let root = base.join(".grapher-worktrees");
+    let real_slot = root.join("run/real");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&real_slot).unwrap();
+    std::os::unix::fs::symlink(&root, root.join("escape")).unwrap();
+    let aliased_through_symlink = root.join("escape/run/real");
+    let profile = base.join("escape.sb");
+    let error =
+        sandbox::write_graph_profile(&profile, &source, &root, &aliased_through_symlink).unwrap_err();
+    assert!(error.contains("must use real directories"), "{error}");
+
+    let root_symlink = base.join("worktrees-alias");
+    std::os::unix::fs::symlink(&root, &root_symlink).unwrap();
+    let error =
+        sandbox::write_graph_profile(&profile, &source, &root, &root_symlink.join("run/real"))
+            .unwrap_err();
+    assert!(error.contains("outside"), "{error}");
+}

@@ -79,6 +79,16 @@ for (const language of ["en", "zh-CN"]) {
       for (const [width, height] of [[1440, 900], [1280, 768], [1100, 768], [1024, 768], [961, 768], [960, 768], [768, 600], [390, 844], [320, 568], [900, 420]]) {
         await page.setViewportSize({ width, height });
         await expectHomeLayout(page);
+        if (width > 720) {
+          // Wait for the sidebar width transition when returning from <= 720px (e.g. 320 -> 900).
+          await expect.poll(() => page.locator(".sidebar").evaluate(el => Math.round(el.getBoundingClientRect().width)), {
+            message: `expanded sidebar stays 260px at ${width}x${height}`,
+          }).toBe(260);
+          if (width < 1024) {
+            const composerWidth = await page.locator(".landing-screen .prompt-box-container").evaluate(el => el.getBoundingClientRect().width);
+            assert.ok(composerWidth < 680, `composer narrows instead of sidebar at ${width}px: ${composerWidth}`);
+          }
+        }
         if (process.env.GRAPHER_UI_SCREENSHOTS) {
           await mkdir(process.env.GRAPHER_UI_SCREENSHOTS, { recursive: true });
           await page.screenshot({ path: join(process.env.GRAPHER_UI_SCREENSHOTS, `${language}-home-${width}.png`) });

@@ -13,7 +13,7 @@
 
 More agents help only when work can progress independently. Repeatedly splitting edits to the same files can add conflicts instead of useful parallelism.
 
-In **Settings → Harness settings**, **Enable Feedback** defaults off; the other toggles default on. Saved choices are preserved. **Hide Auto mode** keeps only Serial and Graph in the composer and hides Partitioner configuration without deleting its saved settings. If Auto is selected, it switches to Graph; an explicit Serial or Graph choice stays unchanged. This visibility preference applies only in this browser; turn it off and save to show Auto and Partitioner again.
+In **Settings → Harness settings**, **Enable Feedback** defaults off; the other toggles default on. Saved choices are preserved. In **Settings → UI settings**, **Hide Auto mode** defaults on, keeps only Serial and Graph in the composer, and hides Partitioner configuration without deleting its saved settings. If Auto is selected, it switches to Graph; an explicit Serial or Graph choice stays unchanged. This visibility preference applies only in this browser; turn it off and save to show Auto and Partitioner again.
 
 ## Refresh local Pi models
 

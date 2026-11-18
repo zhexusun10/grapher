@@ -1,8 +1,9 @@
 // Cross-platform filesystem identity for model-facing path adaptation.
 // This module compares real paths, converts Node/Git Bash spellings and maps
 // source-project paths to the current private workspace. It is not a sandbox.
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const caseCache = new Map();
@@ -18,31 +19,157 @@ export function hostPath(value) {
   return value;
 }
 
+function swapAsciiCase(value) {
+  return value.replace(/[A-Za-z]/g, character =>
+    character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase());
+}
+
+function lstatSafe(target) {
+  try {
+    return lstatSync(target, { bigint: true });
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Whether the volume containing an existing directory folds letter case.
  * macOS can use either APFS mode; Windows is always case-insensitive.
- * The probe compares the status of the same path spelled with swapped case.
+ * Probes stay on the target volume's device so mount points never borrow the
+ * parent filesystem's case behavior.
  */
 export function isCaseInsensitive(directory) {
   if (process.platform === 'win32') return true;
-  if (process.platform !== 'darwin') return false;
-  const key = resolve(hostPath(directory));
-  if (caseCache.has(key)) return caseCache.get(key);
-  let result = false;
-  try {
-    const original = statSync(key, { bigint: true });
-    const swapped = key.replace(/[A-Za-z]/g, character =>
-      character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase());
-    if (swapped !== key && existsSync(swapped)) {
-      const other = statSync(swapped, { bigint: true });
-      result = original.dev === other.dev && original.ino === other.ino;
+  if (process.platform !== 'darwin' || typeof directory !== 'string' || !directory) return false;
+  let cursor = resolve(toHostInput(directory));
+  while (true) {
+    if (lstatSafe(cursor)) {
+      let existing = cursor;
+      try {
+        existing = hostPath(realpathSync.native(existing));
+      } catch {}
+      let dirStats = lstatSafe(existing);
+      let dir = existing;
+      if (!dirStats || !dirStats.isDirectory()) {
+        dir = dirname(existing);
+        try {
+          dir = hostPath(realpathSync.native(dir));
+        } catch {}
+        dirStats = lstatSafe(dir);
+      }
+      if (!dirStats || !dirStats.isDirectory()) return false;
+      const devKey = dirStats.dev.toString();
+      if (caseCache.has(devKey)) return caseCache.get(devKey);
+
+      const targetDev = dirStats.dev;
+      let probeDir = dir;
+      let mountRoot = dir;
+      let resolvedValue;
+      while (true) {
+        const parent = dirname(probeDir);
+        const parentStats = parent !== probeDir ? lstatSafe(parent) : undefined;
+        const name = basename(probeDir);
+        if (parentStats && parentStats.dev === targetDev && /[A-Za-z]/.test(name)) {
+          const entryStats = lstatSafe(probeDir);
+          const swappedStats = lstatSafe(join(parent, swapAsciiCase(name)));
+          resolvedValue = Boolean(
+            entryStats && swappedStats && swappedStats.dev === entryStats.dev && swappedStats.ino === entryStats.ino,
+          );
+          break;
+        }
+        try {
+          let chosen;
+          for (const entry of readdirSync(probeDir)) {
+            if (!/[A-Za-z]/.test(entry)) continue;
+            const entryStats = lstatSafe(join(probeDir, entry));
+            if (!entryStats || entryStats.dev !== targetDev) continue;
+            if (entryStats.isDirectory()) {
+              chosen = [entry, entryStats];
+              break;
+            }
+            // Regular/link hardlinks can share an inode across distinct ASCII-case names;
+            // only single-link non-directories prove same-entry case folding.
+            if (!chosen && entryStats.nlink === 1n) {
+              chosen = [entry, entryStats];
+            }
+          }
+          if (chosen) {
+            const [entry, entryStats] = chosen;
+            const swappedStats = lstatSafe(join(probeDir, swapAsciiCase(entry)));
+            resolvedValue = Boolean(
+              swappedStats && swappedStats.dev === entryStats.dev && swappedStats.ino === entryStats.ino,
+            );
+            break;
+          }
+        } catch {}
+        if (!parentStats || parentStats.dev !== targetDev || parent === probeDir) {
+          mountRoot = probeDir;
+          break;
+        }
+        probeDir = parent;
+      }
+      if (resolvedValue === undefined) {
+        let hasCliTools = false;
+        try {
+          // Only invoke /usr/bin/python3 when Xcode/CommandLineTools is present;
+          // on a clean macOS machine the stub binary otherwise triggers an install UI dialog.
+          execFileSync('/usr/bin/xcode-select', ['-p'], { stdio: 'ignore', timeout: 1000 });
+          hasCliTools = true;
+        } catch {}
+        if (hasCliTools) {
+          try {
+            execFileSync(
+              '/usr/bin/python3',
+              [
+                '-c',
+                'import ctypes, sys; r = ctypes.CDLL(None).pathconf(sys.argv[1].encode(), 11); sys.exit(0 if r == 0 else 1 if r == 1 else 2)',
+                mountRoot,
+              ],
+              { stdio: 'ignore', timeout: 2000 },
+            );
+            resolvedValue = true;
+          } catch (error) {
+            if (error?.status === 1) resolvedValue = false;
+          }
+        }
+      }
+      if (resolvedValue !== undefined) {
+        caseCache.set(devKey, resolvedValue);
+        return resolvedValue;
+      }
+      return false;
     }
-  } catch {
-    // A missing probe directory is not proof either way. Callers fall back to
-    // exact matching, which is the conservative behavior.
+    const parent = dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
   }
-  caseCache.set(key, result);
-  return result;
+}
+
+export function resolveSourceCaseInsensitive(workspaceCaseInsensitive, explicit) {
+  if (typeof explicit === 'boolean') return explicit;
+  if (process.env.GRAPHER_SOURCE_CASE_INSENSITIVE === '1') return true;
+  if (process.env.GRAPHER_SOURCE_CASE_INSENSITIVE === '0') return false;
+  return workspaceCaseInsensitive;
+}
+
+export function relativePreservingCase(root, target, caseInsensitive) {
+  const resolvedRoot = resolve(toHostInput(root));
+  const resolvedTarget = resolve(toHostInput(target));
+  const rootParsed = parse(resolvedRoot);
+  const targetParsed = parse(resolvedTarget);
+  if (foldPath(rootParsed.root, caseInsensitive) !== foldPath(targetParsed.root, caseInsensitive)) {
+    return undefined;
+  }
+  const splitPattern = process.platform === 'win32' ? /[\\/]+/ : /\/+/;
+  const rootParts = resolvedRoot.slice(rootParsed.root.length).split(splitPattern).filter(Boolean);
+  const targetParts = resolvedTarget.slice(targetParsed.root.length).split(splitPattern).filter(Boolean);
+  if (targetParts.length < rootParts.length) return undefined;
+  for (let i = 0; i < rootParts.length; i++) {
+    if (foldPath(targetParts[i], caseInsensitive) !== foldPath(rootParts[i], caseInsensitive)) {
+      return undefined;
+    }
+  }
+  return targetParts.slice(rootParts.length).join(sep);
 }
 
 export function foldPath(value, caseInsensitive) {
@@ -69,7 +196,7 @@ function statusIdentity(left, right) {
   try {
     const a = statSync(left, { bigint: true });
     const b = statSync(right, { bigint: true });
-    if (a.dev === b.dev && a.ino === b.ino) return true;
+    return a.dev === b.dev && a.ino === b.ino;
   } catch {}
   return undefined;
 }
@@ -87,7 +214,6 @@ export function samePath(left, right) {
   const actualB = actualPath(b);
   if (actualA === actualB) return true;
   const insensitive = process.platform === 'win32'
-    || isCaseInsensitive(dirname(a)) || isCaseInsensitive(dirname(b))
     || isCaseInsensitive(actualA) || isCaseInsensitive(actualB);
   return foldPath(actualA, insensitive) === foldPath(actualB, insensitive);
 }
@@ -95,7 +221,7 @@ export function samePath(left, right) {
 /** Stable key for de-duplicating resources on case/Unicode-insensitive volumes. */
 export function pathKey(value) {
   const path = actualPath(value);
-  const insensitive = process.platform === 'win32' || isCaseInsensitive(dirname(path)) || isCaseInsensitive(path);
+  const insensitive = process.platform === 'win32' || isCaseInsensitive(path);
   return foldPath(hostPath(path), insensitive).replace(new RegExp(`\\${sep}+$`), '');
 }
 
@@ -192,7 +318,13 @@ export function pathWithin(value, root, caseInsensitive = isCaseInsensitive(root
  * fallback. Internal paths use host spelling; non-project paths are returned
  * unchanged in the caller's spelling (external host paths).
  */
-export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCaseInsensitive(workspace)) {
+export function mapPhysicalPath(
+  value,
+  workspace,
+  roots,
+  workspaceCaseInsensitive = isCaseInsensitive(workspace),
+  sourceCaseInsensitive = workspaceCaseInsensitive,
+) {
   if (typeof value !== 'string') return value;
   const path = resolve(toHostInput(value));
   // Paths already in the target workspace need no source-prefix work. This
@@ -208,7 +340,8 @@ export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCas
   // leaves. Source roots are probed only on Windows; elsewhere the source can
   // be inaccessible inside the execution sandbox and must not be required.
   const actual = actualPath(path);
-  if (inside(relative(actualPath(workspacePath), actual))) return actual;
+  const actualWorkspace = actualPath(workspacePath);
+  if (inside(relative(actualWorkspace, actual))) return actual;
   if (process.platform === 'win32') {
     for (const root of roots) {
       // MSYS roots are matched lexically above; resolving them as Win32 paths
@@ -219,10 +352,15 @@ export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCas
       if (inside(suffix)) return resolve(workspace, suffix);
     }
   }
-  const foldedPath = foldPath(path, caseInsensitive);
+  const wsSuffix = relativePreservingCase(workspacePath, path, workspaceCaseInsensitive);
+  if (wsSuffix !== undefined) return resolve(workspacePath, wsSuffix);
+  if (actual !== path || actualWorkspace !== workspacePath) {
+    const actualSuffix = relativePreservingCase(actualWorkspace, actual, workspaceCaseInsensitive);
+    if (actualSuffix !== undefined) return resolve(actualWorkspace, actualSuffix);
+  }
   for (const root of roots) {
-    const suffix = relative(foldPath(resolve(root), caseInsensitive), foldedPath);
-    if (inside(suffix)) return resolve(workspace, suffix);
+    const suffix = relativePreservingCase(root, path, sourceCaseInsensitive);
+    if (suffix !== undefined) return resolve(workspace, suffix);
   }
   return value;
 }

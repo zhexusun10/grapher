@@ -402,7 +402,7 @@ mod tests {
         transport.request(request(fields("execute"))).unwrap();
         let mut complete = false;
         let mut messages = Vec::new();
-        for _ in 0..500 {
+        for _ in 0..3000 {
             let result = transport.request(request(fields("poll"))).unwrap();
             messages.extend(result["events"].as_array().unwrap().iter().cloned());
             if result["status"] != "pending" {

@@ -169,6 +169,9 @@ fn unlink(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     crate::workspace_cleanup::clear_readonly_attribute(path, &metadata)
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata)
+        .map_err(|e| e.to_string())?;
     fs::remove_file(path).map_err(|e| e.to_string())
 }
 

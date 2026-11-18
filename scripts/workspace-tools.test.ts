@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -23,9 +23,11 @@ test('file tools map source aliases, file URLs and case/Unicode variants', () =>
       const msys = `/${source[0].toLowerCase()}${source.slice(2).replaceAll('\\', '/')}`;
       assert.equal(map(`${msys}/marker`), join(workspace, 'marker'));
     }
-    if (process.platform === 'darwin' || process.platform === 'win32') {
+    if (process.platform === 'win32' || isCaseInsensitive(workspace)) {
       assert.equal(isCaseInsensitive(workspace), true);
       assert.equal(map(join(source.toLowerCase(), 'marker')), join(workspace, 'marker'));
+    } else if (process.platform === 'darwin') {
+      assert.equal(map(join(source.toLowerCase(), 'marker')), join(source.toLowerCase(), 'marker'));
     }
     const unicodeSource = join(root, 'caf\u00e9');
     const unicodeWorkspace = join(root, 'ws\u00e9');
@@ -64,6 +66,36 @@ test('file tools convert registered Git Bash mounts such as /tmp', { skip: proce
     const map = workspacePathMapper(workspace, source);
     assert.equal(map(`${msysSource}/marker`), join(workspace, 'marker'));
     assert.equal(map(`${msysExternal}/data.csv`), join(external, 'data.csv'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('file tools preserve suffix case and honor sourceCaseInsensitive independently', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-tool-suffix-')));
+  try {
+    const source = join(root, 'SourceRoot');
+    const workspace = join(root, 'WorkspaceRoot');
+    mkdirSync(source);
+    mkdirSync(workspace);
+    const insensitive = workspacePathMapper(workspace, source, source, {
+      workspaceCaseInsensitive: true,
+      sourceCaseInsensitive: true,
+    });
+    assert.equal(
+      insensitive(join(root, 'sourceroot', 'NestedDir', 'MyClass.ts')),
+      join(workspace, 'NestedDir', 'MyClass.ts'),
+    );
+    const sensitiveSource = workspacePathMapper(workspace, source, source, {
+      workspaceCaseInsensitive: true,
+      sourceCaseInsensitive: false,
+    });
+    const mismatched = join(root, 'sourceroot', 'NestedDir', 'MyClass.ts');
+    assert.equal(sensitiveSource(mismatched), mismatched);
+    assert.equal(
+      sensitiveSource(join(root, 'workspaceroot', 'NestedDir', 'MyClass.ts')),
+      join(workspace, 'NestedDir', 'MyClass.ts'),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

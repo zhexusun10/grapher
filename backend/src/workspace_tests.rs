@@ -1645,3 +1645,163 @@ fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
     let error = workspace::prepare(&source, &legacy, &base, &[]).unwrap_err();
     assert!(error.contains("Unsupported slot metadata"), "{error}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_nfd_case_shadow_verify_and_unstage_behave_consistently() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let repo = base.join("MixedRepo");
+    fs::create_dir(&repo).unwrap();
+    workspace::git(&repo, &["init", "-q"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.name", "Project Author"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.email", "project@example.invalid"]).unwrap();
+
+    // Test scope_contains_at for uncreated and symlinked non-ASCII directories.
+    assert!(workspace::scope_contains_at(
+        &repo,
+        Path::new("Cafe\u{0301}/sub/file.py"),
+        Path::new("Caf\u{00e9}")
+    ));
+    let outside = base.join("OutsideEnv");
+    fs::create_dir(&outside).unwrap();
+    crate::path_safety::directory_link(&outside, &repo.join("Cafe\u{0301}Link"));
+    assert!(!workspace::scope_contains_at(
+        &repo,
+        Path::new("OutsideEnv/file.py"),
+        Path::new("Caf\u{00e9}Link")
+    ));
+
+    // Commit NFC filenames, tracked .DS_Store, and tracked generated file.
+    let nfc_name = "Caf\u{00e9}.txt";
+    let nfd_name = "Cafe\u{0301}.txt";
+    fs::write(repo.join(nfc_name), "nfc content").unwrap();
+    fs::write(repo.join("README.md"), "readme").unwrap();
+    fs::write(repo.join(".DS_Store"), "tracked ds").unwrap();
+    fs::create_dir_all(repo.join("__pycache__")).unwrap();
+    fs::write(repo.join("__pycache__/Caf\u{00e9}.pyc"), "pyc").unwrap();
+    workspace::project_git(
+        &repo,
+        &[
+            "add",
+            "-f",
+            nfc_name,
+            "README.md",
+            ".DS_Store",
+            "__pycache__/Caf\u{00e9}.pyc",
+        ],
+    )
+    .unwrap();
+    workspace::project_git(&repo, &["commit", "-qm", "init"]).unwrap();
+
+    // Switch on APFS disk to NFD and lowercase case spelling.
+    let tmp_nfd = repo.join(".tmp-nfd");
+    fs::rename(repo.join(nfc_name), &tmp_nfd).unwrap();
+    fs::rename(&tmp_nfd, repo.join(nfd_name)).unwrap();
+    let tmp_pyc = repo.join("__pycache__/.tmp-pyc");
+    fs::rename(repo.join("__pycache__/Caf\u{00e9}.pyc"), &tmp_pyc).unwrap();
+    fs::rename(&tmp_pyc, repo.join("__pycache__/Cafe\u{0301}.pyc")).unwrap();
+    if crate::path_identity::case_insensitive_volume(&repo) {
+        let tmp_case = repo.join(".tmp-case");
+        fs::rename(repo.join("README.md"), &tmp_case).unwrap();
+        fs::rename(&tmp_case, repo.join("readme.md")).unwrap();
+
+        let alias_repo = base.join("mixedrepo");
+        assert!(workspace::verify(&alias_repo).is_ok());
+        assert_eq!(
+            workspace::shadow_repo_dir(&alias_repo).unwrap(),
+            workspace::shadow_repo_dir(&repo).unwrap()
+        );
+    }
+
+    fs::create_dir_all(repo.join(".venv/lib")).unwrap();
+    fs::write(repo.join(".venv/lib/mod.py"), "excluded").unwrap();
+    let insensitive = crate::path_identity::case_insensitive_volume(&repo);
+    let venv_scope = if insensitive { ".Venv" } else { ".venv" };
+    let exclusions = vec![venv_scope.to_string(), "UncreatedCaf\u{00e9}".to_string()];
+    let snap = workspace::snapshot_repository_scoped(&repo, &exclusions).unwrap();
+    let files = workspace::repository_git(&repo, &["ls-tree", "-r", "-z", &snap]).unwrap();
+    let names: Vec<&str> = files
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.split_once('\t').unwrap().1)
+        .collect();
+    assert_eq!(
+        names.iter().filter(|name| **name == nfd_name).count(),
+        1,
+        "must not stage duplicate NFC+NFD index entries: {names:?}"
+    );
+    assert!(
+        !names.contains(&nfc_name),
+        "index must reflect on-disk NFD spelling without precomposition: {names:?}"
+    );
+    assert!(names.contains(&".DS_Store"), "{names:?}");
+    assert!(
+        names.contains(&"__pycache__/Cafe\u{0301}.pyc"),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.to_ascii_lowercase().starts_with(".venv")),
+        "{names:?}"
+    );
+
+    // Local unstage_scoped / has_tracked_scoped on NFD + case alias.
+    let node = slot(&temp, "node");
+    workspace::prepare(&repo, &node, &snap, &[]).unwrap();
+    fs::create_dir_all(node.join(".Venv")).unwrap();
+    fs::write(node.join(".Venv/item"), "env").unwrap();
+    workspace::git(&node, &["add", "-f", "--", ".Venv/item"]).unwrap();
+    let check_scopes = vec![if crate::path_identity::case_insensitive_volume(&node) {
+        ".venv".to_string()
+    } else {
+        ".Venv".to_string()
+    }];
+    assert!(workspace::has_tracked_scoped(&node, &check_scopes).unwrap());
+    workspace::unstage_scoped(&node, &check_scopes).unwrap();
+    assert!(!workspace::has_tracked_scoped(&node, &check_scopes).unwrap());
+
+    #[cfg(target_os = "macos")]
+    {
+        let link_root = temp.path().join("disk-rel");
+        let real_sub = link_root.join("RealDir");
+        let outside = temp.path().join("outside-target");
+        fs::create_dir_all(&real_sub).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(real_sub.join("Cafe\u{301}.txt"), "disk").unwrap();
+        fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, link_root.join("LinkDir")).unwrap();
+        std::os::unix::fs::symlink(
+            "RealDir/Cafe\u{301}.txt",
+            link_root.join("leaf-link"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            workspace::resolve_disk_relative(&link_root, Path::new("RealDir/Caf\u{00e9}.txt")),
+            Some("RealDir/Cafe\u{301}.txt".into())
+        );
+        assert_eq!(
+            workspace::resolve_disk_relative(&link_root, Path::new("LinkDir/secret.txt")),
+            None
+        );
+        assert_eq!(
+            workspace::resolve_disk_relative(&link_root, Path::new("leaf-link")),
+            Some("leaf-link".into())
+        );
+
+        // Newly staged (uncommitted) .DS_Store in standard Git repo survives scoped snapshot.
+        let staged_repo = temp.path().join("staged-ds");
+        fs::create_dir(&staged_repo).unwrap();
+        workspace::git(&staged_repo, &["init", "-q"]).unwrap();
+        workspace::project_git(&staged_repo, &["config", "user.name", "Project Author"]).unwrap();
+        workspace::project_git(&staged_repo, &["config", "user.email", "project@example.invalid"]).unwrap();
+        fs::write(staged_repo.join("app.txt"), "base").unwrap();
+        workspace::project_git(&staged_repo, &["add", "app.txt"]).unwrap();
+        workspace::project_git(&staged_repo, &["commit", "-qm", "init"]).unwrap();
+        fs::write(staged_repo.join(".DS_Store"), "staged ds").unwrap();
+        workspace::project_git(&staged_repo, &["add", "-f", ".DS_Store"]).unwrap();
+        let staged_snap = workspace::snapshot_repository_scoped(&staged_repo, &[".venv".into()]).unwrap();
+        let staged_files = workspace::repository_git(&staged_repo, &["ls-tree", "-r", "-z", &staged_snap]).unwrap();
+        assert!(staged_files.split('\0').any(|entry| entry.ends_with("\t.DS_Store")), "{staged_files:?}");
+    }
+}

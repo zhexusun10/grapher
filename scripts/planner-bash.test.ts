@@ -396,3 +396,29 @@ test('without a cache scratch, the shell keeps safe host temp bindings and remov
   assert.equal('GRAPHER_MODE' in env, false);
   assert.equal('PI_SESSION_FILE' in env, false);
 });
+
+test('macOS /System/Volumes/Data and /Volumes/Data volume roots are not misread as Grapher data dirs', { skip: process.platform !== 'darwin' }, () => {
+  const env: Record<string, string> = {
+    XDG_CACHE_HOME: '/System/Volumes/Data/Users/alice/Library/Caches/Grapher',
+    TMPDIR: '/System/Volumes/Data/tmp',
+    TMP: '/Volumes/Data/tmp',
+    TEMP: '/Volumes/Data/grapher/data/sessions/abc',
+    XDG_RUNTIME_DIR: '/System/Volumes/Data/Users/alice/grapher/data/sessions/abc',
+  };
+  const scratch = scrubModelShellEnvironment(env);
+  assert.equal(scratch, '/System/Volumes/Data/Users/alice/Library/Caches/Grapher/tmp');
+  for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) assert.equal(env[key], scratch, key);
+
+  const noScratch: Record<string, string> = {
+    XDG_CACHE_HOME: '/System/Volumes/Data/Users/alice/grapher/data/cache',
+    TMPDIR: '/Volumes/Data/safe-tmp',
+    TMP: '/System/Volumes/Data/Users/alice/safe-tmp',
+    TEMP: '/Volumes/Data/grapher/data/sessions/abc',
+    XDG_RUNTIME_DIR: '/System/Volumes/Data/Users/alice/grapher/data/sessions/abc',
+  };
+  assert.equal(scrubModelShellEnvironment(noScratch), undefined);
+  assert.equal(noScratch.TMPDIR, '/Volumes/Data/safe-tmp');
+  assert.equal(noScratch.TMP, '/System/Volumes/Data/Users/alice/safe-tmp');
+  assert.equal('TEMP' in noScratch, false);
+  assert.equal('XDG_RUNTIME_DIR' in noScratch, false);
+});

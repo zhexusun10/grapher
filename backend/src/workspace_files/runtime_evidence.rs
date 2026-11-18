@@ -104,23 +104,9 @@ impl Files {
                 }
                 &value.entries
             };
-            let entry = if let Some(entry) = entries.get(path) {
-                Some(entry)
-            } else if cfg!(windows) {
-                let key = inspection_key(path);
-                let mut aliases = entries
-                    .iter()
-                    .filter(|(name, _)| inspection_key(name) == key);
-                let found = aliases.next().map(|(_, entry)| entry);
-                if aliases.next().is_some() {
-                    return Err(format!(
-                        "Ambiguous recorded native input path aliases: {root}:{path}"
-                    ));
-                }
-                found
-            } else {
-                None
-            };
+            let entry = lookup_entry_alias(entries, roots.get(root).map(PathBuf::as_path), path)
+                .map_err(|()| format!("Ambiguous recorded native input path aliases: {root}:{path}"))?
+                .map(|(_, entry)| entry);
             let Some(Entry::File { blob, .. }) = entry else {
                 return Err(format!("Native runtime input lacks captured file bytes: {root}:{path}; live files or link targets cannot fill missing history"));
             };

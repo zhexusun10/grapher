@@ -492,22 +492,116 @@ fn create_special(path: &Path, special: &str, mode: u32, device: u64) -> Result<
         Err("Special project entries are unavailable on this host filesystem".into())
     }
 }
-fn remove_entry(entry: &Entry, path: &Path) -> Result<(), String> {
-    match entry {
-        Entry::Link { .. } => crate::workspace_symlinks::remove(path),
-        Entry::Directory { .. }
-            if path.is_dir()
-                && !crate::workspace_symlinks::is_link(
-                    &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
-                ) =>
-        {
-            fs::remove_dir(path).map_err(|e| e.to_string())
+#[cfg(target_os = "macos")]
+fn collect_untracked_host_metadata(
+    root: &Path,
+    dir: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    files: &mut Vec<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+) -> Result<bool, String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child = entry.path();
+        let meta = fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
+            return Ok(false);
         }
-        _ => match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        },
+        if meta.is_dir() {
+            if entry.file_name() == ".git" {
+                return Ok(false);
+            }
+            if !collect_untracked_host_metadata(root, &child, tracked, files, dirs)? {
+                return Ok(false);
+            }
+            dirs.push(child);
+            continue;
+        }
+        let rel = child
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if workspace::is_host_metadata(&rel)
+            && !workspace::tracked_path_matches(Some(root), tracked, &rel)
+        {
+            files.push(child);
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_empty_or_host_metadata_dir(
+    root: &Path,
+    path: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(original) => {
+            if path != root
+                && real_child_path(root, path, false)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                let mut files = Vec::new();
+                let mut dirs = Vec::new();
+                if collect_untracked_host_metadata(root, path, tracked, &mut files, &mut dirs)
+                    .unwrap_or(false)
+                {
+                    for file in files {
+                        fs::remove_file(file).map_err(|e| e.to_string())?;
+                    }
+                    for subdir in dirs {
+                        fs::remove_dir(subdir).map_err(|e| e.to_string())?;
+                    }
+                    return fs::remove_dir(path).map_err(|e| e.to_string());
+                }
+            }
+            Err(original.to_string())
+        }
+    }
+}
+
+fn remove_entry(
+    root: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    entry: &Entry,
+    path: &Path,
+) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    if matches!(entry, Entry::Link { .. }) || crate::workspace_symlinks::is_link(&metadata) {
+        return crate::workspace_symlinks::remove(path);
+    }
+    if metadata.is_dir() {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata);
+            return remove_empty_or_host_metadata_dir(root, path, tracked);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (root, tracked);
+            return fs::remove_dir(path).map_err(|e| e.to_string());
+        }
+    }
+    let _ = (root, tracked);
+    #[cfg(windows)]
+    let _ = crate::workspace_cleanup::clear_readonly_attribute(path, &metadata);
+    #[cfg(target_os = "macos")]
+    let _ = crate::workspace_cleanup::clear_macos_immutable_flags(path, &metadata);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -516,7 +610,7 @@ fn inspect(source: &Path) -> Result<View, String> {
 }
 
 fn inspect_scoped(source: &Path, owner: &Path, exclusions: &[String]) -> Result<View, String> {
-    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    let source = host_canonical(source)?;
     let data = workspace::data_root();
     if data.exists() && workspace::scope_contains(&data, &source) {
         return Err("Runtime data is inside the source project; configure an external GRAPHER_DATA_DIR before preparing an equivalent workspace".into());
@@ -591,6 +685,13 @@ fn inspect_scoped(source: &Path, owner: &Path, exclusions: &[String]) -> Result<
         git_global,
     })
 }
+/// Resolve a path to its host canonical spelling so macOS case/Unicode variants
+/// do not make equal directory references fail exact path comparisons.
+fn host_canonical(path: &Path) -> Result<PathBuf, String> {
+    let resolved = path.canonicalize().map_err(|e| e.to_string())?;
+    Ok(crate::path_identity::actual_path(&resolved).unwrap_or(resolved))
+}
+
 fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, String> {
     let metadata = match fs::symlink_metadata(project.join(".git")) {
         Ok(metadata) => metadata,
@@ -643,12 +744,8 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
             )?,
         ),
     };
-    let current = PathBuf::from(current)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let common = PathBuf::from(common)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let current = host_canonical(Path::new(&current))?;
+    let common = host_canonical(Path::new(&common))?;
     Ok(Some((common, current, metadata.is_file(), link)))
 }
 type InspectedGit = (
@@ -1098,13 +1195,8 @@ fn prepare_repositories(
         crate::workspace_git_index::compose(&target, &index_base, &indices, &record.join("git"))?;
         let (common, current, _, _) =
             git_roots(&target)?.ok_or("Nested repository lost its Git view")?;
-        let native = target
-            .join(".git")
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        let state = crate::workspace_state::process_root(owner)?
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let native = host_canonical(&target.join(".git"))?;
+        let state = host_canonical(&crate::workspace_state::process_root(owner)?)?;
         if common != current || !(common == native || common.starts_with(state)) {
             return Err("Nested project Git points outside its private binding".into());
         }
@@ -1352,7 +1444,8 @@ fn stage_project_entries_borrowed(
                 let mut filtered = entries.clone();
                 if let Some(tracked) = &macos_tracked {
                     filtered.retain(|name, _| {
-                        !workspace::is_host_metadata(name) || tracked.contains(name.as_str())
+                        !workspace::is_host_metadata(name)
+                            || workspace::tracked_path_matches(Some(path), tracked, name)
                     });
                 }
                 return stage_sha256(path, metadata, filtered);
@@ -1374,7 +1467,9 @@ fn stage_project_entries_borrowed(
     let mut missing_small: BTreeMap<git2::Oid, (PathBuf, u64, Vec<PathBuf>)> = BTreeMap::new();
     for (name, entry) in entries {
         if let Some(tracked) = &macos_tracked {
-            if workspace::is_host_metadata(name) && !tracked.contains(name.as_str()) {
+            if workspace::is_host_metadata(name)
+                && !workspace::tracked_path_matches(Some(path), tracked, name)
+            {
                 continue;
             }
         }
@@ -2201,21 +2296,18 @@ pub(crate) fn validate_ready(path: &Path, source: &Path) -> Result<(), String> {
 }
 fn validate_git_bindings(path: &Path) -> Result<(), String> {
     if let Some((common, current, _, _)) = git_roots(path)? {
-        let project = path.canonicalize().map_err(|e| e.to_string())?;
+        let project = host_canonical(path)?;
         let state = crate::workspace_state::process_root(path)?;
-        let state_root = state.canonicalize().map_err(|e| e.to_string())?;
+        let state_root = host_canonical(&state)?;
         let external_path = state.join(".project-git");
         if external_path.exists() {
             crate::path_safety::real_child_path(&state, &external_path, false)?;
         }
-        let local = project
-            .join(".git")
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let local = host_canonical(&project.join(".git"))?;
         if !local.starts_with(&project) && !local.starts_with(&state_root) {
             return Err("Project Git metadata left its private binding".into());
         }
-        let external = external_path.canonicalize().ok();
+        let external = host_canonical(&external_path).ok();
         if common != current || !(common == local || external.as_ref() == Some(&common)) {
             return Err("Project Git was redirected outside its private binding".into());
         }
@@ -2243,13 +2335,10 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
         if path.join(".git").exists() {
             let (common, current, _, _) =
                 git_roots(&path)?.ok_or("Nested project lost its Git binding")?;
-            let project = path.canonicalize().map_err(|e| e.to_string())?;
+            let project = host_canonical(&path)?;
             let state = crate::workspace_state::process_root(owner)?;
-            let state_root = state.canonicalize().map_err(|e| e.to_string())?;
-            let local = project
-                .join(".git")
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
+            let state_root = host_canonical(&state)?;
+            let local = host_canonical(&project.join(".git"))?;
             if !local.starts_with(&project) && !local.starts_with(&state_root) {
                 return Err("Nested Git metadata left its private binding".into());
             }
@@ -2260,7 +2349,7 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
             if external_path.exists() {
                 crate::path_safety::real_child_path(&state, &external_path, false)?;
             }
-            let external = external_path.canonicalize().ok();
+            let external = host_canonical(&external_path).ok();
             if common != current || !(common == local || external.as_ref() == Some(&common)) {
                 return Err("Nested Git was redirected outside its private binding".into());
             }
@@ -2279,12 +2368,317 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
     Ok(())
 }
 
+fn same_fs_path(left: &str, right: &str, case_insensitive: bool) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !case_insensitive && left.is_ascii() && right.is_ascii() {
+            return false;
+        }
+        return crate::path_identity::macos_equivalent_path(
+            Path::new(left),
+            Path::new(right),
+            case_insensitive,
+        );
+    }
+    #[cfg(windows)]
+    {
+        return case_insensitive && left.eq_ignore_ascii_case(right);
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = case_insensitive;
+        false
+    }
+}
+
+fn has_fs_alias<T>(entries: &BTreeMap<String, T>, name: &str, case_insensitive: bool) -> bool {
+    entries.contains_key(name)
+        || entries
+            .keys()
+            .any(|candidate| same_fs_path(candidate, name, case_insensitive))
+}
+
+fn has_fs_alias_in_set(
+    entries: &std::collections::BTreeSet<String>,
+    name: &str,
+    case_insensitive: bool,
+) -> bool {
+    entries.contains(name)
+        || entries
+            .iter()
+            .any(|candidate| same_fs_path(candidate, name, case_insensitive))
+}
+
+fn key_entry_by_alias<'a>(
+    entries: &'a BTreeMap<String, Entry>,
+    name: &str,
+    expected_kind: Option<u8>,
+    case_insensitive: bool,
+) -> Option<(&'a String, &'a Entry)> {
+    if let Some((key, exact)) = entries.get_key_value(name) {
+        return expected_kind
+            .is_none_or(|wanted| kind(exact) == wanted)
+            .then_some((key, exact));
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        if cfg!(target_os = "macos") && !case_insensitive && name.is_ascii() {
+            return None;
+        }
+        let mut matched: Option<(&'a String, &'a Entry)> = None;
+        for (candidate_key, entry) in entries {
+            if same_fs_path(candidate_key, name, case_insensitive) {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some((candidate_key, entry));
+            }
+        }
+        matched.filter(|(_, entry)| expected_kind.is_none_or(|wanted| kind(entry) == wanted))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (expected_kind, case_insensitive);
+        None
+    }
+}
+
+fn entry_by_alias<'a>(
+    entries: &'a BTreeMap<String, Entry>,
+    name: &str,
+    expected_kind: Option<u8>,
+    case_insensitive: bool,
+) -> Option<&'a Entry> {
+    key_entry_by_alias(entries, name, expected_kind, case_insensitive).map(|(_, entry)| entry)
+}
+
+fn choose_alias_spelling(
+    base_view: &View,
+    inputs: &[(PathBuf, View)],
+    name: &str,
+    expected_kind: Option<u8>,
+    case_insensitive: bool,
+) -> Result<String, String> {
+    let base_name =
+        key_entry_by_alias(&base_view.entries, name, expected_kind, case_insensitive)
+            .map(|(key, _)| key.as_str());
+    let mut changed = Vec::new();
+    for (_, view) in inputs {
+        if let Some((input_key, _)) =
+            key_entry_by_alias(&view.entries, name, expected_kind, case_insensitive)
+        {
+            let input_key = input_key.as_str();
+            if Some(input_key) != base_name && !changed.contains(&input_key) {
+                changed.push(input_key);
+            }
+        }
+    }
+    if changed.len() > 1 {
+        return Err(format!(
+            "Project path spelling composition conflict at {name}; refusing to discard an input's rename"
+        ));
+    }
+    if base_name.is_some()
+        && !changed.is_empty()
+        && inputs.iter().any(|(_, view)| {
+            key_entry_by_alias(&view.entries, name, None, case_insensitive).is_none()
+        })
+    {
+        return Err(format!(
+            "Project path deletion conflicts with rename at {name}; refusing to discard an input's change"
+        ));
+    }
+    Ok(changed
+        .pop()
+        .or(base_name)
+        .unwrap_or(name)
+        .to_string())
+}
+
+fn sorted_candidate_names<'a>(
+    base_view: &'a View,
+    inputs: &'a [(PathBuf, View)],
+    wanted_kind: Option<u8>,
+) -> Vec<&'a str> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, entry) in base_view
+        .entries
+        .iter()
+        .chain(inputs.iter().flat_map(|(_, view)| view.entries.iter()))
+    {
+        if wanted_kind.is_none_or(|expected| kind(entry) == expected) {
+            seen.insert((Path::new(name).components().count(), name.as_str()));
+        }
+    }
+    seen.into_iter().map(|(_, name)| name).collect()
+}
+
+fn resolve_parent_alias_prefix(
+    name: &str,
+    canonical_dirs: &[String],
+    case_insensitive: bool,
+) -> String {
+    let mut out = PathBuf::new();
+    let mut changed = false;
+    let parts: Vec<_> = Path::new(name).components().collect();
+    for (index, part) in parts.iter().enumerate() {
+        out.push(part.as_os_str());
+        if index + 1 < parts.len() {
+            if let Ok(prefix) = name_of(&out) {
+                if let Some(canonical) = canonical_dirs
+                    .iter()
+                    .find(|candidate| same_fs_path(candidate, &prefix, case_insensitive))
+                {
+                    if canonical != &prefix {
+                        out = PathBuf::from(canonical);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    if changed {
+        name_of(&out).unwrap_or_else(|_| name.to_string())
+    } else {
+        name.to_string()
+    }
+}
+
+fn choose_directory_entry(
+    base_view: &View,
+    inputs: &[(PathBuf, View)],
+    name: &str,
+    case_insensitive: bool,
+) -> Result<Option<(String, Entry)>, String> {
+    let base = entry_by_alias(&base_view.entries, name, Some(1), case_insensitive);
+    let candidates: Vec<_> = inputs
+        .iter()
+        .map(|(_, view)| entry_by_alias(&view.entries, name, Some(1), case_insensitive))
+        .collect();
+    let metadata = choose_metadata(base, &candidates, name)?;
+    let chosen_name =
+        choose_alias_spelling(base_view, inputs, name, Some(1), case_insensitive)?;
+    Ok(metadata.map(|entry| (chosen_name, entry)))
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn reconcile_tree_aliases(
+    root: &Path,
+    targets: &std::collections::BTreeSet<String>,
+    actual: &mut BTreeMap<String, Entry>,
+    materialized: &mut std::collections::BTreeSet<String>,
+    case_insensitive: bool,
+) -> Result<(), String> {
+    let mut ordered: Vec<(usize, String)> = targets
+        .iter()
+        .map(|entry| (Path::new(entry).components().count(), entry.clone()))
+        .collect();
+    ordered.sort();
+    for (_, wanted) in ordered {
+        if actual.contains_key(&wanted) {
+            continue;
+        }
+        let wanted_parent = Path::new(&wanted).parent();
+        let wanted_depth = Path::new(&wanted).components().count();
+        let mut alias: Option<String> = None;
+        let mut ambiguous = false;
+        for candidate in actual.keys() {
+            if Path::new(candidate).components().count() != wanted_depth {
+                continue;
+            }
+            if Path::new(candidate).parent() == wanted_parent
+                && same_fs_path(candidate, &wanted, case_insensitive)
+            {
+                if alias.is_some() {
+                    ambiguous = true;
+                    break;
+                }
+                alias = Some(candidate.clone());
+            }
+        }
+        if ambiguous {
+            continue;
+        }
+        let Some(alias_key) = alias else {
+            continue;
+        };
+        if targets.contains(&alias_key) {
+            continue;
+        }
+        if let Some(parent) = wanted_parent.filter(|p| !p.as_os_str().is_empty()) {
+            real_child_path(root, &root.join(parent), false)?;
+            let parent_path = root.join(parent);
+            if let Ok(meta) = fs::metadata(&parent_path) {
+                #[cfg(target_os = "macos")]
+                if crate::workspace_cleanup::clear_macos_immutable_flags(&parent_path, &meta).is_ok()
+                {
+                    materialized.insert(name_of(parent)?);
+                }
+                if meta.permissions().readonly() || (cfg!(unix) && mode(&meta) & 0o200 == 0) {
+                    set_mode(
+                        &parent_path,
+                        if cfg!(unix) { mode(&meta) | 0o700 } else { 0 },
+                    )?;
+                    materialized.insert(name_of(parent)?);
+                }
+            }
+        }
+        let from = root.join(&alias_key);
+        #[cfg(target_os = "macos")]
+        if let Ok(meta) = fs::symlink_metadata(&from) {
+            if crate::workspace_cleanup::clear_macos_immutable_flags(&from, &meta).is_ok() {
+                materialized.insert(wanted.clone());
+            }
+        }
+        let to = root.join(&wanted);
+        let mut hop = to
+            .parent()
+            .unwrap_or(root)
+            .join(format!(".grapher-rename-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        while fs::symlink_metadata(&hop).is_ok() {
+            hop = to
+                .parent()
+                .unwrap_or(root)
+                .join(format!(".grapher-rename-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        }
+        // Two-step rename forces APFS (especially case-sensitive APFS on NFD<->NFC)
+        // and HFS+/Windows filesystems to update the stored directory entry spelling.
+        fs::rename(&from, &hop).map_err(|e| {
+            format!("Cannot normalize project path spelling from {alias_key} to {wanted}: {e}")
+        })?;
+        if let Err(e) = fs::rename(&hop, &to) {
+            let _ = fs::rename(&hop, &from);
+            return Err(format!(
+                "Cannot normalize project path spelling from {alias_key} to {wanted}: {e}"
+            ));
+        }
+        let prefix = format!("{alias_key}/");
+        let mut updated = BTreeMap::new();
+        let old = std::mem::take(actual);
+        for (key, value) in old {
+            if key == alias_key {
+                updated.insert(wanted.clone(), value);
+            } else if let Some(rest) = key.strip_prefix(&prefix) {
+                updated.insert(format!("{wanted}/{rest}"), value);
+            } else {
+                updated.insert(key, value);
+            }
+        }
+        *actual = updated;
+    }
+    Ok(())
+}
+
 /// True when nothing below `relative` can appear in a project view: only
-/// generated artifacts (agent caches such as `__pycache__` or `.pytest_cache`)
-/// and directories that are themselves unobservable remain. A slot reused from
-/// an earlier execution keeps such ignored leftovers because graph
-/// `checkout -f` only rewrites tracked files, so their enclosing directory is
-/// the one entry the scan records and no composed view can ever carry.
+/// generated artifacts (agent caches such as `__pycache__` or `.pytest_cache`),
+/// untracked host metadata, and directories that are themselves unobservable
+/// remain. A slot reused from an earlier execution keeps such ignored
+/// leftovers because graph `checkout -f` only rewrites tracked files, so their
+/// enclosing directory is the one entry the scan records and no composed view can
+/// ever carry.
 fn view_unobservable(
     root: &Path,
     relative: &Path,
@@ -2293,7 +2687,10 @@ fn view_unobservable(
     for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let child = relative.join(item.file_name());
-        if workspace::is_generated_artifact(&child) && !tracked.contains(&name(&child)?) {
+        let child_name = name(&child)?;
+        if (workspace::is_generated_artifact(&child) || workspace::is_host_metadata(&child_name))
+            && !workspace::tracked_path_matches(Some(root), tracked, &child_name)
+        {
             continue;
         }
         let metadata = fs::symlink_metadata(root.join(&child)).map_err(|e| e.to_string())?;
@@ -2322,7 +2719,7 @@ fn prepare_fresh_base_checkout(
         if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
             let target = path.join(name);
             if fs::symlink_metadata(&target).is_ok() {
-                remove_entry(entry, &target)?;
+                remove_entry(path, &tracked, entry, &target)?;
             }
         }
     }
@@ -2363,7 +2760,7 @@ fn prepare_fresh_base_checkout(
                     .is_some_and(|(kind, value)| kind == special && value == *device);
                 if !same {
                     if fs::symlink_metadata(&target).is_ok() {
-                        remove_entry(entry, &target)?;
+                        remove_entry(path, &tracked, entry, &target)?;
                     }
                     create_special(&target, special, *special_mode, *device)?;
                 }
@@ -2496,6 +2893,11 @@ pub(crate) fn prepare(
     // bit, and a recreated special/link starts from inherited metadata). Their
     // pre-change scan entry is not proof a restore is unnecessary, so they are
     // excluded from the skip below and always materialized.
+    let volume_case_insensitive = if cfg!(target_os = "macos") {
+        crate::path_identity::case_insensitive_volume(path)
+    } else {
+        cfg!(windows)
+    };
     let mut materialized = std::collections::BTreeSet::new();
     if conflict {
         // Conflict marker bytes are task composition state, not HEAD bytes.
@@ -2507,6 +2909,7 @@ pub(crate) fn prepare(
         );
     } else {
         let raw = workspace::git(path, &["ls-tree", "-r", "-z", "HEAD"])?;
+        let mut parsed_entries = Vec::new();
         for item in raw.split('\0').filter(|s| !s.is_empty()) {
             let (header, name) = item.split_once('\t').ok_or("Invalid graph tree entry")?;
             let fields: Vec<_> = header.split_whitespace().collect();
@@ -2523,21 +2926,43 @@ pub(crate) fn prepare(
             if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
                 continue;
             }
+            parsed_entries.push((fields[0], fields[2], name));
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let mut reconcile_targets = std::collections::BTreeSet::new();
+            for &(_, _, entry_name) in &parsed_entries {
+                reconcile_targets.insert(entry_name.to_string());
+                let mut parent = Path::new(entry_name).parent();
+                while let Some(dir) = parent.filter(|dir| !dir.as_os_str().is_empty()) {
+                    reconcile_targets.insert(name_of(dir)?);
+                    parent = dir.parent();
+                }
+            }
+            reconcile_tree_aliases(
+                path,
+                &reconcile_targets,
+                &mut actual,
+                &mut materialized,
+                volume_case_insensitive,
+            )?;
+        }
+        for (entry_mode, entry_oid, name) in parsed_entries {
             let target = path.join(name);
-            if fields[0] == "120000" {
+            if entry_mode == "120000" {
                 let data =
-                    workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
+                    workspace::git_bytes(path, &["cat-file", "blob", entry_oid], None, None)?;
                 let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
-                let baseline = base_view
-                    .entries
-                    .get(name)
-                    .filter(|entry| matches!(entry, Entry::Link { .. }));
+                let baseline = entry_by_alias(
+                    &base_view.entries,
+                    name,
+                    Some(2),
+                    volume_case_insensitive,
+                );
                 let candidates = inputs
                     .iter()
                     .map(|(_, view)| {
-                        view.entries
-                            .get(name)
-                            .filter(|entry| matches!(entry, Entry::Link { .. }))
+                        entry_by_alias(&view.entries, name, Some(2), volume_case_insensitive)
                     })
                     .collect::<Vec<_>>();
                 let template = choose_metadata(baseline, &candidates, name)?
@@ -2564,11 +2989,15 @@ pub(crate) fn prepare(
                 // different OID, so its bytes are still read and hashed to keep
                 // the recorded identity comparable.
                 let mut cached = None;
-                let blob = if fields[2].len() == 40 {
-                    fields[2].to_string()
+                let blob = if entry_oid.len() == 40 {
+                    entry_oid.to_string()
                 } else {
-                    let data =
-                        workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
+                    let data = workspace::git_bytes(
+                        path,
+                        &["cat-file", "blob", entry_oid],
+                        None,
+                        None,
+                    )?;
                     let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &data)
                         .map_err(|e| e.to_string())?
                         .to_string();
@@ -2577,25 +3006,30 @@ pub(crate) fn prepare(
                 };
                 let unchanged = matches!(actual.get(name), Some(Entry::File { blob: current, .. }) if current == &blob);
                 if !unchanged {
-                    // The walk above already proved this path is a real file
-                    // inside the workspace; re-checking every component is only
-                    // needed once the pass is about to write it.
-                    real_child_path(path, &target, true)?;
+                    // Check parent chain first; a recorded directory/link at
+                    // `target` itself is safely unlinked below before writing.
+                    if let Some(parent) = target.parent().filter(|parent| *parent != path) {
+                        real_child_path(path, parent, false)?;
+                    }
                     let data = match cached {
                         Some(data) => data,
                         None => workspace::git_bytes(
                             path,
-                            &["cat-file", "blob", fields[2]],
+                            &["cat-file", "blob", entry_oid],
                             None,
                             None,
                         )?,
                     };
                     if let Some(existing) = actual.get(name) {
                         if !matches!(existing, Entry::File { .. }) {
-                            remove_entry(existing, &target)?;
+                            remove_entry(path, &tracked, existing, &target)?;
                         }
                     }
+                    real_child_path(path, &target, true)?;
                     if let Ok(metadata) = fs::metadata(&target) {
+                        #[cfg(target_os = "macos")]
+                        crate::workspace_cleanup::clear_macos_immutable_flags(&target, &metadata)
+                            .map_err(|e| e.to_string())?;
                         if metadata.permissions().readonly() {
                             set_mode(
                                 &target,
@@ -2639,28 +3073,23 @@ pub(crate) fn prepare(
             parent = path.parent();
         }
     }
-    for name in base_view
-        .entries
-        .keys()
-        .chain(inputs.iter().flat_map(|(_, view)| view.entries.keys()))
-    {
-        if directory_names.contains(name) {
+    let mut canonical_dirs: Vec<String> = directory_names.iter().cloned().collect();
+    for name in sorted_candidate_names(&base_view, &inputs, Some(1)) {
+        if has_fs_alias_in_set(&directory_names, name, volume_case_insensitive)
+            || has_fs_alias(&expected, name, volume_case_insensitive)
+        {
             continue;
         }
-        let base = base_view
-            .entries
-            .get(name)
-            .filter(|entry| matches!(entry, Entry::Directory { .. }));
-        let candidates: Vec<_> = inputs
-            .iter()
-            .map(|(_, view)| {
-                view.entries
-                    .get(name)
-                    .filter(|entry| matches!(entry, Entry::Directory { .. }))
-            })
-            .collect();
-        if let Some(directory) = choose_metadata(base, &candidates, name)? {
-            expected.entry(name.clone()).or_insert(directory);
+        if let Some((chosen_name, directory)) =
+            choose_directory_entry(&base_view, &inputs, name, volume_case_insensitive)?
+        {
+            let resolved_name = resolve_parent_alias_prefix(
+                &chosen_name,
+                &canonical_dirs,
+                volume_case_insensitive,
+            );
+            canonical_dirs.push(resolved_name.clone());
+            expected.entry(resolved_name).or_insert(directory);
         }
     }
     for name in &directory_names {
@@ -2691,22 +3120,28 @@ pub(crate) fn prepare(
                 .into_iter()
                 .flat_map(|(_, view)| view.entries.iter())
                 .filter(|(name, entry)| {
-                    matches!(entry, Entry::Special { .. }) && !base_view.entries.contains_key(*name)
+                    matches!(entry, Entry::Special { .. })
+                        && entry_by_alias(
+                            &base_view.entries,
+                            name,
+                            None,
+                            volume_case_insensitive,
+                        )
+                        .is_none()
                 })
                 .map(|(name, _)| name.clone()),
         )
         .collect();
     for name in special_names {
-        if expected.contains_key(&name) || directory_names.contains(&name) {
+        if has_fs_alias(&expected, &name, volume_case_insensitive)
+            || has_fs_alias_in_set(&directory_names, &name, volume_case_insensitive)
+        {
             continue;
         }
         let values: Vec<Option<Entry>> = inputs
             .iter()
             .map(|(_, view)| {
-                view.entries
-                    .get(&name)
-                    .filter(|entry| matches!(entry, Entry::Special { .. }))
-                    .cloned()
+                entry_by_alias(&view.entries, &name, Some(3), volume_case_insensitive).cloned()
             })
             .collect();
         if values.len() > 1 && values.iter().any(|value| *value != values[0]) {
@@ -2716,27 +3151,61 @@ pub(crate) fn prepare(
         }
         let selected = match values.last() {
             Some(value) => value.clone(),
-            None => base_view
-                .entries
-                .get(&name)
-                .filter(|entry| matches!(entry, Entry::Special { .. }))
-                .cloned(),
+            None => entry_by_alias(
+                &base_view.entries,
+                &name,
+                Some(3),
+                volume_case_insensitive,
+            )
+            .cloned(),
         };
         if let Some(entry) = selected {
-            expected.insert(name, entry);
+            let chosen_name = choose_alias_spelling(
+                &base_view,
+                &inputs,
+                &name,
+                Some(3),
+                volume_case_insensitive,
+            )?;
+            let resolved_name = resolve_parent_alias_prefix(
+                &chosen_name,
+                &canonical_dirs,
+                volume_case_insensitive,
+            );
+            expected.insert(resolved_name, entry);
         }
     }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let mut reconcile_targets = std::collections::BTreeSet::new();
+        for entry_name in expected.keys() {
+            reconcile_targets.insert(entry_name.clone());
+            let mut parent = Path::new(entry_name).parent();
+            while let Some(dir) = parent.filter(|dir| !dir.as_os_str().is_empty()) {
+                reconcile_targets.insert(name_of(dir)?);
+                parent = dir.parent();
+            }
+        }
+        reconcile_tree_aliases(
+            path,
+            &reconcile_targets,
+            &mut actual,
+            &mut materialized,
+            volume_case_insensitive,
+        )?;
+    }
     for (name, entry) in &mut expected {
-        let base = base_view
-            .entries
-            .get(name)
-            .filter(|base| kind(base) == kind(entry));
+        let wanted_kind = Some(kind(entry));
+        let base = entry_by_alias(
+            &base_view.entries,
+            name,
+            wanted_kind,
+            volume_case_insensitive,
+        );
         let candidates: Vec<_> = inputs
             .iter()
             .map(|(_, view)| {
-                view.entries
-                    .get(name)
-                    .filter(|input| kind(input) == kind(entry))
+                entry_by_alias(&view.entries, name, wanted_kind, volume_case_insensitive)
             })
             .collect();
         if let Some(metadata) = choose_metadata(base, &candidates, name)? {
@@ -2790,14 +3259,16 @@ pub(crate) fn prepare(
         } = entry
         {
             let target = path.join(name);
-            real_child_path(path, &target, true)?;
+            if let Some(parent) = target.parent().filter(|parent| *parent != path) {
+                real_child_path(path, parent, false)?;
+            }
             let same = fs::symlink_metadata(&target)
                 .ok()
                 .and_then(|metadata| special_entry(&metadata))
                 .is_some_and(|(kind, value)| kind == special && value == *device);
             if !same {
                 if fs::symlink_metadata(&target).is_ok() {
-                    remove_entry(entry, &target)?;
+                    remove_entry(path, &tracked, entry, &target)?;
                 }
                 create_special(&target, special, *special_mode, *device)?;
                 materialized.insert(name.clone());
@@ -2843,17 +3314,36 @@ pub(crate) fn prepare(
             })?;
         }
         if matches!(entry, Entry::Directory { .. }) && !expected.contains_key(name) {
-            if base_view.entries.contains_key(name)
-                || inputs
-                    .iter()
-                    .any(|(_, view)| view.entries.contains_key(name))
-            {
-                fs::remove_dir(path.join(name)).map_err(|e| {
-                    format!("Unrecorded files prevent project directory deletion at {name}: {e}")
-                })?;
+            let dir_path = path.join(name);
+            let known_deleted = entry_by_alias(
+                &base_view.entries,
+                name,
+                None,
+                volume_case_insensitive,
+            )
+            .is_some()
+                || inputs.iter().any(|(_, view)| {
+                    entry_by_alias(&view.entries, name, None, volume_case_insensitive).is_some()
+                });
+            if known_deleted {
+                match fs::remove_dir(&dir_path) {
+                    Ok(()) => {}
+                    Err(_) if view_unobservable(path, Path::new(name), &tracked)? => {
+                        fs::remove_dir_all(&dir_path).map_err(|e| {
+                            format!(
+                                "Unrecorded files prevent project directory deletion at {name}: {e}"
+                            )
+                        })?;
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Unrecorded files prevent project directory deletion at {name}: {e}"
+                        ));
+                    }
+                }
             } else if !expected
                 .keys()
-                .any(|key| key.starts_with(&format!("{name}/")))
+                .any(|key| workspace::scope_contains_at(path, Path::new(key), Path::new(name)))
                 && view_unobservable(path, Path::new(name), &tracked)?
             {
                 // Nothing this view could ever record is left inside, so the
@@ -2861,7 +3351,7 @@ pub(crate) fn prepare(
                 // unrecorded project content. Children are handled first (the
                 // scan is iterated in reverse), so a nested leftover that hid
                 // live entries was already refused above.
-                fs::remove_dir_all(path.join(name)).map_err(|e| {
+                fs::remove_dir_all(&dir_path).map_err(|e| {
                     format!("Cannot remove unrecorded project directory at {name}: {e}")
                 })?;
             }
@@ -3334,6 +3824,11 @@ pub(crate) fn seal_composed_view(
     let tracked = workspace::project_tracked_paths(path);
     // The composed tree lives in the internal result commit, not in the visible
     // project history this workspace only mirrors.
+    let volume_case_insensitive = if cfg!(target_os = "macos") {
+        crate::path_identity::case_insensitive_volume(source)
+    } else {
+        cfg!(windows)
+    };
     let listed = workspace::repository_git(source, &["ls-tree", "-r", "-z", head])?;
     let mut entries = BTreeMap::new();
     for item in listed.split('\0').filter(|item| !item.is_empty()) {
@@ -3376,16 +3871,12 @@ pub(crate) fn seal_composed_view(
             // Link targets are raw blob bytes, not line-oriented Git output:
             // whitespace (including a trailing newline) is significant.
             let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
-            let baseline = base_view
-                .entries
-                .get(name)
-                .filter(|entry| matches!(entry, Entry::Link { .. }));
+            let baseline =
+                entry_by_alias(&base_view.entries, name, Some(2), volume_case_insensitive);
             let candidates = inputs
                 .iter()
                 .map(|(_, view)| {
-                    view.entries
-                        .get(name)
-                        .filter(|entry| matches!(entry, Entry::Link { .. }))
+                    entry_by_alias(&view.entries, name, Some(2), volume_case_insensitive)
                 })
                 .collect::<Vec<_>>();
             let Some(template) = choose_metadata(baseline, &candidates, name)? else {
@@ -3404,16 +3895,11 @@ pub(crate) fn seal_composed_view(
         // Metadata is composed independently of content, exactly as in the
         // materialized path. In particular, a changed blob must not lose its
         // permissions/xattrs, and divergent metadata changes must fail closed.
-        let baseline = base_view
-            .entries
-            .get(name)
-            .filter(|entry| matches!(entry, Entry::File { .. }));
+        let baseline = entry_by_alias(&base_view.entries, name, Some(0), volume_case_insensitive);
         let candidates = inputs
             .iter()
             .map(|(_, view)| {
-                view.entries
-                    .get(name)
-                    .filter(|entry| matches!(entry, Entry::File { .. }))
+                entry_by_alias(&view.entries, name, Some(0), volume_case_insensitive)
             })
             .collect::<Vec<_>>();
         let Some(Entry::File { mode, extra, .. }) = choose_metadata(baseline, &candidates, name)?
@@ -3440,27 +3926,38 @@ pub(crate) fn seal_composed_view(
     }
     // Git omits empty directories. Compose every recorded directory, not just
     // the ancestors of files present in the result tree.
-    let recorded_directories: std::collections::BTreeSet<_> = base_view
-        .entries
-        .iter()
-        .chain(inputs.iter().flat_map(|(_, view)| view.entries.iter()))
-        .filter(|(_, entry)| matches!(entry, Entry::Directory { .. }))
-        .map(|(name, _)| name.clone())
-        .collect();
+    let mut canonical_dirs: Vec<String> = directories.iter().cloned().collect();
+    let mut recorded_directories = std::collections::BTreeSet::new();
+    for name in sorted_candidate_names(&base_view, &inputs, Some(1)) {
+        if !has_fs_alias_in_set(&directories, name, volume_case_insensitive)
+            && !has_fs_alias_in_set(&recorded_directories, name, volume_case_insensitive)
+            && !has_fs_alias(&entries, name, volume_case_insensitive)
+        {
+            let chosen_name = choose_alias_spelling(
+                &base_view,
+                &inputs,
+                name,
+                Some(1),
+                volume_case_insensitive,
+            )?;
+            let resolved_name = resolve_parent_alias_prefix(
+                &chosen_name,
+                &canonical_dirs,
+                volume_case_insensitive,
+            );
+            canonical_dirs.push(resolved_name.clone());
+            recorded_directories.insert(resolved_name);
+        }
+    }
     for name in directories.union(&recorded_directories) {
-        if entries.contains_key(name) {
+        if has_fs_alias(&entries, name, volume_case_insensitive) {
             continue;
         }
-        let baseline = base_view
-            .entries
-            .get(name)
-            .filter(|entry| matches!(entry, Entry::Directory { .. }));
+        let baseline = entry_by_alias(&base_view.entries, name, Some(1), volume_case_insensitive);
         let candidates = inputs
             .iter()
             .map(|(_, view)| {
-                view.entries
-                    .get(name)
-                    .filter(|entry| matches!(entry, Entry::Directory { .. }))
+                entry_by_alias(&view.entries, name, Some(1), volume_case_insensitive)
             })
             .collect::<Vec<_>>();
         match choose_metadata(baseline, &candidates, name)? {
@@ -3557,9 +4054,19 @@ pub(crate) fn verify_result(path: &Path, source: &Path, head: &str) -> Result<()
 /// Both verification views are freshly read and disposable, so filter in place
 /// rather than deep-cloning the whole tree again at every nested repository.
 /// No persisted evidence or shared/cached view is modified.
+#[cfg(test)]
 fn strip_generated(view: &mut View, tracked: &std::collections::BTreeSet<String>) {
+    strip_generated_at(view, tracked, None);
+}
+
+fn strip_generated_at(
+    view: &mut View,
+    tracked: &std::collections::BTreeSet<String>,
+    root: Option<&Path>,
+) {
     let keep = |name: &str| {
-        !(crate::workspace::is_generated_artifact(Path::new(name)) && !tracked.contains(name))
+        !(crate::workspace::is_generated_artifact(Path::new(name))
+            && !crate::workspace::tracked_path_matches(root, tracked, name))
     };
     view.entries.retain(|name, _| keep(name));
     view.hardlinks.retain(keep);
@@ -3567,7 +4074,7 @@ fn strip_generated(view: &mut View, tracked: &std::collections::BTreeSet<String>
         if !keep(name) {
             return false;
         }
-        strip_generated(nested, tracked);
+        strip_generated_at(nested, tracked, root);
         true
     });
 }
@@ -3587,8 +4094,8 @@ pub(crate) fn verify_result_scoped(
         node_view(path, source, exclusions)?.ok_or("Missing current project view")?;
     let mut recorded = load(&record_path(source, head)?)?;
     let tracked = workspace::project_tracked_paths(path);
-    strip_generated(&mut current, &tracked);
-    strip_generated(&mut recorded, &tracked);
+    strip_generated_at(&mut current, &tracked, Some(path));
+    strip_generated_at(&mut recorded, &tracked, Some(path));
     if current != recorded {
         return Err("Completed project/Git metadata changed outside its recorded execution".into());
     }

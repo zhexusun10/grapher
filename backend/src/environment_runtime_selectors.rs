@@ -162,14 +162,16 @@ pub(super) fn observe(
         }
         // This is the target observed by the interpreter, not a selector to
         // reinterpret through a possibly changed filesystem a second time.
-        let target = text(Path::new(resolved));
-        if text(&canonical(Path::new(without_trailing_separator(
-            requested,
-        )))?)
-            != target
-        {
+        let resolved_target = canonical(Path::new(without_trailing_separator(requested)))?;
+        #[cfg(target_os = "macos")]
+        let valid_target =
+            crate::path_identity::equivalent_no_symlink_change(&resolved_target, Path::new(resolved));
+        #[cfg(not(target_os = "macos"))]
+        let valid_target = text(&resolved_target) == text(Path::new(resolved));
+        if !valid_target {
             return Err("Native runtime selector changed during observation".into());
         }
+        let target = text(&resolved_target);
         observed.insert(target.clone());
         if complete || external.contains(target.as_str()) {
             let path = if complete {
@@ -214,7 +216,20 @@ impl Selector {
             eprintln!("Native runtime selector {} crosses project code; checking is deferred until codeRef preparation, before E writes", self.path);
             return Ok(());
         };
-        if text(&actual) != self.target {
+        #[cfg(target_os = "macos")]
+        let matches = crate::path_identity::equivalent_no_symlink_change(
+            &crate::native::host_path(&actual),
+            Path::new(&self.target),
+        ) || actual.parent().is_some_and(|parent| {
+            crate::path_identity::macos_equivalent_path(
+                &actual,
+                Path::new(&self.target),
+                crate::path_identity::case_insensitive_volume(parent),
+            )
+        });
+        #[cfg(not(target_os = "macos"))]
+        let matches = text(&actual) == self.target;
+        if !matches {
             return Err(format!("Native runtime selector was redirected: {} (recorded {}, projected {}); preserving current workspace/state", self.path, self.target, text(&actual)));
         }
         Ok(())
@@ -229,7 +244,12 @@ impl Selector {
         // Equal bytes at a different target cannot authorize redirecting it.
         let actual = canonical(Path::new(path)).map_err(|error| format!(
             "External native runtime selector is unavailable: {}; preserving current workspace/state: {error}", self.path))?;
-        if text(&actual) != self.target {
+        #[cfg(target_os = "macos")]
+        let matches =
+            crate::path_identity::equivalent_no_symlink_change(&actual, Path::new(&self.target));
+        #[cfg(not(target_os = "macos"))]
+        let matches = text(&actual) == self.target;
+        if !matches {
             return Err(format!("External native runtime selector was redirected: {} (recorded {}, current {}); preserving current workspace/state", self.path, self.target, text(&actual)));
         }
         Ok(())

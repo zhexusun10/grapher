@@ -212,7 +212,8 @@ export function packageRelease(platform, arch, artifact) {
         env: { ...process.env, GRAPHER_PACKAGE_ROOT: destination, GRAPHER_PACKAGE_ARCHIVE: archive }, stdio: 'inherit',
       });
     } else {
-      execFileSync('tar', ['czf', archive, '-C', staging, name], { stdio: 'inherit' });
+      const env = platform === 'macos' ? { ...process.env, COPYFILE_DISABLE: '1' } : process.env;
+      execFileSync('tar', ['czf', archive, '-C', staging, name], { env, stdio: 'inherit' });
     }
     console.log(`Packaged ${basename(archive)}`);
   } finally {

@@ -6,18 +6,49 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn kernel_path(path: &Path) -> Result<PathBuf, String> {
+    let resolved = path.canonicalize().map_err(|e| e.to_string())?;
+    Ok(crate::path_identity::actual_path(&resolved).unwrap_or(resolved))
+}
+
 /// Allow platform aliases in the trusted root (e.g. /var on macOS), but
 /// never let a writable exception traverse symlinks beneath that root.
 fn canonical_exception(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    let relative = path.strip_prefix(root).map_err(|_| {
-        format!(
-            "Sandbox exception {} is outside {}",
-            path.display(),
-            root.display()
-        )
-    })?;
-    let mut resolved = root
-        .canonicalize()
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("Sandbox exceptions must not contain parent traversal".into());
+    }
+    let relative = path
+        .strip_prefix(root)
+        .ok()
+        .or_else(|| {
+            #[cfg(target_os = "macos")]
+            {
+                // Prefer the outermost non-symlink root alias so symlinks beneath it still get checked.
+                path.ancestors()
+                    .filter(|ancestor| {
+                        !fs::symlink_metadata(ancestor)
+                            .is_ok_and(|meta| meta.file_type().is_symlink())
+                            && crate::path_identity::same_path(ancestor, root)
+                    })
+                    .last()
+                    .and_then(|ancestor| path.strip_prefix(ancestor).ok())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "Sandbox exception {} is outside {}",
+                path.display(),
+                root.display()
+            )
+        })?;
+    let mut resolved = kernel_path(root)
         .map_err(|e| format!("Cannot resolve sandbox root {}: {e}", root.display()))?;
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
@@ -32,6 +63,7 @@ fn canonical_exception(root: &Path, path: &Path) -> Result<PathBuf, String> {
                 resolved.display()
             ));
         }
+        resolved = crate::path_identity::actual_path(&resolved).unwrap_or(resolved);
     }
     Ok(resolved)
 }
@@ -125,8 +157,8 @@ fn write_profile(
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
     }
     let current = canonical_exception(worktree_root, current)?;
-    let repository = repository.canonicalize().map_err(|e| e.to_string())?;
-    let worktree_root = worktree_root.canonicalize().map_err(|e| e.to_string())?;
+    let repository = kernel_path(repository)?;
+    let worktree_root = kernel_path(worktree_root)?;
     if !current.starts_with(&worktree_root)
         || current == worktree_root
         || current.starts_with(&repository)
@@ -144,10 +176,10 @@ fn write_profile(
         .map(
             |(data, session, engine, installation)| -> Result<_, String> {
                 Ok((
-                    data.canonicalize().map_err(|e| e.to_string())?,
+                    kernel_path(data)?,
                     canonical_exception(data, session)?,
-                    engine.canonicalize().map_err(|e| e.to_string())?,
-                    installation.canonicalize().map_err(|e| e.to_string())?,
+                    kernel_path(engine)?,
+                    kernel_path(installation)?,
                 ))
             },
         )
@@ -185,14 +217,14 @@ fn write_profile(
             ],
         )
         .ok()?;
-        let expected = PathBuf::from(expected).canonicalize().ok()?;
+        let expected = kernel_path(Path::new(&expected)).ok()?;
         for alternate in std::iter::once(current.join(".git/objects/info/alternates")).chain(
             extra_exceptions
                 .iter()
                 .map(|path| path.join("objects/info/alternates")),
         ) {
             if let Ok(value) = fs::read_to_string(&alternate) {
-                if let Ok(objects) = PathBuf::from(value.trim()).canonicalize() {
+                if let Ok(objects) = kernel_path(Path::new(value.trim())) {
                     if objects == expected {
                         return Some(objects);
                     }
@@ -323,7 +355,7 @@ fn write_profile(
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
     let shadow_dir = crate::workspace::shadow_repo_dir(&repository)?;
     if shadow_dir.exists() || shadow_dir.is_symlink() {
-        let canonical_shadow = shadow_dir.canonicalize().map_err(|e| {
+        let canonical_shadow = kernel_path(&shadow_dir).map_err(|e| {
             format!(
                 "Cannot resolve shadow repository {}: {e}",
                 shadow_dir.display()
@@ -346,9 +378,7 @@ fn write_profile(
         ));
     }
     for common in common_dirs.into_iter().flatten() {
-        let common = PathBuf::from(common)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
+        let common = kernel_path(Path::new(&common))?;
         if !common.starts_with(&repository)
             && !common.starts_with(&current)
             && !extra_resolved.contains(&common)
@@ -365,9 +395,7 @@ fn write_profile(
             &current,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ) {
-            let common = PathBuf::from(common)
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
+            let common = kernel_path(Path::new(&common))?;
             if !common.starts_with(&current) && !extra_resolved.contains(&common) {
                 text.push_str(&format!(
                     "(deny file-read* file-write* (subpath {}))\n",

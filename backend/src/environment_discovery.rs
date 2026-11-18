@@ -119,9 +119,12 @@ fn text(path: &Path) -> String {
     native::host_path(path).to_string_lossy().replace('\\', "/")
 }
 fn canonical(path: &Path) -> Result<PathBuf, String> {
-    path.canonicalize()
-        .map(|path| native::host_path(&path))
-        .map_err(|e| format!("Cannot resolve native path {}: {e}", path.display()))
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve native path {}: {e}", path.display()))?;
+    #[cfg(target_os = "macos")]
+    let canonical = crate::path_identity::actual_path(&canonical).unwrap_or(canonical);
+    Ok(native::host_path(&canonical))
 }
 fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
     let root = canonical(root)?;
@@ -143,7 +146,9 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
             // outermost root alias so links beneath it still get checked.
             prefix
                 .ancestors()
-                .filter(|ancestor| canonical(ancestor).is_ok_and(|resolved| resolved == root))
+                .filter(|ancestor| {
+                    ancestor.is_dir() && crate::path_identity::same_path(ancestor, &root)
+                })
                 .last()
                 .and_then(|alias| prefix.strip_prefix(alias).ok())
         })
@@ -152,6 +157,17 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
     let name = text(relative);
     environment::safe_relative(&name)?;
     real_child_path(&root, &root.join(relative), false)?;
+    #[cfg(target_os = "macos")]
+    let name = crate::path_identity::actual_path(&root.join(relative))
+        .ok()
+        .and_then(|resolved| {
+            resolved
+                .strip_prefix(&root)
+                .ok()
+                .filter(|rel| !rel.as_os_str().is_empty())
+                .map(text)
+        })
+        .unwrap_or(name);
     if [
         ".runtime-cache",
         ".agent-home",
@@ -1492,8 +1508,17 @@ pub(crate) fn resolve_for_policy_with_state(
                             let observed = candidates
                                 .contains_key(&((*label).into(), relative.clone()))
                                 || launch.environment.as_ref().is_some_and(|binding| {
-                                    binding.prefix == relative
-                                        && binding_root_label(launch, &roots) == *label
+                                    binding_root_label(launch, &roots) == *label
+                                        && workspace::scope_contains_at(
+                                            root,
+                                            Path::new(&binding.prefix),
+                                            Path::new(&relative),
+                                        )
+                                        && workspace::scope_contains_at(
+                                            root,
+                                            Path::new(&relative),
+                                            Path::new(&binding.prefix),
+                                        )
                                 });
                             if !observed && !best_effort {
                                 return Err(format!("Unobserved native environment at {relative}; refusing directory-name inference or a silent bootstrap binding"));

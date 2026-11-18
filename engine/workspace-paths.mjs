@@ -1,9 +1,22 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { actualPath, foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, msysHostInput, pathStartsWith, pathWithin, setMsysHostAliases, toHostInput } from './path-identity.mjs';
+import {
+  actualPath,
+  foldPath,
+  hostPath,
+  isCaseInsensitive,
+  mapPhysicalPath,
+  msysHostInput,
+  pathStartsWith,
+  pathWithin,
+  relativePreservingCase,
+  resolveSourceCaseInsensitive,
+  setMsysHostAliases,
+  toHostInput,
+} from './path-identity.mjs';
 
 // Explicit tool adaptation, not an operating-system mount namespace.
 
@@ -209,14 +222,24 @@ function insideRanges(ranges, at) {
   return ranges.find(range => at >= range.start && at < range.end);
 }
 
-export function createWorkspacePaths(directory, originalRoot = directory, sourceAlias = originalRoot, extraWorkspaces = []) {
+export function createWorkspacePaths(
+  directory,
+  originalRoot = directory,
+  sourceAlias = originalRoot,
+  extraWorkspaces = [],
+  options = {},
+) {
   // Rust canonicalize() emits extended Windows paths. Node and Git Bash also
   // expose normal drive paths and /c/... spellings of the same directory.
   const root = hostPath(realpathSync.native(hostPath(directory)));
   // The source can be inaccessible under macOS/Linux isolation; never stat it.
   const base = hostPath(resolve(originalRoot));
   const WORKSPACE_PATH = base;
-  const caseInsensitive = isCaseInsensitive(root);
+  const workspaceCaseInsensitive = options?.workspaceCaseInsensitive ?? isCaseInsensitive(root);
+  const sourceCaseInsensitive = resolveSourceCaseInsensitive(
+    workspaceCaseInsensitive,
+    options?.sourceCaseInsensitive,
+  );
   const denied = parseDeniedPaths(process.env.GRAPHER_DENIED_PATHS);
   const variants = value => {
     const source = unicodeVariants(hostPath(value));
@@ -291,16 +314,22 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   ];
   // Plain filesystem paths are presented relative to the project root. Keep
   // structured URI encodings valid; do not turn file URLs into file://./... .
-  const replacements = [...new Map(aliases.flatMap(alias => spellings.map(spelling => [
+  const encodeAliases = list => [...new Map(list.flatMap(alias => spellings.map(spelling => [
     spelling.encode(alias), spelling.plain ? (process.platform === 'win32' ? VISIBLE_ROOT : '.') : spelling.encode(base),
   ])).reverse()).entries()].sort(([a], [b]) => b.length - a.length);
-  const pathPrefix = (value, prefix) => pathStartsWith(value, prefix, caseInsensitive);
+  const workspaceReplacements = encodeAliases(
+    [...new Set(allWorkspaces.flatMap(variants))].sort((a, b) => b.length - a.length),
+  );
+  const sourceReplacements = encodeAliases(projects);
+  const replacements = [...new Map([...workspaceReplacements, ...sourceReplacements].reverse()).entries()]
+    .sort(([a], [b]) => b.length - a.length);
+  const pathPrefix = (value, prefix) => pathStartsWith(value, prefix, sourceCaseInsensitive);
   const commandPrefixes = projects;
   const commandRoot = process.platform === 'win32' ? root.replaceAll('\\', '/') : root;
   const commandIndex = new Map();
   for (const prefix of commandPrefixes) {
-    const matcher = { prefix, length: prefix.length, folded: foldPath(prefix, caseInsensitive) };
-    const first = foldPath(prefix.slice(0, 1), caseInsensitive);
+    const matcher = { prefix, length: prefix.length, folded: foldPath(prefix, sourceCaseInsensitive) };
+    const first = foldPath(prefix.slice(0, 1), sourceCaseInsensitive);
     const matches = commandIndex.get(first) ?? [];
     matches.push(matcher);
     commandIndex.set(first, matches);
@@ -308,16 +337,23 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   // Replace original input only, longest spelling first. Reprocessing a newly
   // normalized URI can corrupt it (especially when source cwd == workspace),
   // making the visible namespace differ between source and private turns.
-  const visibleReplacements = new Map(replacements);
-  const visibleLookup = new Map([...visibleReplacements].map(([alias, replacement]) =>
-    [foldPath(alias, caseInsensitive), replacement]));
+  const visibleExact = new Map(replacements);
+  const workspaceLookup = new Map(workspaceReplacements.map(([alias, replacement]) =>
+    [foldPath(alias, workspaceCaseInsensitive), replacement]));
+  const sourceLookup = new Map(sourceReplacements.map(([alias, replacement]) =>
+    [foldPath(alias, sourceCaseInsensitive), replacement]));
+  const anyCaseInsensitive = workspaceCaseInsensitive || sourceCaseInsensitive;
   const visiblePattern = new RegExp(replacements.map(([alias]) => regexEscape(alias)).join('|'),
-    caseInsensitive ? 'gi' : 'g');
+    anyCaseInsensitive ? 'gi' : 'g');
   const visible = text => {
     if (typeof text !== 'string') return text;
-    const mapped = text.replace(visiblePattern,
-      (alias, at) => !replaceable(text, at, alias.length) ? alias
-        : visibleReplacements.get(alias) ?? visibleLookup.get(foldPath(alias, caseInsensitive)) ?? alias);
+    const mapped = text.replace(visiblePattern, (alias, at) => {
+      if (!replaceable(text, at, alias.length)) return alias;
+      if (visibleExact.has(alias)) return visibleExact.get(alias);
+      return workspaceLookup.get(foldPath(alias, workspaceCaseInsensitive))
+        ?? sourceLookup.get(foldPath(alias, sourceCaseInsensitive))
+        ?? alias;
+    });
     return process.platform === 'win32' ? visibleWindowsRoots(mapped) : mapped;
   };
   const physical = value => {
@@ -326,10 +362,16 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     // Convert only known roots, then use canonical roots so a real C:\tmp
     // path cannot be mistaken for the MSYS /tmp mount.
     const host = msysHostInput(value);
-    const mapped = mapPhysicalPath(host, root, projectRoots, caseInsensitive);
+    const mapped = mapPhysicalPath(
+      host,
+      root,
+      projectRoots,
+      workspaceCaseInsensitive,
+      sourceCaseInsensitive,
+    );
     if (mapped === host && host !== value
-        && !pathWithin(host, root, caseInsensitive)
-        && !projectRoots.some(candidate => pathWithin(host, candidate, caseInsensitive))) {
+        && !pathWithin(host, root, workspaceCaseInsensitive)
+        && !projectRoots.some(candidate => pathWithin(host, candidate, sourceCaseInsensitive))) {
       return value;
     }
     return mapped;
@@ -340,8 +382,8 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     const first = character !== undefined && character.charCodeAt(0) < 128
       ? process.platform === 'win32'
         ? character.replace('/', '\\').toLowerCase()
-        : caseInsensitive ? character.toLowerCase() : character
-      : foldPath(character ?? '', caseInsensitive);
+        : sourceCaseInsensitive ? character.toLowerCase() : character
+      : foldPath(character ?? '', sourceCaseInsensitive);
     const matches = commandIndex.get(first);
     if (!matches) return undefined;
     // Exact spelling is the common case; folded comparison is the fallback.
@@ -349,7 +391,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       if (text.startsWith(matcher.prefix, at)) return matcher;
     }
     for (const matcher of matches) {
-      if (foldPath(text.slice(at, at + matcher.length), caseInsensitive) === matcher.folded) {
+      if (foldPath(text.slice(at, at + matcher.length), sourceCaseInsensitive) === matcher.folded) {
         return matcher;
       }
     }
@@ -366,7 +408,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
         if (from === to) continue;
         // Do not turn file:///project-other into file:///workspace-other.
         const boundary = '(?=$|[/\\\\?#"\'`\\s<>),;])';
-        text = text.replace(new RegExp(regexEscape(from) + boundary, caseInsensitive ? 'gi' : 'g'), () => to);
+        text = text.replace(new RegExp(regexEscape(from) + boundary, sourceCaseInsensitive ? 'gi' : 'g'), () => to);
       }
     }
     return text;
@@ -377,13 +419,13 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     text = mapFileUrls(text);
     const words = shellWords(text);
     const replacements = [];
-    const foldedPrefixes = commandPrefixes.map(prefix => foldPath(prefix, caseInsensitive));
+    const foldedPrefixes = commandPrefixes.map(prefix => foldPath(prefix, sourceCaseInsensitive));
     for (let i = 0; i < words.length; i++) {
       if (!words[i].literal || !/^(?:.*[\\/])?(?:sh|bash|zsh|dash)(?:\.exe)?$/.test(words[i].value)) continue;
       for (let j = i + 1; j < words.length && /^-[a-zA-Z]+$/.test(words[j].value); j++) {
         if (!words[j].value.includes('c')) continue;
         const script = words[j + 1];
-        const foldedScript = script ? foldPath(script.value, caseInsensitive) : '';
+        const foldedScript = script ? foldPath(script.value, sourceCaseInsensitive) : '';
         if (script?.literal && foldedPrefixes.some(prefix => foldedScript.includes(prefix))) {
           replacements.push({ ...script, replacement: shellQuote(mapCommand(script.value)) });
           i = j + 1;
@@ -476,17 +518,12 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       // back to rewriting its source-looking prefix (for example source/../data),
       // which could point at a different directory after mapping.
       if (!mappedRoot && isAbsolute(host)) continue;
-      const foldedValue = foldPath(mappedRoot ? resolved : value, caseInsensitive);
-      const foldedProject = foldPath(mappedRoot ?? project, caseInsensitive);
-      let suffix;
-      if (mappedRoot) {
-        const relativeSuffix = relative(mappedRoot, resolved).replaceAll('\\', '/');
-        suffix = relativeSuffix === '..' || relativeSuffix.startsWith('../')
-          ? foldedValue.slice(foldedProject.length).replaceAll('\\', '/')
-          : relativeSuffix && !relativeSuffix.startsWith('/') ? `/${relativeSuffix}` : relativeSuffix;
-      } else {
-        suffix = foldedValue.slice(foldedProject.length).replaceAll('\\', '/');
-      }
+      const targetRoot = mappedRoot ?? project;
+      const targetValue = mappedRoot ? resolved : value;
+      const preserved = relativePreservingCase(targetRoot, targetValue, sourceCaseInsensitive);
+      const suffix = preserved === undefined
+        ? foldPath(targetValue, sourceCaseInsensitive).slice(foldPath(targetRoot, sourceCaseInsensitive).length).replaceAll('\\', '/')
+        : preserved ? `/${preserved.replaceAll('\\', '/')}` : '';
       edits.push({ ...word, replacement: prefix + shellQuote(commandRoot + suffix) });
     }
     for (const edit of edits.reverse()) text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);

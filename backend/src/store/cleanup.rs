@@ -39,7 +39,10 @@ impl Store {
         if !repository.is_absolute() {
             return Ok(());
         }
-        let Ok(source) = repository.canonicalize() else {
+        let Some(source) = crate::path_identity::actual_path(repository)
+            .ok()
+            .or_else(|| repository.canonicalize().ok())
+        else {
             return Ok(());
         };
         let _guard = store_write_guard()?;
@@ -374,11 +377,14 @@ impl Store {
             };
             let source = Path::new(&config.repository);
             let resolved = crate::workspace::shadow_repo_dir(source).ok();
-            if resolved.as_deref() != Some(expected) {
+            if !resolved
+                .as_deref()
+                .is_some_and(|res| crate::path_identity::same_path(res, expected))
+            {
                 // A missing binding cannot disprove recorded ownership. Don't
                 // discard recovery history merely because the source moved.
                 if resolved.is_none() && self.owned_cleanup_targets(&id)?.iter().any(|target| {
-                    matches!(target, Target::Shadow { root, name, .. } if root.join("shadow_repos").join(name) == expected)
+                    matches!(target, Target::Shadow { root, name, .. } if crate::path_identity::same_path(&root.join("shadow_repos").join(name), expected))
                 }) { return Ok(true); }
                 continue;
             }

@@ -261,7 +261,15 @@ fn prepare_warm_node(
         .env("GRAPHER_EXECUTION_KIND", "source")
         .env("GRAPHER_SOURCE_ALIAS", &key.5)
         .env("GRAPHER_WORKSPACE_ROOT", &key.0)
-        .env("GRAPHER_ORIGINAL_ROOT", &key.0);
+        .env("GRAPHER_ORIGINAL_ROOT", &key.0)
+        .env(
+            "GRAPHER_SOURCE_CASE_INSENSITIVE",
+            if crate::path_identity::case_insensitive_volume(&key.0) {
+                "1"
+            } else {
+                "0"
+            },
+        );
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1234,21 +1242,25 @@ fn run_pi_with_timeout(
     }
     command.env(
         "GRAPHER_WORKSPACE_ROOT",
-        request
-            .cwd
-            .canonicalize()
-            .map_err(|error| error.to_string())?,
+        crate::path_identity::actual_path(request.cwd)
+            .or_else(|_| request.cwd.canonicalize().map_err(|error| error.to_string()))?,
     );
+    let original_path = Path::new(if config.repository.trim().is_empty() {
+        request.cwd.as_os_str()
+    } else {
+        config.repository.as_ref()
+    });
+    let original_root = crate::path_identity::actual_path(original_path)
+        .or_else(|_| original_path.canonicalize().map_err(|error| error.to_string()))?;
     command.env(
-        "GRAPHER_ORIGINAL_ROOT",
-        Path::new(if config.repository.trim().is_empty() {
-            request.cwd.as_os_str()
+        "GRAPHER_SOURCE_CASE_INSENSITIVE",
+        if crate::path_identity::case_insensitive_volume(&original_root) {
+            "1"
         } else {
-            config.repository.as_ref()
-        })
-        .canonicalize()
-        .map_err(|error| error.to_string())?,
+            "0"
+        },
     );
+    command.env("GRAPHER_ORIGINAL_ROOT", original_root);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2321,8 +2333,9 @@ fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
         return None;
     }
     let session_id = request.session_id?;
-    let cwd = request.cwd.canonicalize().ok()?;
-    let repository = Path::new(&request.config.repository).canonicalize().ok()?;
+    let cwd = crate::path_identity::actual_path(request.cwd).ok()?;
+    let repository =
+        crate::path_identity::actual_path(Path::new(&request.config.repository)).ok()?;
     if !crate::path_identity::same_path(&cwd, &repository) {
         return None;
     }

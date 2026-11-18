@@ -140,7 +140,7 @@ fn purge(root: &Path, store: &Store, mut record: Record) -> Result<(), String> {
     if store
         .cleanup_sources()?
         .iter()
-        .any(|source| source.starts_with(&path))
+        .any(|source| crate::workspace::scope_contains(source, &path))
     {
         return Err("Detached workspace contains a protected source project".into());
     }

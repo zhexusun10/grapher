@@ -276,7 +276,11 @@ impl RuntimeEvidence {
         for (path, blob) in raw {
             let recorded = Path::new(&path);
             let path = canonical(recorded)?;
-            if references.is_some() && text(&path) != text(recorded) {
+            #[cfg(target_os = "macos")]
+            let same_target = crate::path_identity::equivalent_no_symlink_change(&path, recorded);
+            #[cfg(not(target_os = "macos"))]
+            let same_target = text(&path) == text(recorded);
+            if references.is_some() && !same_target {
                 return Err("Native runtime file target changed during observation".into());
             }
             let local = roots.iter().find_map(|(label, root)| {
@@ -486,7 +490,12 @@ fn check_external(path: &Path, expected: &str) -> Result<(), String> {
 
 fn check_input(path: &Path, expected: &str, category: &str) -> Result<(), String> {
     let current = canonical(path).map_err(|error| format!("{category} native runtime input is unavailable; preserving current managed environment state: {error}"))?;
-    if text(&current) != text(&native::host_path(path))
+    #[cfg(target_os = "macos")]
+    let valid_target =
+        crate::path_identity::equivalent_no_symlink_change(&current, &native::host_path(path));
+    #[cfg(not(target_os = "macos"))]
+    let valid_target = text(&current) == text(&native::host_path(path));
+    if !valid_target
         || !fs::symlink_metadata(&current)
             .map_err(|e| e.to_string())?
             .is_file()

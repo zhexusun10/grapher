@@ -3209,35 +3209,8 @@ button.session-label-toggle:focus-visible {
   box-shadow: none;
 }
 
-/* 响应式适配 */
-@media (max-width: 1180px) {
-  .sidebar:not(.is-collapsed) {
-    --sidebar-content-width: 162px;
-    --sidebar-scrollbar-offset: 7px;
-    width: 184px;
-    max-width: 184px;
-    padding-left: 10px;
-    padding-right: 10px;
-  }
-
-  .sidebar:not(.is-collapsed) .brand {
-    font-size: 20px;
-    padding-left: 6px;
-    gap: 7px;
-  }
-
-  .version {
-    display: none;
-  }
-
-  .main {
-    padding: 0 12px;
-  }
-
-  .workspace-footer>span:last-child {
-    display: none;
-  }
-}
+/* 响应式适配：保持侧边栏宽度稳定，由主内容区与输入框优先自适应缩窄，
+   直到 720px 以下切换为折叠导轨与悬浮抽屉。 */
 
 /* Switch on available workspace width, including changes from the sidebar,
    rather than the browser width. Keep both panes mounted and measurable. */

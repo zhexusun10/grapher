@@ -3067,3 +3067,257 @@ fn workspace_free_composition_records_a_mode_only_change() {
     workspace::prepare(&source, &follow, &published, &[]).unwrap();
     verify_result(&follow, &source, &published).unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn prepare_and_seal_reconcile_nfd_case_aliases_and_ignore_ds_store_in_deleted_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::create_dir(source.join("Caf\u{00e9}")).unwrap();
+    fs::create_dir(source.join("EmptyCaf\u{00e9}")).unwrap();
+    fs::write(source.join("Caf\u{00e9}/note.txt"), "base note").unwrap();
+    fs::write(source.join("README.md"), "readme v1").unwrap();
+    fs::create_dir(source.join("obsolete")).unwrap();
+    fs::write(source.join("obsolete/old.txt"), "old").unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "unicode and readme base"]).unwrap();
+
+    // Force source Git commit tree to hold NFC Caf\u{00e9}/note.txt while we will also test NFD on disk.
+    let base = workspace::snapshot_repository(&source).unwrap();
+
+    let a = slot(&temp, "branch-a");
+    let b = slot(&temp, "branch-b");
+    let reused = slot(&temp, "reused-slot");
+    workspace::prepare(&source, &a, &base, &[]).unwrap();
+    workspace::prepare(&source, &b, &base, &[]).unwrap();
+    workspace::prepare(&source, &reused, &base, &[]).unwrap();
+
+    // Branch A updates note under Caf\u{00e9}, deletes obsolete/, renames README.md -> readme.md,
+    // and renames empty directory EmptyCaf\u{00e9} -> emptycafe\u{301}.
+    let note_a = if a.join("Cafe\u{301}/note.txt").exists() {
+        a.join("Cafe\u{301}/note.txt")
+    } else {
+        a.join("Caf\u{00e9}/note.txt")
+    };
+    fs::write(&note_a, "note from branch A").unwrap();
+    fs::remove_dir_all(a.join("obsolete")).unwrap();
+    let tmp_readme = a.join(".tmp-readme");
+    fs::rename(a.join("README.md"), &tmp_readme).unwrap();
+    fs::rename(&tmp_readme, a.join("readme.md")).unwrap();
+    let tmp_empty = a.join(".tmp-empty");
+    fs::rename(a.join("EmptyCaf\u{00e9}"), &tmp_empty).unwrap();
+    fs::rename(&tmp_empty, a.join("emptycafe\u{301}")).unwrap();
+
+    // Branch B adds an unrelated file.
+    fs::write(b.join("b.txt"), "branch B").unwrap();
+
+    let ah = workspace::snapshot_node(&a, &source, "branch-a").unwrap();
+    let bh = workspace::snapshot_node(&b, &source, "branch-b").unwrap();
+
+    // Simulate Finder creating NFD spellings + .DS_Store inside both a baseline-deleted
+    // directory and an unrecorded leftover directory in the reused slot.
+    let existing_cafe = if reused.join("Caf\u{00e9}").exists() {
+        reused.join("Caf\u{00e9}")
+    } else {
+        reused.join("Cafe\u{301}")
+    };
+    let tmp_cafe = reused.join(".tmp-cafe");
+    fs::rename(&existing_cafe, &tmp_cafe).unwrap();
+    fs::rename(&tmp_cafe, reused.join("Cafe\u{301}")).unwrap();
+    fs::write(reused.join("obsolete/.DS_Store"), "finder metadata").unwrap();
+    fs::create_dir(reused.join("unrecorded_leftover")).unwrap();
+    fs::write(reused.join("unrecorded_leftover/.DS_Store"), "finder").unwrap();
+
+    workspace::prepare(&source, &reused, &base, &[ah.clone(), bh.clone()]).unwrap();
+    verify_result(&reused, &source, &workspace::git(&reused, &["rev-parse", "HEAD"]).unwrap())
+        .unwrap();
+    assert!(!reused.join("obsolete").exists());
+    assert!(!reused.join("unrecorded_leftover").exists());
+
+    // Merging and sealing composed view must succeed without falling back to a failed checkout.
+    let published =
+        crate::graph_merge::merge_graph(&source, &[ah.clone(), bh.clone()], || panic!("no conflict"))
+            .unwrap();
+    let follow = slot(&temp, "follow-published");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    verify_result(&follow, &source, &published).unwrap();
+    let sealed = load(&record_path(&source, &published).unwrap()).unwrap();
+    assert!(sealed.entries.contains_key("readme.md"));
+    assert!(sealed.entries.contains_key("emptycafe\u{301}"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_validate_ready_accepts_case_aliased_bound_git_and_nested_git() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::write(repo.join("app.txt"), "v1").unwrap();
+    let nested_src = repo.join("NestedRepo");
+    fs::create_dir(&nested_src).unwrap();
+    workspace::git(&nested_src, &["init", "-q"]).unwrap();
+    configure_author(&nested_src);
+    fs::write(nested_src.join("lib.txt"), "nested").unwrap();
+    workspace::git(&nested_src, &["add", "."]).unwrap();
+    workspace::git(&nested_src, &["commit", "-q", "-m", "nested"]).unwrap();
+    workspace::git(&repo, &["add", "app.txt"]).unwrap();
+    workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+
+    let head = workspace::snapshot_repository(&repo).unwrap();
+    let ws = slot(&temp, "MySlot");
+    workspace::prepare(&repo, &ws, &head, &[]).unwrap();
+
+    if crate::path_identity::case_insensitive_volume(&ws) {
+        let aliased = ws.with_file_name("MYSLOT");
+        validate_ready(&aliased, &repo).unwrap();
+    } else {
+        validate_ready(&ws, &repo).unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_empty_dir_rename_conflict_and_delete_vs_rename_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::create_dir(repo.join("EmptyCaf\u{00e9}\u{00f6}")).unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+
+    // Divergent renames on two branches must error instead of last-writer-wins.
+    let a = slot(&temp, "div-a");
+    let b = slot(&temp, "div-b");
+    let reused = slot(&temp, "div-reused");
+    workspace::prepare(&repo, &a, &base, &[]).unwrap();
+    workspace::prepare(&repo, &b, &base, &[]).unwrap();
+    workspace::prepare(&repo, &reused, &base, &[]).unwrap();
+
+    let tmp_a = a.join(".tmp-div-a");
+    fs::rename(a.join("EmptyCaf\u{00e9}\u{00f6}"), &tmp_a).unwrap();
+    fs::rename(&tmp_a, a.join("EmptyCafe\u{0301}\u{00f6}")).unwrap();
+    let tmp_b = b.join(".tmp-div-b");
+    fs::rename(b.join("EmptyCaf\u{00e9}\u{00f6}"), &tmp_b).unwrap();
+    fs::rename(&tmp_b, b.join("EmptyCaf\u{00e9}o\u{0308}")).unwrap();
+    let ah = workspace::snapshot_node(&a, &repo, "a").unwrap();
+    let bh = workspace::snapshot_node(&b, &repo, "b").unwrap();
+
+    let prepare_err = prepare(&repo, &reused, &base, &[ah.clone(), bh.clone()], &[], false)
+        .unwrap_err();
+    assert!(prepare_err.contains("spelling composition conflict"), "{prepare_err}");
+    let seal_err = seal_composed_view(&repo, &reused, &base, &[ah, bh], &[], &base)
+        .unwrap_err();
+    assert!(seal_err.contains("spelling composition conflict"), "{seal_err}");
+
+    // Delete in A vs rename in B must error instead of silently deleting.
+    let d_del = slot(&temp, "del-a");
+    let d_ren = slot(&temp, "ren-b");
+    let d_reused = slot(&temp, "del-ren-reused");
+    workspace::prepare(&repo, &d_del, &base, &[]).unwrap();
+    workspace::prepare(&repo, &d_ren, &base, &[]).unwrap();
+    workspace::prepare(&repo, &d_reused, &base, &[]).unwrap();
+    fs::remove_dir(d_del.join("EmptyCaf\u{00e9}\u{00f6}")).unwrap();
+    let tmp_ren = d_ren.join(".tmp-ren");
+    fs::rename(d_ren.join("EmptyCaf\u{00e9}\u{00f6}"), &tmp_ren).unwrap();
+    fs::rename(&tmp_ren, d_ren.join("EmptyCafe\u{0301}o\u{0308}")).unwrap();
+    let del_h = workspace::snapshot_node(&d_del, &repo, "del").unwrap();
+    let ren_h = workspace::snapshot_node(&d_ren, &repo, "ren").unwrap();
+
+    let err = prepare(&repo, &d_reused, &base, &[del_h.clone(), ren_h.clone()], &[], false)
+        .unwrap_err();
+    assert!(err.contains("deletion conflicts with rename"), "{err}");
+    let seal_err2 = seal_composed_view(&repo, &d_reused, &base, &[del_h, ren_h], &[], &base)
+        .unwrap_err();
+    assert!(seal_err2.contains("deletion conflicts with rename"), "{seal_err2}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_prepare_and_seal_align_empty_child_under_file_renamed_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::create_dir_all(repo.join("ParentCaf\u{00e9}/LeafDir")).unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+
+    let a = slot(&temp, "parent-a");
+    let b = slot(&temp, "parent-b");
+    let reused = slot(&temp, "parent-reused");
+    workspace::prepare(&repo, &a, &base, &[]).unwrap();
+    workspace::prepare(&repo, &b, &base, &[]).unwrap();
+    workspace::prepare(&repo, &reused, &base, &[]).unwrap();
+
+    // Branch A changes parent spelling to NFD (plus lowercase if case-insensitive) by adding a tracked file.
+    let target_parent = if crate::path_identity::case_insensitive_volume(&a) {
+        "parentcafe\u{301}"
+    } else {
+        "ParentCafe\u{301}"
+    };
+    let tmp = a.join(".tmp-parent");
+    fs::rename(a.join("ParentCaf\u{00e9}"), &tmp).unwrap();
+    fs::rename(&tmp, a.join(target_parent)).unwrap();
+    fs::write(a.join(target_parent).join("new.txt"), "from A").unwrap();
+
+    // Branch B leaves ParentCaf\u{00e9}/LeafDir untouched and adds another empty child using the old parent spelling.
+    fs::create_dir(b.join("ParentCaf\u{00e9}/ExtraEmpty")).unwrap();
+
+    let ah = workspace::snapshot_node(&a, &repo, "a").unwrap();
+    let bh = workspace::snapshot_node(&b, &repo, "b").unwrap();
+
+    workspace::prepare(&repo, &reused, &base, &[ah.clone(), bh.clone()]).unwrap();
+    verify_result(&reused, &repo, &workspace::git(&reused, &["rev-parse", "HEAD"]).unwrap())
+        .unwrap();
+    assert!(reused.join(target_parent).join("LeafDir").is_dir());
+    assert!(reused.join(target_parent).join("ExtraEmpty").is_dir());
+
+    let published =
+        crate::graph_merge::merge_graph(&repo, &[ah, bh], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "parent-follow");
+    workspace::prepare(&repo, &follow, &published, &[]).unwrap();
+    verify_result(&follow, &repo, &published).unwrap();
+    let sealed = load(&record_path(&repo, &published).unwrap()).unwrap();
+    assert!(sealed.entries.contains_key(&format!("{target_parent}/new.txt")));
+    assert!(sealed.entries.contains_key(&format!("{target_parent}/LeafDir")));
+    assert!(sealed.entries.contains_key(&format!("{target_parent}/ExtraEmpty")));
+    assert!(!sealed.entries.keys().any(|k| k.starts_with("ParentCaf\u{00e9}")));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_prepare_replaces_dir_with_untracked_ds_store_by_file_and_keeps_tracked_or_user_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::create_dir(repo.join("ReplacedDir")).unwrap();
+    fs::write(repo.join("ReplacedDir/old.txt"), "old").unwrap();
+    workspace::git(&repo, &["add", "-A"]).unwrap();
+    workspace::git(&repo, &["commit", "-qm", "dir base"]).unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+
+    let node = slot(&temp, "replace-node");
+    let reused = slot(&temp, "replace-reused");
+    workspace::prepare(&repo, &node, &base, &[]).unwrap();
+    workspace::prepare(&repo, &reused, &base, &[]).unwrap();
+
+    fs::remove_dir_all(node.join("ReplacedDir")).unwrap();
+    fs::write(node.join("ReplacedDir"), "now a file").unwrap();
+    let nh = workspace::snapshot_node(&node, &repo, "n").unwrap();
+
+    // Simulate ReplacedDir/.DS_Store remaining on disk while HEAD advances to the file result.
+    let node_git = workspace::private_git_dir(&node).unwrap();
+    let node_url = workspace::git_file_url(&node_git).unwrap();
+    workspace::git(&reused, &["fetch", "-q", &node_url, &nh]).unwrap();
+    workspace::git(&reused, &["update-ref", "HEAD", &nh]).unwrap();
+    fs::remove_file(reused.join("ReplacedDir/old.txt")).unwrap();
+    fs::write(reused.join("ReplacedDir/.DS_Store"), "finder").unwrap();
+    prepare(&repo, &reused, &base, &[nh.clone()], &[], false).unwrap();
+    assert_eq!(fs::read_to_string(reused.join("ReplacedDir")).unwrap(), "now a file");
+
+    // Unrecorded user files inside a replaced directory must still refuse.
+    let reused2 = slot(&temp, "replace-reused-user");
+    workspace::prepare(&repo, &reused2, &base, &[]).unwrap();
+    workspace::git(&reused2, &["fetch", "-q", &node_url, &nh]).unwrap();
+    workspace::git(&reused2, &["update-ref", "HEAD", &nh]).unwrap();
+    fs::remove_file(reused2.join("ReplacedDir/old.txt")).unwrap();
+    fs::write(reused2.join("ReplacedDir/unrecorded.txt"), "keep").unwrap();
+    assert!(prepare(&repo, &reused2, &base, &[nh], &[], false).is_err());
+    assert_eq!(
+        fs::read_to_string(reused2.join("ReplacedDir/unrecorded.txt")).unwrap(),
+        "keep"
+    );
+}

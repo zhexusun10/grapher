@@ -707,7 +707,6 @@ fn bootstrap_projection(
     discover_repository: bool,
     include_conversations: bool,
 ) -> Result<Bootstrap, String> {
-    load_env_file();
     let active_config = if service.planning.load(Ordering::SeqCst) {
         let active = list_plannings(service, None)?
             .into_iter()
@@ -1699,9 +1698,7 @@ fn stored_planner_session_id(
         let Some(bucket) = owner_dir.parent() else {
             return Ok(None);
         };
-        let node = bucket
-            .file_name()
-            .is_some_and(|name| name == ".grapher-worktrees")
+        let node = crate::workspace_state::is_managed_worktrees_bucket(bucket)
             && leaf
                 .get(leaf.len().saturating_sub(36)..)
                 .is_some_and(|id| Uuid::parse_str(id).is_ok());
@@ -6724,11 +6721,21 @@ pub fn run() -> Result<(), String> {
     // port, so a failed second launch cannot keep the host awake.
     crate::keep_awake::install();
     #[cfg(unix)]
-    let mut signals = signal_hook::iterator::Signals::new([
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGTERM,
-    ])
-    .map_err(|error| error.to_string())?;
+    let mut signals = {
+        let mut list = vec![signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+        // Handle SIGHUP (terminal closed on macOS/Linux) so owned background
+        // Node/Pi process groups are terminated instead of orphaned, while
+        // preserving nohup's SIG_IGN when intentionally detached.
+        let hup_ignored = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut action) == 0
+                && action.sa_sigaction == libc::SIG_IGN
+        };
+        if !hup_ignored {
+            list.push(signal_hook::consts::SIGHUP);
+        }
+        signal_hook::iterator::Signals::new(list).map_err(|error| error.to_string())?
+    };
     #[cfg(windows)]
     let shutdown_requested = {
         // signal-hook's iterator module is Unix-only; its flag API supports

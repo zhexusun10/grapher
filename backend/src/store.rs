@@ -441,11 +441,14 @@ impl Store {
                 continue;
             };
             let candidate = Path::new(&config.repository);
-            if candidate == repository
-                || candidate
-                    .canonicalize()
-                    .is_ok_and(|canonical| canonical == repository)
-            {
+            let matches_repo = candidate == repository
+                || crate::path_identity::same_path(candidate, repository)
+                || repository
+                    .to_str()
+                    .is_some_and(|repo_str| {
+                        crate::path_identity::same_repository_binding(&config.repository, repo_str)
+                    });
+            if matches_repo {
                 return Ok(true);
             }
         }
@@ -674,5 +677,52 @@ impl Store {
         let _ = self
             .connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use crate::model::{Config, Graph};
+
+    #[test]
+    fn has_other_run_for_repository_recognizes_macos_case_and_unicode_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("events.sqlite")).unwrap();
+        let repo = temp.path().join("Caf\u{00e9}Repo");
+        std::fs::create_dir(&repo).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "repository": repo,
+            "model": "test/model",
+        }))
+        .unwrap();
+        let mut state = Snapshot::default();
+        state.run_id = "run-1".into();
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: "test".into(),
+                        nodes: vec![],
+                        edges: vec![],
+                    },
+                    config,
+                    planning_id: None,
+                    planning: None,
+                },
+            )
+            .unwrap();
+        let nfd_alias = if crate::path_identity::case_insensitive_volume(&repo) {
+            temp.path().join("cafe\u{0301}repo")
+        } else {
+            temp.path().join("Cafe\u{0301}Repo")
+        };
+        assert!(store
+            .has_other_run_for_repository("run-2", &nfd_alias)
+            .unwrap());
+        assert!(!store
+            .has_other_run_for_repository("run-1", &nfd_alias)
+            .unwrap());
     }
 }

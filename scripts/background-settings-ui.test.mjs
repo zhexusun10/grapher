@@ -61,9 +61,11 @@ test("Harness defaults keep Feedback opt-in and saved choices survive reload", {
   page.on("pageerror", error => errors.push(String(error)));
   const modes = page.locator(".landing-screen .prompt-box-mode-btn");
   const harnessCard = page.getByRole("region", { name: "Harness settings", exact: true });
-  const defaultOnLabels = ["Hide Auto mode", "Auto approve Planner graphs", "Post-task Planner review",
+  const uiCard = page.getByRole("region", { name: "UI settings", exact: true });
+  const defaultOnHarnessLabels = ["Auto approve Planner graphs", "Post-task Planner review",
     "Isolate parallel node workspaces", "Mount Planner write and edit tools"];
   const checkbox = name => harnessCard.getByRole("checkbox", { name, exact: true });
+  const hideAuto = uiCard.getByRole("checkbox", { name: "Hide Auto mode", exact: true });
   const feedback = checkbox("Enable Feedback");
   const maxParallelInput = harnessCard.getByRole("spinbutton", { name: "Parallel agents", exact: true });
   const maxFeedbackInput = harnessCard.getByRole("spinbutton", { name: "Feedback budget", exact: true });
@@ -72,7 +74,8 @@ test("Harness defaults keep Feedback opt-in and saved choices survive reload", {
     await modes.filter({ hasText: "Graph" }).waitFor();
     assert.deepEqual(await modes.allTextContents(), ["Serial", "Graph"]);
     await openSettings(page);
-    for (const label of defaultOnLabels) assert.equal(await checkbox(label).isChecked(), true, label);
+    for (const label of defaultOnHarnessLabels) assert.equal(await checkbox(label).isChecked(), true, label);
+    assert.equal(await hideAuto.isChecked(), true, "Hide Auto mode");
     assert.equal(await feedback.isChecked(), false, "Feedback is opt-in when absent from saved settings");
     assert.equal(await maxFeedbackInput.isDisabled(), true);
     assert.equal(await maxParallelInput.inputValue(), "20", "legacy maxParallel=0 defaults to 20");
@@ -93,7 +96,8 @@ test("Harness defaults keep Feedback opt-in and saved choices survive reload", {
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_hide_auto_mode_v1")), "1");
 
     await openSettings(page);
-    for (const label of defaultOnLabels) await checkbox(label).uncheck();
+    for (const label of defaultOnHarnessLabels) await checkbox(label).uncheck();
+    await hideAuto.uncheck();
     await feedback.check();
     assert.equal(await maxFeedbackInput.isEnabled(), true);
     await maxParallelInput.fill("1");
@@ -121,7 +125,8 @@ test("Harness defaults keep Feedback opt-in and saved choices survive reload", {
     await page.reload({ waitUntil: "domcontentloaded" });
     await modes.filter({ hasText: "Auto" }).waitFor();
     await openSettings(page);
-    for (const label of defaultOnLabels) assert.equal(await checkbox(label).isChecked(), false, label);
+    for (const label of defaultOnHarnessLabels) assert.equal(await checkbox(label).isChecked(), false, label);
+    assert.equal(await hideAuto.isChecked(), false, "Hide Auto mode");
     assert.equal(await feedback.isChecked(), true);
     assert.equal(await maxFeedbackInput.isEnabled(), true);
     assert.equal(await maxParallelInput.inputValue(), "24");
@@ -165,7 +170,8 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
   page.on("pageerror", error => errors.push(String(error)));
   const modes = page.locator(".landing-screen .prompt-box-mode-btn");
   const partitionerSettings = page.locator('.role-model-group[aria-label="Partitioner model configuration"]');
-  const toggle = page.getByRole("checkbox", { name: "Hide Auto mode", exact: true });
+  const uiCard = page.getByRole("region", { name: "UI settings", exact: true });
+  const toggle = uiCard.getByRole("checkbox", { name: "Hide Auto mode", exact: true });
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
     await modes.filter({ hasText: "Auto" }).waitFor();
@@ -176,9 +182,12 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
     assert.equal(await toggle.isChecked(), false);
     const planningCard = page.getByRole("region", { name: "Harness settings", exact: true });
     assert.deepEqual(await planningCard.getByRole("checkbox").evaluateAll(inputs => inputs.map(input => input.getAttribute("aria-label"))), [
-      "Hide Auto mode", "Auto approve Planner graphs", "Post-task Planner review",
+      "Auto approve Planner graphs", "Post-task Planner review",
       "Isolate parallel node workspaces", "Mount Planner write and edit tools", "Enable Feedback",
     ], "planning, approval, workspace and Planner file-tool options share one card");
+    assert.deepEqual(await uiCard.getByRole("checkbox").evaluateAll(inputs => inputs.map(input => input.getAttribute("aria-label"))), [
+      "Hide Auto mode", "Auto-expand chain of thought while running", "Show execution graph overview",
+    ], "Hide Auto mode lives inside UI settings");
     assert.equal(await planningCard.locator(".role-model-settings").count(), 0, "execution settings remain separate from model settings");
     assert.equal(await planningCard.getByRole("checkbox", { name: "Isolate parallel node workspaces", exact: true })
       .isChecked(), true, "workspace isolation remains enabled while editing Auto visibility");

@@ -625,7 +625,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                       }
                       onChange={(e) => setAnswer(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && answer.trim()) void respond();
+                        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && answer.trim()) void respond();
                       }}
                       className="auth-input-field"
                     />
@@ -703,7 +703,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     }
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && answer.trim()) void respond();
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && answer.trim()) void respond();
                     }}
                     className="auth-input-field"
                   />

@@ -453,3 +453,111 @@ fn native_runtime_external_directory_redirection_is_not_authorized_by_equal_byte
         "same bytes"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_case_and_unicode_aliases_pass_observation_and_preflight_while_symlinks_still_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::path_identity::actual_path(temp.path()).unwrap();
+    let w = base.join("WorkspaceRoot");
+    let tools = base.join("ToolDir");
+    fs::create_dir_all(w.join(".venv/Cafe\u{0301}/bin")).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    let py = w.join(".venv/Cafe\u{0301}/bin/python");
+    let ext = tools.join("libtool.dylib");
+    fs::write(&py, "owned-py").unwrap();
+    fs::write(&ext, "ext-lib").unwrap();
+
+    let insensitive = crate::path_identity::case_insensitive_volume(&base);
+    let lib_probe_name = if insensitive {
+        "LIBTOOL.DYLIB"
+    } else {
+        "libtool.dylib"
+    };
+    let tools_alias_dir = if insensitive {
+        base.join("tooldir")
+    } else {
+        tools.clone()
+    };
+    // Probe reports NFC + differing ASCII case in references while no symlinks exist.
+    let raw_files = BTreeMap::from([
+        (text(&w.join(".venv/Caf\u{00e9}/bin/python")), blob(&py)),
+        (text(&tools.join(lib_probe_name)), blob(&ext)),
+    ]);
+    let refs = BTreeMap::from([
+        (
+            text(&w.join(".venv/Cafe\u{0301}/bin/python")),
+            text(&w.join(".venv/Caf\u{00e9}/bin/python")),
+        ),
+        (
+            text(&tools_alias_dir.join("libtool.dylib")),
+            text(&tools.join(lib_probe_name)),
+        ),
+    ]);
+    let probe = serde_json::json!({
+        "schema": 3,
+        "files": raw_files,
+        "references": refs,
+    });
+    let mut framed = MARKER.to_vec();
+    framed.extend_from_slice(&serde_json::to_vec(&probe).unwrap());
+    framed.extend_from_slice(b"\0abi\n");
+    let w_alias = if insensitive {
+        base.join("workspaceroot")
+    } else {
+        w.clone()
+    };
+    let (evidence, _) = RuntimeEvidence::from_probe(&framed, &[("workspace", &w_alias)]).unwrap();
+
+    // Capture E and preflight with NFC/case-variant layout + check alias lookup.
+    let scope_name = if insensitive { ".Venv" } else { ".venv" };
+    let store_dir = base.join("env-store");
+    let files = Files::environment(&store_dir, &[scope_name.into()], &[]).unwrap();
+    let version = uuid::Uuid::new_v4().to_string();
+    let layouts = BTreeMap::from([(
+        "workspace".to_string(),
+        RootScope::normalized(vec![scope_name.to_string()], vec![]),
+    )]);
+    files
+        .capture_roots(
+            &BTreeMap::from([("workspace".to_string(), w.clone())]),
+            &layouts,
+            &version,
+            &[],
+        )
+        .unwrap();
+    evidence
+        .preflight(
+            &files,
+            &version,
+            "workspace",
+            &BTreeMap::from([("workspace".to_string(), w.clone())]),
+        )
+        .unwrap();
+
+    // Verify RuntimePaths and RuntimeEvidence alias lookups resolve NFD vs NFC and case.
+    let rp = files
+        .runtime_paths(
+            &version,
+            "workspace",
+            &BTreeMap::from([("workspace".to_string(), w.clone())]),
+        )
+        .unwrap();
+    assert!(rp.lookup("workspace", ".venv/Caf\u{00e9}/bin/python").is_ok());
+
+    // Symlink redirect must still fail preflight even with identical bytes.
+    let other_tools = base.join("OtherTools");
+    fs::create_dir(&other_tools).unwrap();
+    fs::write(other_tools.join("libtool.dylib"), "ext-lib").unwrap();
+    fs::remove_dir_all(&tools).unwrap();
+    crate::path_safety::directory_link(&other_tools, &tools);
+    let err = evidence
+        .preflight(
+            &files,
+            &version,
+            "workspace",
+            &BTreeMap::from([("workspace".to_string(), w)]),
+        )
+        .unwrap_err();
+    assert!(err.contains("redirected"), "{err}");
+}

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExtensionCommands } from '../engine/extension-commands.ts';
 
 async function fixture(run: (host: ExtensionCommands, paths: { base: string; own: string; global: string; a: string; b: string }) => Promise<void>) {
-  const base = mkdtempSync(join(tmpdir(), 'grapher-extension-commands-'));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-extension-commands-')));
   const paths = { base, own: join(base, 'own'), global: join(base, 'global'), a: join(base, 'project-a'), b: join(base, 'project-b') };
   for (const directory of [paths.own, paths.global, paths.a, paths.b]) mkdirSync(directory);
   mkdirSync(join(paths.global, 'extensions'));

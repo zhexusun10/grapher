@@ -45,7 +45,14 @@ fn copy_with_clone(
         return Ok(CopyKind::Bytes);
     }
     match clone_file(source, destination) {
-        Ok(()) => Ok(CopyKind::Clone),
+        Ok(()) => {
+            #[cfg(target_os = "macos")]
+            clear_cloned_immutable_flags(destination, &metadata).map_err(|error| {
+                let _ = fs::remove_file(destination);
+                format!("Cannot clear cloned file flags on {}: {error}", destination.display())
+            })?;
+            Ok(CopyKind::Clone)
+        }
         // Both macOS `clonefile` and the Linux O_EXCL destination creation can
         // lose a race to another writer. Never remove the winner's new file in
         // the generic clone-error cleanup below.
@@ -200,10 +207,19 @@ fn unsupported(error: &io::Error) -> bool {
     }
     #[cfg(unix)]
     {
-        matches!(
+        #[allow(unreachable_patterns)]
+        let known = matches!(
             error.raw_os_error(),
-            Some(libc::EXDEV | libc::ENOTSUP | libc::ENOTTY | libc::EINVAL | libc::ENOSYS)
-        ) || error.kind() == io::ErrorKind::Unsupported
+            Some(
+                libc::EXDEV
+                    | libc::ENOTSUP
+                    | libc::EOPNOTSUPP
+                    | libc::ENOTTY
+                    | libc::EINVAL
+                    | libc::ENOSYS
+            )
+        );
+        known || error.kind() == io::ErrorKind::Unsupported
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -233,11 +249,30 @@ fn clone(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn clear_cloned_immutable_flags(destination: &Path, source_metadata: &fs::Metadata) -> io::Result<()> {
+    use std::{ffi::CString, os::macos::fs::MetadataExt, os::unix::ffi::OsStrExt};
+    extern "C" {
+        fn lchflags(path: *const libc::c_char, flags: u32) -> libc::c_int;
+    }
+    let blocked = libc::UF_IMMUTABLE | libc::UF_APPEND;
+    let flags = source_metadata.st_flags();
+    if flags & blocked == 0 {
+        return Ok(());
+    }
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    if unsafe { lchflags(destination.as_ptr(), flags & !blocked) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn clone(source: &Path, destination: &Path) -> io::Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    const CLONE_NOFOLLOW: u32 = 0x0001;
     let source = CString::new(source.as_os_str().as_bytes())?;
     let destination = CString::new(destination.as_os_str().as_bytes())?;
-    if unsafe { clonefile(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
+    if unsafe { clonefile(source.as_ptr(), destination.as_ptr(), CLONE_NOFOLLOW) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -430,5 +465,39 @@ mod tests {
                 & 0o777,
             0o750
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_clone_clears_immutable_flags_and_recognizes_eopnotsupp() {
+        use std::ffi::CString;
+        use std::os::macos::fs::MetadataExt;
+        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+
+        extern "C" {
+            fn lchflags(path: *const libc::c_char, flags: u32) -> libc::c_int;
+        }
+
+        assert!(unsupported(&io::Error::from_raw_os_error(libc::EOPNOTSUPP)));
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("immutable-source");
+        let destination = root.path().join("cloned-destination");
+        fs::write(&source, b"immutable payload").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o444)).unwrap();
+        let c_source = CString::new(source.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { lchflags(c_source.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+
+        let copied = copy(&source, &destination);
+        unsafe { lchflags(c_source.as_ptr(), 0) };
+        copied.unwrap();
+
+        let dst_meta = fs::symlink_metadata(&destination).unwrap();
+        assert_eq!(dst_meta.st_flags() & (libc::UF_IMMUTABLE | libc::UF_APPEND), 0);
+        assert_eq!(fs::read(&destination).unwrap(), b"immutable payload");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&destination, b"writable copy").unwrap();
     }
 }

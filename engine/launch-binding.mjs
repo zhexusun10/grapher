@@ -320,10 +320,19 @@ const hiddenModelKeys = new Set([
   'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'ANTIGRAVITY_CLI_ALIAS',
 ]);
 const dataPathComponent = /[\\/]data(?:[\\/]|$)/i;
+function hasDataPathComponent(value) {
+  if (typeof value !== 'string' || !value || value.includes('\0')) return false;
+  let normalized = value;
+  if (process.platform === 'darwin') {
+    normalized = normalized.replace(/^\/System\/Volumes\/Data(?=\/|$)/i, '')
+      .replace(/^\/Volumes\/[^/]+(?=\/|$)/i, '') || '/';
+  }
+  return dataPathComponent.test(normalized);
+}
 function modelShellScratch(env) {
   for (const key of ['XDG_CACHE_HOME', 'GRAPHER_CACHE_DIR']) {
     const value = env[key];
-    if (typeof value === 'string' && value && !value.includes('\0') && !dataPathComponent.test(value)) {
+    if (typeof value === 'string' && value && !value.includes('\0') && !hasDataPathComponent(value)) {
       return `${value.replace(/[\\/]+$/, '')}/tmp`;
     }
   }
@@ -337,7 +346,7 @@ export function scrubModelShellEnvironment(env, { useCacheScratch = true } = {})
   }
   for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
     if (scratch) env[key] = scratch;
-    else if (typeof env[key] === 'string' && dataPathComponent.test(env[key])) delete env[key];
+    else if (hasDataPathComponent(env[key])) delete env[key];
   }
   return scratch;
 }
@@ -383,7 +392,7 @@ export function managedBashOptions(options, managed = false) {
     catch {
       for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
         const value = originalTemp[key];
-        if (typeof value === 'string' && !dataPathComponent.test(value)) env[key] = value;
+        if (typeof value === 'string' && !hasDataPathComponent(value)) env[key] = value;
         else delete env[key];
       }
     }

@@ -16,19 +16,36 @@ use std::{
 // redirects and require the interpreter that this operation is meant to repair.
 fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
     let mut parts = path.components();
+    let mut prefix = PathBuf::new();
     for expected in root.components() {
         let actual = parts.next()?;
-        let equal = if cfg!(windows) {
+        let equal = if actual == expected {
+            true
+        } else if cfg!(windows) {
             actual
                 .as_os_str()
                 .to_string_lossy()
                 .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
         } else {
-            actual == expected
+            #[cfg(target_os = "macos")]
+            {
+                let probe = prefix.join(expected.as_os_str());
+                let insensitive = crate::path_identity::case_insensitive_volume(&probe);
+                crate::path_identity::macos_fold_component(
+                    &actual.as_os_str().to_string_lossy(),
+                    insensitive,
+                ) == crate::path_identity::macos_fold_component(
+                    &expected.as_os_str().to_string_lossy(),
+                    insensitive,
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            false
         };
         if !equal {
             return None;
         }
+        prefix.push(expected.as_os_str());
     }
     Some(parts.as_path().to_path_buf())
 }

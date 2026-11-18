@@ -548,7 +548,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
             if !manifest
                 .protected_sources
                 .iter()
-                .any(|source| source.starts_with(&path))
+                .any(|source| crate::workspace::scope_contains(source, &path))
             {
                 if detach {
                     if !matches!(target, Target::Workspace { .. }) {

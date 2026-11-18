@@ -544,13 +544,14 @@ a,
 
 /* Below the workbench's single-pane breakpoint the expanded sidebar becomes an
    overlay. The conversation keeps the full width instead of being squeezed by
-   a 184px sidebar next to a narrow composer. */
+   the expanded sidebar next to a narrow composer. */
 @media (max-width: 720px) {
   .sidebar:not(.is-collapsed) {
     position: absolute;
     top: 12px;
     bottom: 12px;
     left: 12px;
+    max-width: calc(100vw - 24px);
     z-index: 40;
     margin: 0;
     box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);

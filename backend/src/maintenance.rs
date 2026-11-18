@@ -25,14 +25,18 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
         let state = store.load(id)?;
         if state.phase == "completed" && !tasks.iter().any(|task| task.run_id == *id) {
             let manifest = crate::cleanup::manifest(root, store, &state, false)?;
-            if manifest.targets.iter().any(|target| matches!(target, crate::cleanup::Target::Workspace { parent: owner_parent, .. } if owner_parent == parent)
+            if manifest.targets.iter().any(|target| matches!(target, crate::cleanup::Target::Workspace { parent: owner_parent, .. } if crate::path_identity::same_path(owner_parent, parent))
                 && target.resolve(root, id).ok().flatten().is_some())
                 {
                 tasks.push(crate::cleanup::Task { run_id: id.clone(), manifest, attempts: 0, last_error: None });
             }
         }
     }
-    let is_protected = |path: &Path| sources.iter().any(|source| source.starts_with(path));
+    let is_protected = |path: &Path| {
+        sources
+            .iter()
+            .any(|source| crate::workspace::scope_contains(source, path))
+    };
     let mut plan = WorkspacePlan {
         tasks,
         ..Default::default()
@@ -52,15 +56,19 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
             };
             // Absence from THIS database is not proof of garbage: another data
             // root or an archived database may still own this directory.
-            let recorded =
-                store
-                    .owned_cleanup_targets(&id)?
-                    .contains(&crate::cleanup::Target::Workspace {
-                        parent: parent.to_path_buf(),
-                        bucket: name.into(),
-                        owner: id.clone(),
+            let recorded = store.owned_cleanup_targets(&id)?.iter().any(|target| {
+                matches!(
+                    target,
+                    crate::cleanup::Target::Workspace {
+                        parent: owner_parent,
+                        bucket,
+                        owner,
                         checkout: None,
-                    });
+                    } if bucket == name
+                        && owner == &id
+                        && crate::path_identity::same_path(owner_parent, parent)
+                )
+            });
             if live.contains(&id)
                 || is_protected(&path)
                 || !store.run_was_deleted(&id)?
@@ -127,9 +135,13 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
             _ => return Err(format!("Unknown cleanup argument: {argument}. Usage: --cleanup-workspaces [--parent WORKSPACE_PARENT] [--apply]")),
         }
     }
-    let root = crate::workspace::data_root()
-        .canonicalize()
-        .map_err(|error| format!("Cannot open Grapher data directory: {error}"))?;
+    let root_raw = crate::workspace::data_root();
+    let root = crate::path_identity::actual_path(&root_raw)
+        .or_else(|_| {
+            root_raw
+                .canonicalize()
+                .map_err(|error| format!("Cannot open Grapher data directory: {error}"))
+        })?;
     let database = root.join("events.sqlite");
     if !database.is_file() {
         return Err(format!(
@@ -146,9 +158,12 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
     if !explicit_parent {
         fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
     }
-    let parent = parent
-        .canonicalize()
-        .map_err(|error| format!("Cannot resolve workspace parent: {error}"))?;
+    let parent = crate::path_identity::actual_path(&parent)
+        .or_else(|_| {
+            parent
+                .canonicalize()
+                .map_err(|error| format!("Cannot resolve workspace parent: {error}"))
+        })?;
     let plan = workspace_plan(&root, &store, &parent)?;
     let engine_parent = crate::workspace::native_runtime_parent();
     let sources = store.cleanup_sources()?;
@@ -190,7 +205,7 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
                         .protected_sources
                         .iter()
                         .chain(&sources)
-                        .any(|source| source.starts_with(&path)) =>
+                        .any(|source| crate::workspace::scope_contains(source, &path)) =>
                 {
                     println!("[cleanup] owned resource: {}", path.display())
                 }

@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, symlinkSync, linkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { createWorkspacePaths, VISIBLE_ROOT, visibleWindowsRoots } from '../engine/workspace-paths.mjs';
-import { actualPath, isCaseInsensitive, pathKey, pathWithin, samePath } from '../engine/path-identity.mjs';
+import {
+  actualPath,
+  isCaseInsensitive,
+  mapPhysicalPath,
+  pathKey,
+  pathWithin,
+  relativePreservingCase,
+  samePath,
+} from '../engine/path-identity.mjs';
 
 test('Windows visible paths use forward slashes for Bash and JSON spellings', () => {
   assert.equal(visibleWindowsRoots(`${VISIBLE_ROOT}\\a\\b`), './a/b');
@@ -262,6 +270,70 @@ test('private-execution denials report permission, not a platform errno', { skip
   } finally {
     if (previous === undefined) delete process.env.GRAPHER_DENIED_PATHS;
     else process.env.GRAPHER_DENIED_PATHS = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('case/Unicode command mapping preserves suffix case and separates source vs workspace sensitivity', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-case-split-')));
+  try {
+    const source = join(root, 'ProjSource');
+    const workspace = join(root, 'WorkSpace');
+    mkdirSync(source);
+    mkdirSync(workspace);
+
+    if (isCaseInsensitive(workspace)) {
+      const upperSource = source.toUpperCase();
+      const paths = createWorkspacePaths(workspace, source);
+      const cmd = paths.command(`pytest ${upperSource}/Tests/MyClass.py`);
+      assert.ok(cmd.includes('/Tests/MyClass.py'), `expected preserved suffix case, got: ${cmd}`);
+      assert.equal(paths.physical(`${upperSource}/Src/Index.ts`), join(workspace, 'Src', 'Index.ts'));
+      assert.equal(isCaseInsensitive(join(workspace, 'missing-a', 'missing-b', 'missing-c')), true);
+    }
+
+    if (process.platform === 'darwin') {
+      const nfcSource = join(root, 'Caf\u00e9Proj');
+      mkdirSync(nfcSource);
+      const nfdAlias = join(root, 'Cafe\u0301Proj');
+      const unicodePaths = createWorkspacePaths(workspace, nfcSource);
+      const mapped = unicodePaths.command(`cat ${nfdAlias}/SubDir/ReadMe.md`);
+      assert.ok(mapped.includes('/SubDir/ReadMe.md'), `expected preserved suffix after NFD prefix, got: ${mapped}`);
+      assert.equal(
+        unicodePaths.physical(`${nfdAlias}/SubDir/ReadMe.md`),
+        join(workspace, 'SubDir', 'ReadMe.md'),
+      );
+    }
+
+    // Separate volume case rules: case-sensitive source + case-insensitive workspace.
+    const split = createWorkspacePaths(workspace, source, source, [], {
+      workspaceCaseInsensitive: true,
+      sourceCaseInsensitive: false,
+    });
+    const wrongCaseSource = join(root, 'projsource', 'Src', 'App.ts');
+    assert.equal(split.command(`cat ${wrongCaseSource}`), `cat ${wrongCaseSource}`);
+    assert.equal(split.physical(wrongCaseSource), wrongCaseSource);
+    assert.equal(split.visible(`${join(root, 'projsource')}/marker`), `${join(root, 'projsource')}/marker`);
+    assert.equal(split.visible(`${join(root, 'workspace')}/marker`), './marker');
+
+    if (process.platform === 'darwin') {
+      // Symlinked workspace root alias + case mismatch on missing leaf keeps case-insensitive mapping.
+      if (isCaseInsensitive(workspace)) {
+        const wsLink = join(root, 'ws-symlink');
+        symlinkSync(workspace, wsLink, 'dir');
+        const upperViaReal = join(workspace.toUpperCase(), 'NewDir', 'File.ts');
+        assert.equal(mapPhysicalPath(upperViaReal, wsLink, [source]), join(workspace, 'NewDir', 'File.ts'));
+      } else {
+        // Case-sensitive APFS: hardlinked ASCII-case siblings in a non-ASCII directory must not fool probe.
+        const nonAscii = join(root, '2026-\u65e5\u672c');
+        mkdirSync(nonAscii);
+        writeFileSync(join(nonAscii, 'foo'), 'lower');
+        linkSync(join(nonAscii, 'foo'), join(nonAscii, 'FOO'));
+        assert.equal(isCaseInsensitive(nonAscii), false);
+      }
+      // Backslash inside a POSIX filename must stay literal, not act as a directory separator.
+      assert.equal(relativePreservingCase(workspace, `${workspace}/dir\\file.txt`, false), 'dir\\file.txt');
+    }
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

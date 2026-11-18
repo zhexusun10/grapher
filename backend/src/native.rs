@@ -115,7 +115,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
             let returned = PathBuf::from(output.trim())
                 .canonicalize()
                 .map_err(|error| error.to_string())?;
-            if returned != destination {
+            if !crate::path_identity::same_path(&returned, destination) {
                 return Err("Native runtime preparation returned a different destination".into());
             }
             Ok(())
@@ -395,12 +395,30 @@ pub(crate) fn workspace_environment(
     Ok(bindings)
 }
 
+fn is_managed_worktrees_or_workspaces_bucket(path: &Path) -> bool {
+    crate::workspace_state::is_managed_worktrees_bucket(path)
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                if cfg!(windows)
+                    || (cfg!(target_os = "macos")
+                        && crate::path_identity::case_insensitive_volume(path))
+                {
+                    name.eq_ignore_ascii_case(".grapher-workspaces")
+                } else {
+                    name == ".grapher-workspaces"
+                }
+            })
+}
+
 pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result<(), String> {
     crate::workspace::validate_binding(repository)?;
-    if let Some(bucket) = cwd.parent().and_then(Path::parent).filter(|root| {
-        root.file_name()
-            .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
-    }) {
+    if let Some(bucket) = cwd
+        .parent()
+        .and_then(Path::parent)
+        .filter(|root| is_managed_worktrees_or_workspaces_bucket(root))
+    {
         crate::path_safety::real_child_path(bucket, cwd, false)?;
     }
     let repository = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
@@ -432,9 +450,12 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         // A linked/worktree project Git may live under the slot's external
         // process root; validate_ready below still requires that exact binding.
         if cwd.join(".git").exists() {
-            let git = cwd.join(".git").canonicalize().map_err(|e| e.to_string())?;
+            let git = crate::path_identity::actual_path(&cwd.join(".git"))
+                .map_err(|e| e.to_string())?;
             let state = crate::workspace_state::process_root(&cwd)?;
-            if !git.starts_with(&cwd) && !git.starts_with(&state) {
+            if !crate::workspace::scope_contains(&git, &cwd)
+                && !crate::workspace::scope_contains(&git, &state)
+            {
                 return Err("Graph requires a private Git repository".into());
             }
         }
@@ -515,8 +536,20 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.env_remove("GRAPHER_AGENT_KIND");
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
+    bind_source_case(&mut command, &repository);
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
+}
+
+pub(crate) fn bind_source_case(command: &mut Command, source: &Path) {
+    command.env(
+        "GRAPHER_SOURCE_CASE_INSENSITIVE",
+        if crate::path_identity::case_insensitive_volume(source) {
+            "1"
+        } else {
+            "0"
+        },
+    );
 }
 
 /// The business launch binding replaces PATH before Pi/extension factories.
@@ -576,8 +609,18 @@ fn denied_paths_value(
         worktree_root.to_path_buf(),
         data.to_path_buf(),
     ];
-    if !crate::path_identity::same_path(repository, source) {
+    if repository != source {
         read.push(repository.to_path_buf());
+    }
+    if let Ok(actual_data) = crate::path_identity::actual_path(data) {
+        if actual_data != data {
+            read.push(actual_data);
+        }
+    }
+    if let Ok(actual_session) = crate::path_identity::actual_path(session) {
+        if actual_session != session {
+            allowed.push(actual_session);
+        }
     }
     let mut write = read.clone();
     write.push(engine.to_path_buf());
@@ -642,10 +685,7 @@ pub(crate) fn execution_command_scoped(
     let worktree_root = current
         .parent()
         .and_then(Path::parent)
-        .filter(|root| {
-            root.file_name()
-                .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
-        })
+        .filter(|root| is_managed_worktrees_or_workspaces_bucket(root))
         .ok_or("Graph workspace must be .grapher-worktrees/<run>/<instance>")?;
     #[cfg(windows)]
     let _ = worktree_root; // Keep the same workspace layout validation on Windows.
@@ -702,6 +742,7 @@ pub(crate) fn execution_command_scoped(
             .env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
         command.env("PYTHONDONTWRITEBYTECODE", "1");
@@ -712,6 +753,7 @@ pub(crate) fn execution_command_scoped(
         let _ = data;
         let _ = &merger_git;
         let mut command = unsandboxed_command(&engine, &current)?;
+        bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
         Ok(command)
@@ -733,6 +775,7 @@ pub(crate) fn execution_command_scoped(
         command.env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
         Ok(command)

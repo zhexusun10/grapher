@@ -38,6 +38,16 @@ impl RootScope {
                 .any(|cache| workspace::scope_contains(Path::new(path), Path::new(cache)))
     }
 
+    pub(crate) fn covers_at(&self, root: &Path, path: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| workspace::scope_contains_at(root, Path::new(path), Path::new(scope)))
+            && !self
+                .caches
+                .iter()
+                .any(|cache| workspace::scope_contains_at(root, Path::new(path), Path::new(cache)))
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.scopes.is_empty()
             || *self != Self::normalized(self.scopes.clone(), self.caches.clone())
@@ -95,6 +105,22 @@ impl Files {
     }
 
     pub(super) fn validate_rooted_metadata(&self, value: &Snapshot) -> Result<(), String> {
+        self.validate_rooted_metadata_impl(None, value)
+    }
+
+    pub(super) fn validate_rooted_metadata_at(
+        &self,
+        paths: &BTreeMap<String, PathBuf>,
+        value: &Snapshot,
+    ) -> Result<(), String> {
+        self.validate_rooted_metadata_impl(Some(paths), value)
+    }
+
+    fn validate_rooted_metadata_impl(
+        &self,
+        paths: Option<&BTreeMap<String, PathBuf>>,
+        value: &Snapshot,
+    ) -> Result<(), String> {
         if value.schema != 1 || value.roots.is_empty() {
             return Err("Unsupported root-qualified environment snapshot schema".into());
         }
@@ -103,9 +129,14 @@ impl Files {
                 return Err("Invalid environment snapshot ownership root".into());
             }
             root.layout.validate()?;
+            let base = paths.and_then(|map| map.get(label)).map(PathBuf::as_path);
             for (name, entry) in &root.entries {
                 relative(name)?;
-                if !root.layout.covers(name) {
+                let covered = base.map_or_else(
+                    || root.layout.covers(name),
+                    |base| root.layout.covers_at(base, name),
+                );
+                if !covered {
                     return Err(format!(
                         "Environment entry outside recorded scope coverage: {label}:{name}"
                     ));
@@ -169,7 +200,7 @@ impl Files {
         }
         let roots = paths
             .values()
-            .map(|path| path.canonicalize().map_err(|error| error.to_string()))
+            .map(|path| canonical_host_path(path))
             .collect::<Result<Vec<_>, _>>()?;
         for (index, root) in roots.iter().enumerate() {
             if roots[..index].iter().any(|other| {
@@ -284,9 +315,7 @@ impl Files {
         for (label, layout) in layouts {
             layout.validate()?;
             let files = self.for_root(layout);
-            let root = paths[label]
-                .canonicalize()
-                .map_err(|error| error.to_string())?;
+            let root = canonical_host_path(&paths[label])?;
             layout.validate_at(&root)?;
             let mut entries = Entries::new();
             for path in files.scoped_paths(&root)? {
@@ -300,7 +329,7 @@ impl Files {
                 },
             );
         }
-        self.validate_rooted_metadata(&snapshot)?;
+        self.validate_rooted_metadata_at(paths, &snapshot)?;
         self.check_native_project_scopes(paths, &snapshot)?;
         Ok(Version {
             schema: 1,
@@ -327,9 +356,7 @@ impl Files {
         let checked = RefCell::default();
         for (label, root) in &value.roots {
             let files = self.for_root(&root.layout);
-            let path = paths[label]
-                .canonicalize()
-                .map_err(|error| error.to_string())?;
+            let path = canonical_host_path(&paths[label])?;
             let mut current = Entries::new();
             for child in files.scoped_paths(&path)? {
                 files.collect(
@@ -365,9 +392,7 @@ impl Files {
         self.check_native_project_scopes(paths, &snapshot)?;
         let mut plans = Vec::new();
         for (label, root) in snapshot.roots {
-            let target = paths[&label]
-                .canonicalize()
-                .map_err(|error| error.to_string())?;
+            let target = canonical_host_path(&paths[&label])?;
             root.layout.validate_at(&target)?;
             let files = self.for_root(&root.layout);
             let plan = files

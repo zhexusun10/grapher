@@ -47,7 +47,9 @@ try {
     join(root, "engine/execution-cli.ts"),
     ...process.argv.slice(2),
   ], { stdio: "inherit", env: childEnv });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
+  // SIGHUP (closed terminal on macOS/Linux) would otherwise end this wrapper
+  // and orphan the engine child.
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => {
     if (process.platform === "win32" && child.pid) {
       try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
     } else {
@@ -55,7 +57,7 @@ try {
     }
   });
   child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
-  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === "SIGINT" ? 130 : 143); });
+  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143); });
 } catch (error) {
   console.error(`Execution Instance Engine unavailable: ${error.message}`);
   process.exitCode = 1;

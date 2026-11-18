@@ -1011,9 +1011,11 @@ impl Runtime {
                 root: workspace::data_root(),
                 name,
                 source: Some(
-                    repository
-                        .canonicalize()
-                        .unwrap_or_else(|_| repository.to_path_buf()),
+                    crate::path_identity::actual_path(&repository).unwrap_or_else(|_| {
+                        repository
+                            .canonicalize()
+                            .unwrap_or_else(|_| repository.to_path_buf())
+                    }),
                 ),
             }]),
         )?;
@@ -1643,10 +1645,11 @@ impl Runtime {
                     }
                     if path.is_dir() {
                         if self.state.config.as_ref().is_some_and(|config| {
-                            path.canonicalize()
-                                .ok()
-                                .zip(Path::new(&config.repository).canonicalize().ok())
-                                .is_some_and(|(path, source)| path == source)
+                            Path::new(&config.repository).is_dir()
+                                && crate::path_identity::same_path(
+                                    path,
+                                    Path::new(&config.repository),
+                                )
                         }) {
                             return Ok(Some(current.clone()));
                         }
@@ -1691,10 +1694,9 @@ impl Runtime {
             // private Run root. Once their writer drains, Planner uses source too.
             if self.state.published_head.is_some()
                 && self.state.config.as_ref().is_some_and(|config| {
-                    path.canonicalize()
-                        .ok()
-                        .zip(Path::new(&config.repository).canonicalize().ok())
-                        .is_some_and(|(path, source)| path == source)
+                    path.is_dir()
+                        && Path::new(&config.repository).is_dir()
+                        && crate::path_identity::same_path(path, Path::new(&config.repository))
                 })
             {
                 return Ok(None);
@@ -1839,10 +1841,9 @@ impl Runtime {
             }
             let path = Path::new(&owner.worktree);
             let is_source = self.state.config.as_ref().is_some_and(|config| {
-                path.canonicalize()
-                    .ok()
-                    .zip(Path::new(&config.repository).canonicalize().ok())
-                    .is_some_and(|(path, source)| path == source)
+                path.is_dir()
+                    && Path::new(&config.repository).is_dir()
+                    && crate::path_identity::same_path(path, Path::new(&config.repository))
             });
             let selected = if is_source {
                 owner.clone()
@@ -5335,9 +5336,9 @@ impl Runtime {
                 if heads.is_empty() {
                     self.emit(EventKind::Settled)?;
                 } else {
-                    let repository = resolve_repository(&self.root, &config)?
-                        .canonicalize()
-                        .map_err(|e| e.to_string())?
+                    let repository = resolve_repository(&self.root, &config)?;
+                    let repository = crate::path_identity::actual_path(&repository)
+                        .or_else(|_| repository.canonicalize().map_err(|e| e.to_string()))?
                         .to_string_lossy()
                         .into();
                     self.emit(EventKind::PublicationStarted { repository, heads })?;
@@ -5637,7 +5638,7 @@ impl Runtime {
             .chain(std::iter::once(completed))
         {
             if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
-                keep.insert(path);
+                keep.insert(crate::path_identity::path_key(&path));
             }
         }
         // A borrowed slot is still live after its node finishes. A failed
@@ -5666,7 +5667,7 @@ impl Runtime {
             // retain all of them until the process tree drains and capture ends.
             for worktree in planning.worktree.as_deref().into_iter().chain(visited) {
                 if let Ok(path) = Path::new(worktree).canonicalize() {
-                    keep.insert(path);
+                    keep.insert(crate::path_identity::path_key(&path));
                 }
             }
         }
@@ -5678,7 +5679,7 @@ impl Runtime {
                 .find(|execution| execution.id == pending.execution_id)
             {
                 if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
-                    keep.insert(path);
+                    keep.insert(crate::path_identity::path_key(&path));
                 }
             }
         }
@@ -5686,7 +5687,7 @@ impl Runtime {
             if let Some(input) = &node.feedback_workspace {
                 for source in input.sources() {
                     if let Ok(path) = Path::new(&source.worktree).canonicalize() {
-                        keep.insert(path);
+                        keep.insert(crate::path_identity::path_key(&path));
                     }
                 }
             }
@@ -5709,7 +5710,7 @@ impl Runtime {
                         .is_some_and(|node| node.status != "completed")
             }) {
                 if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
-                    keep.insert(path);
+                    keep.insert(crate::path_identity::path_key(&path));
                 }
             }
         }
@@ -5737,10 +5738,10 @@ impl Runtime {
             else {
                 continue;
             };
-            if !keep.contains(&path) {
-                crate::workspace_cleanup::remove_tree(&path).map_err(|error| error.to_string())?;
+            if !keep.contains(&crate::path_identity::path_key(&path)) {
                 crate::workspace::remove_private_git(&path)?;
                 crate::workspace_state::reclaim(&path)?;
+                crate::workspace_cleanup::remove_tree(&path).map_err(|error| error.to_string())?;
             }
         }
         crate::workspace::reclaim_orphan_git_metadata(&canonical_root)?;
@@ -6663,14 +6664,14 @@ impl PublicationJob {
                     .as_deref()
                     .ok_or("Result has no native layout")?,
             );
-            let exclusions = self.store.exclusions(&selected.launch_ref)?;
+            let exclusions = self.store.exclusions_at(path, &selected.launch_ref)?;
             let present = path.is_dir();
             if !present {
                 // Both existing recovery checks must precede code reconstruction,
                 // not discover unsupported coverage or bad native inputs after
                 // creating W. This reorders the same check already in prepare.
                 self.store
-                    .validate_history_result(selected, &selected.launch_ref)?;
+                    .validate_history_result_at(path, selected, &selected.launch_ref)?;
                 self.store.preflight_runtime_evidence(path, selected)?;
                 self.store
                     .preflight_project_runtime_evidence(&self.repository, head, selected)?;
@@ -6820,8 +6821,8 @@ pub(crate) fn perform_result(
                 if !job.descriptor.result.resource_refs.is_empty() {
                     return Err("Unsupported result resource format; publish a new Run".into());
                 }
-                let mut exclusions = store.exclusions(&job.descriptor.result.launch_ref)?;
                 let path = Path::new(&job.descriptor.workspace);
+                let mut exclusions = store.exclusions_at(path, &job.descriptor.result.launch_ref)?;
                 let repository = resolve_repository(&job.root, &job.config)?;
                 workspace::repository_git(
                     &repository,
@@ -6861,7 +6862,8 @@ pub(crate) fn perform_result(
                     &job.descriptor.result,
                 )?;
                 if !present {
-                    store.validate_history_result(
+                    store.validate_history_result_at(
+                        path,
                         &job.descriptor.result,
                         &job.descriptor.result.launch_ref,
                     )?;
@@ -6954,7 +6956,7 @@ pub(crate) fn perform_result(
                 )?;
                 control.check()?;
                 let input = store.discover(path, &input, &session)?;
-                exclusions.extend(store.exclusions(&input.launch_ref)?);
+                exclusions.extend(store.exclusions_at(path, &input.launch_ref)?);
                 store.prove_accelerator(&repository, path, &input)?;
                 policy.check_tracked(path)?;
                 let head = workspace::snapshot_node_scoped(
@@ -7151,7 +7153,7 @@ fn perform_with_merger_inner(
             (&job.config.environment, &job.environment_input)
         {
             crate::environment::Environments::new(root, &job.run_id, policy)?
-                .exclusions(&input.launch_ref)?
+                .exclusions_at(path, &input.launch_ref)?
         } else {
             Vec::new()
         };
@@ -7204,9 +7206,11 @@ fn perform_with_merger_inner(
         .as_ref()
         .map(|e| e.exclusions())
         .unwrap_or_default();
-    if let (Some(policy), Some(input)) = (&job.config.environment, &selected_environment) {
-        exclusions = crate::environment::Environments::new(root, &job.run_id, policy)?
-            .exclusions(&input.launch_ref)?;
+    if let Some(policy) = &job.config.environment {
+        if let Some(input) = &selected_environment {
+            exclusions = crate::environment::Environments::new(root, &job.run_id, policy)?
+                .exclusions_at(path, &input.launch_ref)?;
+        }
     }
     let environments = job
         .config
@@ -7217,7 +7221,7 @@ fn perform_with_merger_inner(
     if let Some(store) = &environments {
         for source in &job.environment_sources {
             store.validate_result(source)?;
-            exclusions.extend(store.exclusions(&source.launch_ref)?);
+            exclusions.extend(store.exclusions_at(path, &source.launch_ref)?);
         }
         exclusions.sort();
         exclusions.dedup();
