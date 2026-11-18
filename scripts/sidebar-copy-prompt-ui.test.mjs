@@ -682,3 +682,145 @@ test("/name renames sidebar conversation cards in main Graph and Serial dialogs,
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("adding workspace and conversation cards opens space smoothly without opacity flicker, scrollbar flash or layout jump", { timeout: 30_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: "en-US", reducedMotion: "no-preference" });
+  const errors = [];
+  let pickCount = 0;
+  let releasePlanning;
+  const planningGate = new Promise(resolve => { releasePlanning = resolve; });
+  try {
+    await context.addInitScript(({ config }) => {
+      localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_projects", JSON.stringify([]));
+      localStorage.setItem("grapher_config", JSON.stringify({ ...config, repository: "" }));
+    }, { config });
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      if (command === "pick_repository") {
+        pickCount += 1;
+        const path = `/mock/ws-${pickCount}`;
+        await route.fulfill({ json: { result: { supported: true, cancelled: false, repository: { path, name: `Workspace ${pickCount}`, branch: "main", head: "", clean: true } } } });
+        return;
+      }
+      if (command === "plan_goal_stream") {
+        await planningGate;
+        await route.fulfill({ contentType: "text/event-stream", body:
+          `event: run_started\ndata: ${JSON.stringify({ runId: "conv-3" })}\n\nevent: complete\ndata: ${JSON.stringify({ snapshot: snapshot("conv-3", body.goal) })}\n\n` });
+        return;
+      }
+      const defaults = {
+        bootstrap: { config: { ...config, repository: "" }, snapshot: empty, runs: [], conversations: [
+          { runId: "conv-1", repository: "/mock/ws-2", title: "Existing one", phase: "completed", planType: "serial" },
+          { runId: "conv-2", repository: "/mock/ws-2", title: "Existing two", phase: "completed", planType: "serial" },
+        ], dataPath: "/mock", repositoryInfo: null },
+        repository_status: { repository: body.repository, valid: true, error: null },
+        detect_repository: { path: body.repository, name: "Workspace", branch: "main", head: "", clean: true },
+        snapshot_if_changed: { version: "fixed", snapshot: null },
+        list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] },
+        provider_auth: { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null },
+        pi_extensions: { globalDirectory: "mock", extensions: [] },
+        environment_capabilities: { platform: "darwin", arch: "arm64", nativeWorkspace: true },
+        composer_command: { instance: "i", commands: [] },
+        get_planning_output: { content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false },
+        get_execution_output: { content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false },
+        get_file_changes: { runId: body.runId, executionId: null, executionIds: null, summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0, totalAdditions: 0, totalDeletions: 0, isRunning: false } },
+        delete_workspace: [body.repository],
+      };
+      if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
+      await route.fulfill({ json: { result: defaults[command] ?? null } });
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(8_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator(".projects-placeholder").waitFor();
+    await page.locator(".projects-placeholder").evaluate(el => Promise.allSettled(el.getAnimations().map(a => a.finished)));
+
+    const startSampling = (selector) => page.evaluate((sel) => {
+      window.__cardSamples = [];
+      window.__sampling = true;
+      const sample = () => {
+        const list = document.querySelector(sel);
+        const cards = list ? [...list.querySelectorAll("button")].map(el => ({
+          label: el.textContent?.trim(),
+          id: el.getAttribute("data-run-id") || el.querySelector("strong")?.textContent,
+          top: el.getBoundingClientRect().top,
+          height: el.getBoundingClientRect().height,
+          opacity: Number(getComputedStyle(el).opacity),
+          transitionProperty: getComputedStyle(el).transitionProperty,
+        })) : [];
+        window.__cardSamples.push({
+          scrollable: list ? list.scrollHeight > list.clientHeight : false,
+          clientHeight: list ? list.clientHeight : 0,
+          scrollHeight: list ? list.scrollHeight : 0,
+          cards,
+        });
+        if (window.__sampling) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }, selector);
+
+    const stopSampling = () => page.evaluate(() => {
+      window.__sampling = false;
+      return window.__cardSamples;
+    });
+
+    // 1. Adding the first workspace (0 -> 1) must not flash a scrollbar or declare a CSS opacity transition.
+    await startSampling(".projects-list");
+    await page.locator(".projects-label .sidebar-add-btn").click();
+    await page.locator(".project-workspace-item", { hasText: "Workspace 1" }).waitFor();
+    await page.waitForTimeout(320);
+    const firstWsSamples = await stopSampling();
+    assert.ok(firstWsSamples.every(frame => !frame.scrollable), `0->1 workspace flashed overflow: ${JSON.stringify(firstWsSamples)}`);
+    const wsTransition = await page.locator(".project-workspace-item").first().evaluate(el => getComputedStyle(el).transitionProperty);
+    assert.equal(wsTransition.split(",").map(s => s.trim()).includes("opacity"), false,
+      `workspace card must not CSS-transition opacity alongside Motion/WAAPI: ${wsTransition}`);
+
+    // 2. Adding a second workspace (1 -> 2) opens smoothly instead of jumping Workspace 1 down in one frame.
+    const ws1BeforeTop = await page.locator(".project-workspace-item", { hasText: "Workspace 1" }).evaluate(el => el.getBoundingClientRect().top);
+    await startSampling(".projects-list");
+    await page.locator(".projects-label .sidebar-add-btn").click();
+    await page.locator(".project-workspace-item", { hasText: "Workspace 2" }).waitFor();
+    await page.waitForTimeout(320);
+    const secondWsSamples = await stopSampling();
+    const wsFramesWithBoth = secondWsSamples.filter(frame => frame.cards.length === 2);
+    assert.ok(wsFramesWithBoth.length > 0);
+    const ws1SettledTop = wsFramesWithBoth.at(-1).cards[1].top;
+    assert.ok(wsFramesWithBoth.some(frame => frame.cards[1].top > ws1BeforeTop + 2 && frame.cards[1].top < ws1SettledTop - 2),
+      `Workspace 1 should glide down through intermediate positions instead of snapping: ${JSON.stringify(wsFramesWithBoth.map(f => f.cards.map(c => ({ id: c.id, top: c.top, h: c.height, op: c.opacity }))))}`);
+    assert.ok(wsFramesWithBoth.every(frame => !frame.scrollable));
+
+    // 3. Adding a new conversation above existing ones (2 -> 3) opens smoothly (including 2-line titles) and settles cleanly.
+    await page.locator('.run-item[data-run-id="conv-1"]').waitFor();
+    const conv1BeforeTop = await page.locator('.run-item[data-run-id="conv-1"]').evaluate(el => el.getBoundingClientRect().top);
+    const twoLinePrompt = "A longer conversation title that wraps across two lines in the sidebar";
+    await page.locator(".landing-screen textarea").fill(twoLinePrompt);
+    await startSampling(".runs-list");
+    await page.locator(".landing-screen textarea").press("Enter");
+    await page.locator('.run-item[data-run-id^="pending-"]').waitFor();
+    await page.waitForTimeout(320);
+    const convSamples = await stopSampling();
+    const convFramesWithThree = convSamples.filter(frame => frame.cards.length === 3);
+    assert.ok(convFramesWithThree.length > 0);
+    const conv1SettledTop = convFramesWithThree.at(-1).cards[1].top;
+    assert.ok(convFramesWithThree.some(frame => frame.cards[1].top > conv1BeforeTop + 2 && frame.cards[1].top < conv1SettledTop - 2),
+      `Existing conversation card should glide down smoothly: ${JSON.stringify(convFramesWithThree.map(f => f.cards.map(c => ({ id: c.id, top: c.top, h: c.height, op: c.opacity }))))}`);
+    assert.ok(convFramesWithThree.at(-1).cards[0].height > 44, "two-line conversation card settles at its natural multi-line height");
+    releasePlanning();
+    await page.locator('.run-item[data-run-id="conv-3"]').waitFor();
+    assert.equal(await page.locator('.run-item[data-run-id="conv-3"]').evaluate(el => getComputedStyle(el).opacity), "1");
+
+    // 4. Removing a newly added workspace mid-entrance cleanly completes exit.
+    await page.locator(".projects-label .sidebar-add-btn").click();
+    await page.locator(".project-workspace-item", { hasText: "Workspace 3" }).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Remove from workspace", exact: true }).click();
+    await page.getByRole("alertdialog").getByRole("button", { name: "Remove workspace", exact: true }).click();
+    await page.locator(".project-workspace-item", { hasText: "Workspace 3" }).waitFor({ state: "detached" });
+    assert.deepEqual(errors, []);
+  } finally {
+    releasePlanning();
+    await context.close();
+  }
+});

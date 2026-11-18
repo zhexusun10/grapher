@@ -1,8 +1,8 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
 import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
-import { ProjectItem } from "../../types";
+import type { ProjectItem } from "../../types";
 import type { RunIndicator } from "../../hooks/useRunIndicators";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 import { workspacePathDisplay } from "./workspacePathDisplay";
@@ -58,6 +58,8 @@ function cardExit(listGap: number) {
 const PROJECT_CARD_EXIT = cardExit(PROJECT_LIST_GAP);
 const RUN_CARD_EXIT = cardExit(0);
 
+type CardEntranceMode = "none" | "expand" | "placeholder" | "fade" | "stagger";
+
 // Matches the CSS overlay breakpoint below which the sidebar would otherwise
 // take a large share of the width from the single-pane workbench.
 const NARROW_SIDEBAR_QUERY = "(max-width: 720px)";
@@ -66,22 +68,210 @@ function startsCollapsed(): boolean {
   return typeof window !== "undefined" && window.matchMedia(NARROW_SIDEBAR_QUERY).matches;
 }
 
-function cardMotion(reduceMotion: boolean, index: number, skipEntrance = false, listGap = 0) {
+function cardMotion(reduceMotion: boolean, listGap = 0) {
   if (reduceMotion) {
     return {
-      initial: false,
+      initial: false as const,
       animate: { opacity: 1, y: 0 },
       exit: { opacity: 0 },
     };
   }
   return {
-    // Cards restored from the initial paint are already part of the sidebar's
-    // entrance; replaying a per-card fade makes them blink on every reload.
-    initial: skipEntrance ? false : { opacity: 0, y: 6 },
-    animate: { opacity: 1, y: 0, transition: { duration: 0.24, ease: CARD_EASE, delay: Math.min(index, 12) * 0.028 } },
+    initial: false as const,
     exit: listGap > 0 ? PROJECT_CARD_EXIT : RUN_CARD_EXIT,
   };
 }
+
+/**
+ * Animate card entrance via WAAPI using the card's settled CSS box so newly
+ * inserted cards open their vertical space smoothly (avoiding a 1-frame jump
+ * of cards below, an empty-slot flash, or a transient scrollbar overflow) and
+ * leave zero inline style overrides once finished.
+ */
+function useCardEntrance(
+  ref: React.RefObject<HTMLButtonElement | null>,
+  mode: CardEntranceMode,
+  index: number,
+  reduceMotion: boolean,
+  listGap = 0,
+  placeholderHeight?: number,
+) {
+  const isPresent = useIsPresent();
+  const initialModeRef = React.useRef(mode);
+  const initialIndexRef = React.useRef(index);
+  const initialGapRef = React.useRef(listGap);
+  const initialPlaceholderHeightRef = React.useRef(placeholderHeight);
+  const animationsRef = React.useRef<Animation[]>([]);
+
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    const entrance = initialModeRef.current;
+    if (reduceMotion || entrance === "none" || !el || typeof el.animate !== "function") return;
+
+    const animations: Animation[] = [];
+    if (entrance === "stagger") {
+      const anim = el.animate(
+        [
+          { opacity: 0, transform: "translateY(6px)" },
+          { opacity: 1, transform: "translateY(0px)" },
+        ],
+        {
+          duration: 240,
+          delay: Math.min(initialIndexRef.current, 12) * 28,
+          easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+          fill: "backwards",
+        },
+      );
+      animations.push(anim);
+    } else if (entrance === "fade") {
+      const anim = el.animate(
+        [{ opacity: 0 }, { opacity: 1 }],
+        {
+          duration: 180,
+          easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+          fill: "backwards",
+        },
+      );
+      animations.push(anim);
+    } else {
+      const cs = getComputedStyle(el);
+      const targetHeight = el.getBoundingClientRect().height;
+      const targetMinHeight = parseFloat(cs.minHeight) || 0;
+      const targetPadTop = parseFloat(cs.paddingTop) || 0;
+      const targetPadBottom = parseFloat(cs.paddingBottom) || 0;
+      const targetBorderTop = parseFloat(cs.borderTopWidth) || 0;
+      const targetBorderBottom = parseFloat(cs.borderBottomWidth) || 0;
+      const targetMarginBottom = parseFloat(cs.marginBottom) || 0;
+      const gap = initialGapRef.current;
+      const fromPlaceholder = entrance === "placeholder";
+      const startHeight = fromPlaceholder
+        ? Math.min(initialPlaceholderHeightRef.current ?? targetHeight, targetHeight)
+        : 0;
+
+      el.style.overflow = "hidden";
+      const boxAnim = el.animate(
+        [
+          fromPlaceholder
+            ? {
+                height: `${startHeight}px`,
+                minHeight: "0px",
+              }
+            : {
+                height: "0px",
+                minHeight: "0px",
+                paddingTop: "0px",
+                paddingBottom: "0px",
+                borderTopWidth: "0px",
+                borderBottomWidth: "0px",
+                marginBottom: `${gap > 0 ? -gap : 0}px`,
+              },
+          {
+            height: `${targetHeight}px`,
+            minHeight: `${targetMinHeight}px`,
+            paddingTop: `${targetPadTop}px`,
+            paddingBottom: `${targetPadBottom}px`,
+            borderTopWidth: `${targetBorderTop}px`,
+            borderBottomWidth: `${targetBorderBottom}px`,
+            marginBottom: `${targetMarginBottom}px`,
+          },
+        ],
+        {
+          duration: fromPlaceholder ? 200 : 220,
+          easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+        },
+      );
+      const clearOverflow = () => {
+        if (el.style.overflow === "hidden") el.style.overflow = "";
+      };
+      boxAnim.onfinish = clearOverflow;
+      boxAnim.oncancel = clearOverflow;
+
+      const opacityAnim = el.animate(
+        [{ opacity: 0 }, { opacity: 1 }],
+        {
+          duration: 160,
+          delay: fromPlaceholder ? 20 : 45,
+          easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+          fill: "backwards",
+        },
+      );
+      animations.push(boxAnim, opacityAnim);
+    }
+
+    animationsRef.current = animations;
+    return () => {
+      for (const anim of animations) anim.cancel();
+      animationsRef.current = [];
+      if (el.style.overflow === "hidden") el.style.overflow = "";
+    };
+  }, [reduceMotion, ref]);
+
+  React.useLayoutEffect(() => {
+    if (isPresent) return;
+    const el = ref.current;
+    const animations = animationsRef.current;
+    if (!el || animations.length === 0) return;
+    for (const anim of animations) {
+      if (anim.playState === "running") {
+        try {
+          if (el.isConnected) anim.commitStyles();
+        } catch {
+          // Ignore commit errors if the element is detached before exit settles.
+        }
+      }
+      anim.cancel();
+    }
+    animationsRef.current = [];
+    if (el.style.overflow === "hidden") el.style.overflow = "";
+  }, [isPresent, ref]);
+}
+
+const WorkspaceItem: React.FC<{
+  project: ProjectItem;
+  index: number;
+  reduceMotion: boolean;
+  entranceMode: CardEntranceMode;
+  placeholderHeight?: number;
+  isActive: boolean;
+  isSwitching: boolean;
+  menuOpen: boolean;
+  onClick: () => void;
+  onContextMenu: (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => void;
+  children: React.ReactNode;
+}> = ({
+  project,
+  index,
+  reduceMotion,
+  entranceMode,
+  placeholderHeight,
+  isActive,
+  isSwitching,
+  menuOpen,
+  onClick,
+  onContextMenu,
+  children,
+}) => {
+  const ref = React.useRef<HTMLButtonElement | null>(null);
+  useCardEntrance(ref, entranceMode, index, reduceMotion, PROJECT_LIST_GAP, placeholderHeight);
+  return (
+    <motion.button
+      ref={ref}
+      type="button"
+      aria-label={`${project.name}\n${normalizeWorkspacePath(project.path)}`}
+      aria-current={isActive ? "true" : undefined}
+      aria-busy={isSwitching}
+      aria-haspopup="menu"
+      aria-expanded={menuOpen}
+      className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      onKeyDown={onContextMenu}
+      {...cardMotion(reduceMotion, PROJECT_LIST_GAP)}
+    >
+      {children}
+    </motion.button>
+  );
+};
 
 /**
  * Conversation card. The caller keys it by a stable card key so adopting a
@@ -92,7 +282,7 @@ const RunItem: React.FC<{
   runId: string;
   index: number;
   reduceMotion: boolean;
-  skipEntrance?: boolean;
+  entranceMode: CardEntranceMode;
   className?: string;
   onClick: () => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => void;
@@ -100,9 +290,12 @@ const RunItem: React.FC<{
   busy: boolean;
   menuOpen: boolean;
   children: React.ReactNode;
-}> = ({ runId, index, reduceMotion, skipEntrance = false, className = "", onClick, onContextMenu, selected, busy, menuOpen, children }) => {
+}> = ({ runId, index, reduceMotion, entranceMode, className = "", onClick, onContextMenu, selected, busy, menuOpen, children }) => {
+  const ref = React.useRef<HTMLButtonElement | null>(null);
+  useCardEntrance(ref, entranceMode, index, reduceMotion, 0);
   return (
     <motion.button
+      ref={ref}
       type="button"
       aria-current={selected ? "true" : undefined}
       aria-busy={busy}
@@ -113,7 +306,7 @@ const RunItem: React.FC<{
       onClick={onClick}
       onContextMenu={onContextMenu}
       onKeyDown={onContextMenu}
-      {...cardMotion(reduceMotion, index, skipEntrance)}
+      {...cardMotion(reduceMotion)}
     >
       {children}
     </motion.button>
@@ -185,13 +378,15 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [runContextMenu, setRunContextMenu] = useState<(ContextMenuAnchor & { runId: string; provisionalPrompt?: string }) | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
   const [projectExitActive, setProjectExitActive] = useState(false);
+  const projectsPlaceholderRef = React.useRef<HTMLDivElement | null>(null);
+  const projectsPlaceholderHeightRef = React.useRef<number>(34);
   const previousProjectKeysRef = React.useRef(new Set(projects.map(project => workspaceKey(project.path))));
-  React.useLayoutEffect(() => {
-    const nextKeys = new Set(projects.map(project => workspaceKey(project.path)));
-    const removed = [...previousProjectKeysRef.current].some(key => !nextKeys.has(key));
-    if (!reduceMotion && removed) setProjectExitActive(true);
-    previousProjectKeysRef.current = nextKeys;
-  }, [projects, reduceMotion]);
+  const activeRepoKey = workspaceKey(activeRepo);
+  const previousRunsStateRef = React.useRef({
+    activeRepo: activeRepoKey,
+    wasReady: isReady,
+    keys: new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []),
+  });
   // The caller may remember current cache IDs solely for motion. Cards still
   // render only from the authoritative runs prop after bootstrap.
   const restoredKeysRef = React.useRef<{ projects: Set<string>; runs: Set<string> } | null>(null);
@@ -203,6 +398,35 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   }
   const restoredProjectKeys = restoredKeysRef.current.projects;
   const restoredRunKeys = restoredKeysRef.current.runs;
+
+  React.useLayoutEffect(() => {
+    const nextKeys = new Set(projects.map(project => workspaceKey(project.path)));
+    const removed = [...previousProjectKeysRef.current].some(key => !nextKeys.has(key));
+    if (!reduceMotion && removed) setProjectExitActive(true);
+    for (const key of previousProjectKeysRef.current) {
+      if (!nextKeys.has(key)) restoredProjectKeys.delete(key);
+    }
+    if (projects.length === 0 && projectsPlaceholderRef.current) {
+      const measured = projectsPlaceholderRef.current.getBoundingClientRect().height;
+      if (measured > 0) projectsPlaceholderHeightRef.current = measured;
+    }
+    previousProjectKeysRef.current = nextKeys;
+  }, [projects, reduceMotion, restoredProjectKeys]);
+
+  React.useLayoutEffect(() => {
+    const nextKeys = new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []);
+    const prev = previousRunsStateRef.current;
+    if (isReady && prev.wasReady && prev.activeRepo === activeRepoKey) {
+      for (const key of prev.keys) {
+        if (!nextKeys.has(key)) restoredRunKeys.delete(key);
+      }
+    }
+    previousRunsStateRef.current = {
+      activeRepo: activeRepoKey,
+      wasReady: isReady,
+      keys: nextKeys,
+    };
+  }, [activeRepoKey, isReady, runs, runCardKeys, restoredRunKeys]);
 
   React.useEffect(() => {
     const query = window.matchMedia(NARROW_SIDEBAR_QUERY);
@@ -223,9 +447,18 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     return () => query.removeEventListener("change", handleChange);
   }, []);
 
+  const prevProjectKeys = previousProjectKeysRef.current;
   const projectCards = projects.map((proj, index) => {
-    const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
-    const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === workspaceKey(proj.path) : false;
+    const key = workspaceKey(proj.path);
+    const isActive = activeRepoKey === key;
+    const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === key : false;
+    const isNewProject = !restoredProjectKeys.has(key) && !prevProjectKeys.has(key);
+    let entranceMode: CardEntranceMode = "none";
+    if (!reduceMotion && isNewProject) {
+      if (prevProjectKeys.size > 0) entranceMode = "expand";
+      else if (projects.length === 1) entranceMode = "placeholder";
+      else entranceMode = "stagger";
+    }
     const openMenu = (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => {
       const anchor = contextMenuAnchor(event);
       if (!anchor) return;
@@ -233,19 +466,18 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       setProjectContextMenu({ ...anchor, project: proj });
     };
     return (
-      <motion.button
-        type="button"
-        key={proj.path}
-        aria-label={`${proj.name}\n${normalizeWorkspacePath(proj.path)}`}
-        aria-current={isActive ? "true" : undefined}
-        aria-busy={isSwitching}
-        aria-haspopup="menu"
-        aria-expanded={projectContextMenu?.project.path === proj.path}
-        className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
+      <WorkspaceItem
+        key={key}
+        project={proj}
+        index={index}
+        reduceMotion={reduceMotion}
+        entranceMode={entranceMode}
+        placeholderHeight={projectsPlaceholderHeightRef.current}
+        isActive={isActive}
+        isSwitching={isSwitching}
+        menuOpen={projectContextMenu?.project.path === proj.path}
         onClick={() => onSelectProject(proj)}
         onContextMenu={openMenu}
-        onKeyDown={openMenu}
-        {...cardMotion(reduceMotion, index, restoredProjectKeys.has(workspaceKey(proj.path)), PROJECT_LIST_GAP)}
       >
         <span className="proj-details">
           <span className="proj-name-row">
@@ -253,11 +485,26 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           </span>
           <small className="proj-path-text">{workspacePathDisplay(proj.path)}</small>
         </span>
-      </motion.button>
+      </WorkspaceItem>
     );
   });
 
+  const prevRunsState = previousRunsStateRef.current;
   const runCards = runs.map((id, index) => {
+    const cardKey = runCardKeys[id] ?? id;
+    const isRestored = restoredRunKeys.has(cardKey);
+    const isNewRun = isReady && !isRestored &&
+      (prevRunsState.activeRepo !== activeRepoKey || !prevRunsState.wasReady || !prevRunsState.keys.has(cardKey));
+    let entranceMode: CardEntranceMode = "none";
+    if (!reduceMotion && isNewRun) {
+      if (prevRunsState.wasReady && prevRunsState.activeRepo === activeRepoKey) {
+        if (prevRunsState.keys.size > 0) entranceMode = "expand";
+        else if (runs.length === 1) entranceMode = "fade";
+        else entranceMode = "stagger";
+      } else {
+        entranceMode = "stagger";
+      }
+    }
     const indicator = runIndicators[id];
     const isThisRunActive = Boolean(indicator?.working);
     const isUnread = Boolean(indicator?.unread && currentRunId !== id);
@@ -274,11 +521,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       <RunItem
         // A provisional card keeps its key when the durable Run ID arrives so
         // the same node is reused instead of remounting.
-        key={runCardKeys[id] ?? id}
+        key={cardKey}
         runId={id}
         index={index}
         reduceMotion={reduceMotion}
-        skipEntrance={restoredRunKeys.has(runCardKeys[id] ?? id)}
+        entranceMode={entranceMode}
         className={`${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
         onClick={() => onLoadRun(id)}
         selected={isChosen}
@@ -347,7 +594,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       <div className={`projects-list${projectExitActive ? " is-removing" : ""}`} inert={isCollapsed}>
         {reduceMotion ? projectCards : <AnimatePresence onExitComplete={() => setProjectExitActive(false)}>{projectCards}</AnimatePresence>}
         {projects.length === 0 && (
-          <div className="projects-placeholder">
+          <div ref={projectsPlaceholderRef} className="projects-placeholder">
             <span>{t("暂无工作区")}</span>
           </div>
         )}
