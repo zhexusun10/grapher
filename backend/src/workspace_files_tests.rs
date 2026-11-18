@@ -349,7 +349,7 @@ fn materialize_replaces_file_with_case_aliased_directory_and_rejects_tracked_sym
     fs::write(workspace.join("managed/Sub"), "old file").unwrap();
 
     files
-        .materialize(&workspace, &[version_dir], None, false)
+        .materialize(&workspace, std::slice::from_ref(&version_dir), None, false)
         .unwrap();
     assert!(workspace.join("managed/sub/item").is_file());
     assert_eq!(
@@ -357,9 +357,37 @@ fn materialize_replaces_file_with_case_aliased_directory_and_rejects_tracked_sym
         "payload"
     );
     if !insensitive {
-        // On case-sensitive volumes `Sub` is an unrelated sibling file that remains.
-        assert!(workspace.join("managed/Sub").is_file());
+        // `managed/Sub` is inside the managed scope and unexcluded, so
+        // materialization removes it along with other live managed state.
+        assert!(!workspace.join("managed/Sub").exists());
     }
+
+    // When `managed/Sub` is an excluded cache, case-sensitive volumes keep it
+    // as an unrelated sibling while case-insensitive volumes refuse replacement.
+    fs::remove_dir_all(workspace.join("managed")).unwrap();
+    fs::create_dir_all(workspace.join("managed")).unwrap();
+    fs::write(workspace.join("managed/Sub"), "kept excluded").unwrap();
+    let files_excluding_sub =
+        Files::environment(&store, &["managed".into()], &["managed/Sub".into()])
+            .unwrap()
+            .with_project_index(false);
+    let excluded_result =
+        files_excluding_sub.materialize(&workspace, &[version_dir], None, false);
+    if insensitive {
+        let err = excluded_result.unwrap_err();
+        assert!(err.contains("overlaps an excluded managed scope"), "{err}");
+        assert!(!workspace.join("managed/sub/item").exists());
+    } else {
+        excluded_result.unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("managed/sub/item")).unwrap(),
+            "payload"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.join("managed/Sub")).unwrap(),
+        "kept excluded"
+    );
 
     // A tracked regular file check must not accept a symlink pointing to matching bytes.
     let repo = temp.path().join("repo");
