@@ -468,6 +468,7 @@ fn intent_restoration_preserves_byte_exact_case_aliases() {
         let root = temp.path().join("repo");
         repository(&root, format);
         workspace::project_git(&root, &["config", "core.ignorecase", "false"]).unwrap();
+        workspace::project_git(&root, &["config", "core.precomposeunicode", "false"]).unwrap();
         let names = [
             ("Case", false),
             ("case", true),
@@ -477,6 +478,8 @@ fn intent_restoration_preserves_byte_exact_case_aliases() {
             ("nested/a/two", false),
             ("Ä/left", false),
             ("ä/right", true),
+            ("Caf\u{00e9}", false),
+            ("Cafe\u{0301}", true),
         ];
         // Git can retain both spellings even on a case-folding filesystem:
         // each path is added, then removed from disk before adding its alias.
@@ -517,6 +520,7 @@ fn intent_restoration_preserves_byte_exact_case_aliases() {
         let wanted = index(&root.join(".git")).unwrap();
         assert_eq!(wanted.len(), names.len() + 1);
         workspace::project_git(&root, &["config", "core.ignorecase", "true"]).unwrap();
+        workspace::project_git(&root, &["config", "core.precomposeunicode", "true"]).unwrap();
         let config = fs::read(root.join(".git/config")).unwrap();
         for _ in 0..2 {
             empty_flags_index(&root, &wanted);

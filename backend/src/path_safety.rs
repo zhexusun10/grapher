@@ -11,9 +11,33 @@ pub(crate) fn real_child_path(
     path: &Path,
     file: bool,
 ) -> Result<Option<PathBuf>, String> {
+    if path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err("Child paths must not contain traversal or relative dot segments".into());
+    }
     let relative = path
         .strip_prefix(root)
-        .map_err(|_| "Path is outside its trusted root")?;
+        .ok()
+        .or_else(|| {
+            #[cfg(target_os = "macos")]
+            {
+                path.ancestors()
+                    .filter(|ancestor| {
+                        !fs::symlink_metadata(ancestor)
+                            .is_ok_and(|meta| meta.file_type().is_symlink())
+                            && crate::path_identity::same_path(ancestor, root)
+                    })
+                    .last()
+                    .and_then(|ancestor| path.strip_prefix(ancestor).ok())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        })
+        .ok_or("Path is outside its trusted root")?;
     let parts = relative
         .components()
         .map(|part| match part {

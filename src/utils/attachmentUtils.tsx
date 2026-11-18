@@ -68,7 +68,7 @@ export function parseMessageAttachmentsAndText(
   const attachments: FileAttachment[] = existingFiles ? [...existingFiles] : [];
   const images: ImageAttachment[] = existingImages ? [...existingImages] : [];
 
-  // 1. XML tags: <file name="...">content</file> or <file name="..."></file>
+  // XML tags: <file name="...">content</file> or <file name="..."></file>
   const fileTagRegex = /<file name="([^"]+)">([\s\S]*?)<\/file>\s*/g;
   let match: RegExpExecArray | null;
   while ((match = fileTagRegex.exec(cleanText)) !== null) {
@@ -87,7 +87,7 @@ export function parseMessageAttachmentsAndText(
   }
   cleanText = cleanText.replace(fileTagRegex, "");
 
-  // 3. Bracketed labels: [附件: filename] or [Attachment: filename] or [filename.ext]
+  // Bracketed labels: [附件: filename] or [Attachment: filename]
   const bracketRegex = /\s*\[(?:附件|图片|Attachment):\s*([^\]]+)\]/gi;
   while ((match = bracketRegex.exec(cleanText)) !== null) {
     const fullName = match[1].trim();
@@ -98,7 +98,7 @@ export function parseMessageAttachmentsAndText(
   }
   cleanText = cleanText.replace(bracketRegex, "");
 
-  // 4. Filename brackets like [AI_Proposal.docx.md] at the end or inline
+  // Filename brackets like [name.ext] at the end or inline
   const filenameBracketRegex = /\s*\[([a-zA-Z0-9_\-. ]+\.(?:docx\.md|md|py|txt|json|ts|tsx|js|jsx|pdf|csv|log|png|jpe?g|gif|webp))\]/gi;
   while ((match = filenameBracketRegex.exec(cleanText)) !== null) {
     const fullName = match[1].trim();

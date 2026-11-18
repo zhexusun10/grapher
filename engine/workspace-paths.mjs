@@ -280,7 +280,7 @@ export function createWorkspacePaths(
   setMsysHostAliases(msysHostAliases);
   // Project roots are stable for this execution; resolve their Windows actual
   // spelling once instead of running realpath for every absolute command word.
-  const actualProjectRoots = process.platform === 'win32'
+  const actualProjectRoots = process.platform === 'win32' && sourceCaseInsensitive
     ? projectRoots.map(root => actualPath(resolve(root)))
     : null;
   const resolvedProjectRoots = actualProjectRoots ?? projectRoots.map(root => resolve(root));
@@ -504,13 +504,13 @@ export function createWorkspacePaths(
       const value = (assignment?.[2] ?? attached?.[2]) ?? word.value;
       const project = projects.find(project => pathPrefix(value, project));
       const host = toHostInput(msysHostInput(value));
-      if (!project && (process.platform !== 'win32' || !isAbsolute(host))) continue;
+      if (!project && (process.platform !== 'win32' || !sourceCaseInsensitive || !isAbsolute(host))) continue;
       // Unquoted globs must retain glob semantics; the scanner below handles them.
       if (/[*?\[\]{}]/.test(value)) continue;
       let resolved = value;
       let mappedRoot;
       if (isAbsolute(host)) {
-        resolved = process.platform === 'win32' ? actualPath(host) : resolve(host);
+        resolved = process.platform === 'win32' && sourceCaseInsensitive ? actualPath(host) : resolve(host);
         mappedRoot = resolvedProjectRoots.find(candidate => pathPrefix(resolved, candidate));
       }
       if (!project && !mappedRoot) continue;
@@ -532,9 +532,16 @@ export function createWorkspacePaths(
   // A private execution reports denied paths as a permission error instead of
   // the platform's raw errno: macOS returns EPERM, while Linux masked reads
   // return ENOENT (like a missing file) and read-only writes return EROFS.
-  const mentions = (text, root) =>
-    text.includes(root + '/') || text.includes(root + '\\')
-    || text.includes(root + "'") || text.includes(root + '"');
+  const hasRootMention = (haystack, root) =>
+    haystack.includes(root + '/') || haystack.includes(root + '\\')
+    || haystack.includes(root + "'") || haystack.includes(root + '"');
+  const mentions = (text, root) => {
+    if (hasRootMention(text, root)) return true;
+    if (anyCaseInsensitive || process.platform === 'darwin') {
+      return hasRootMention(foldPath(text, anyCaseInsensitive), foldPath(root, anyCaseInsensitive));
+    }
+    return false;
+  };
   function classify(text) {
     if (!denied || typeof text !== 'string' || text.length === 0) return text;
     // Cheap precondition first: most model-visible strings are not errors.

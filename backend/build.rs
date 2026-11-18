@@ -6,8 +6,10 @@ use std::{
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

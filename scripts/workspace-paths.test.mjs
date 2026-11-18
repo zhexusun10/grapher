@@ -267,6 +267,10 @@ test('private-execution denials report permission, not a platform errno', { skip
     // The file tools wrap the errno as `Error code: <errno>`.
     assert.equal(paths.view(`Could not edit file: ${join(source, 'secret')}. Error code: ENOENT.`),
       'Could not edit file: ./secret. Error code: EACCES.');
+    if (isCaseInsensitive(workspace)) {
+      assert.equal(paths.view(`EPERM: operation not permitted, open '${join(source.toUpperCase(), 'secret')}'`),
+        "EACCES: permission denied, open './secret'");
+    }
   } finally {
     if (previous === undefined) delete process.env.GRAPHER_DENIED_PATHS;
     else process.env.GRAPHER_DENIED_PATHS = previous;
@@ -275,7 +279,7 @@ test('private-execution denials report permission, not a platform errno', { skip
 });
 
 test('case/Unicode command mapping preserves suffix case and separates source vs workspace sensitivity', () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-case-split-')));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'grapher-case-split-')));
   try {
     const source = join(root, 'ProjSource');
     const workspace = join(root, 'WorkSpace');
@@ -332,6 +336,21 @@ test('case/Unicode command mapping preserves suffix case and separates source vs
       }
       // Backslash inside a POSIX filename must stay literal, not act as a directory separator.
       assert.equal(relativePreservingCase(workspace, `${workspace}/dir\\file.txt`, false), 'dir\\file.txt');
+    }
+
+    if (process.platform !== 'win32') {
+      const csWsLink = join(root, 'cs-ws-symlink');
+      symlinkSync(workspace, csWsLink, 'dir');
+      assert.equal(
+        mapPhysicalPath(join(csWsLink, 'NewDir', 'File.ts'), workspace, [source], false, false),
+        join(workspace, 'NewDir', 'File.ts'),
+      );
+      if (!isCaseInsensitive(workspace)) {
+        assert.equal(
+          mapPhysicalPath(join(workspace.toUpperCase(), 'NewDir', 'File.ts'), workspace, [source], false, false),
+          join(workspace.toUpperCase(), 'NewDir', 'File.ts'),
+        );
+      }
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

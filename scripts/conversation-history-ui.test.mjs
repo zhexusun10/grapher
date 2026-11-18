@@ -2533,6 +2533,8 @@ test("planner: a prefetched page waits for its revision boundary even when the f
     await page.waitForFunction(() => window.audit.planningCacheKeys().includes("regression:planner-previous"));
     await page.waitForFunction(() => document.querySelector(".planning-activity")?.getAttribute("aria-busy") === "false");
     const scroller = page.locator("[data-shared-scroll]");
+    await page.waitForFunction(() => (document.querySelector("[data-shared-scroll]")?.scrollTop ?? 0) > 0 &&
+      document.querySelectorAll('[data-transcript-id="boundary-tool-0"]').length === 0);
     assert.equal(await page.locator('[data-transcript-id="boundary-tool-0"]').count(), 0,
       "the revision boundary must exist even when its first row is virtualized out");
     await scroller.evaluate(element => {
@@ -2794,7 +2796,10 @@ for (const role of ["node", "planner"]) {
       await page.locator(".tool-call-header").click();
       await page.getByText("CACHED_PARSE_DETAILS", { exact: true }).waitFor();
       await page.evaluate(() => window.audit.selectHistory("exit"));
-      await page.waitForFunction(async () => (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache.size > 0);
+      await page.evaluate(async () => {
+        window.__parseCache = (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache;
+      });
+      await page.waitForFunction(() => window.__parseCache.size > 0);
       const count = await page.evaluate(() => window.cacheProbeParses);
       assert.ok(count > 0, "the first mount actually decoded JSONL");
       await page.evaluate(role => window.audit.selectHistory(role), role);
@@ -2850,8 +2855,11 @@ test("returning to a live Planner reuses terminal revisions but freshly parses i
     await page.getByText("REPLY_planner-latest", { exact: true }).waitFor();
     const before = await page.evaluate(() => ({ ...window.revisionParses }));
     await page.evaluate(() => window.audit.selectHistory("exit"));
-    await page.waitForFunction(async () => {
-      const cache = (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache;
+    await page.evaluate(async () => {
+      window.__parseCache = (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache;
+    });
+    await page.waitForFunction(() => {
+      const cache = window.__parseCache;
       const entry = cache.get(JSON.stringify(["regression:planning", "planner-previous"]));
       return cache.size === 1 && entry?.state.source === "planner-previous";
     });

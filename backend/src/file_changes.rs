@@ -254,7 +254,37 @@ fn strip_root_prefix(path: &str, root: &str) -> Option<String> {
     if Path::new(path).is_absolute() && Path::new(&norm_root).is_absolute() {
         let candidate = Path::new(path);
         let root = Path::new(&norm_root);
-        for ancestor in candidate.ancestors() {
+        let insensitive = crate::path_identity::case_insensitive_volume(root);
+        let mut candidate_parts = candidate.components();
+        let mut matched_lexically = true;
+        for expected in root.components() {
+            let Some(actual) = candidate_parts.next() else {
+                matched_lexically = false;
+                break;
+            };
+            if actual != expected
+                && crate::path_identity::macos_fold_component(
+                    &actual.as_os_str().to_string_lossy(),
+                    insensitive,
+                ) != crate::path_identity::macos_fold_component(
+                    &expected.as_os_str().to_string_lossy(),
+                    insensitive,
+                )
+            {
+                matched_lexically = false;
+                break;
+            }
+        }
+        if matched_lexically {
+            return Some(candidate_parts.as_path().to_string_lossy().into_owned());
+        }
+        // Check outermost-first so missing leaves are not statted and inner
+        // symlinks pointing back to `root` cannot swallow part of the relative path.
+        let ancestors: Vec<_> = candidate.ancestors().collect();
+        for ancestor in ancestors.into_iter().rev() {
+            if ancestor == Path::new("/") {
+                continue;
+            }
             if crate::path_identity::same_path(ancestor, root) {
                 return candidate
                     .strip_prefix(ancestor)
@@ -324,7 +354,7 @@ pub fn normalize_workspace_path(raw: &str, worktree: &str, repository: &str) -> 
         return None;
     }
     let leaf = cleaned.rsplit('/').next().unwrap_or(&cleaned);
-    if leaf == ".DS_Store"
+    if leaf.eq_ignore_ascii_case(".DS_Store")
         || leaf.starts_with("._")
         || cleaned == ".git"
         || cleaned.starts_with(".git/")
@@ -510,7 +540,7 @@ fn resolve_bash_path(
                 return None;
             }
             let leaf = rel.rsplit('/').next().unwrap_or(&rel);
-            if leaf == ".DS_Store"
+            if leaf.eq_ignore_ascii_case(".DS_Store")
                 || leaf.starts_with("._")
                 || rel == ".git"
                 || rel.starts_with(".git/")
@@ -1113,13 +1143,16 @@ pub fn compute_git_changes(
     }
     diff_args.push("--");
     let diff = run_git(&diff_args).ok()?;
+    let is_excluded_metadata = |path: &str| {
+        let leaf = path.rsplit('/').next().unwrap_or(path);
+        leaf.eq_ignore_ascii_case(".DS_Store") || leaf.starts_with("._")
+    };
     let mut items_map = git_diff::parse(&diff, node, execution_id)?;
     items_map.retain(|path, _| {
         !crate::path_identity::is_runtime_metadata_path(Path::new(path))
             && path != ".git"
             && !path.starts_with(".git/")
-            && !path.ends_with("/.DS_Store")
-            && path != ".DS_Store"
+            && !is_excluded_metadata(path)
     });
 
     // If comparing against live working tree (`after` is None), also collect untracked files.
@@ -1158,8 +1191,7 @@ pub fn compute_git_changes(
                 || crate::path_identity::is_runtime_metadata_path(Path::new(&path))
                 || path == ".git"
                 || path.starts_with(".git/")
-                || path.ends_with("/.DS_Store")
-                || path == ".DS_Store"
+                || is_excluded_metadata(&path)
             {
                 continue;
             }
@@ -2002,6 +2034,25 @@ mod tests {
                 &repository.to_string_lossy()
             ),
             Some("deleted.txt".into())
+        );
+        // An inner symlink pointing back to the repository root must not swallow the prefix.
+        std::os::unix::fs::symlink(&repository, repository.join("self-loop")).unwrap();
+        assert_eq!(
+            strip_root_prefix(
+                &alias.join("self-loop/file.txt").to_string_lossy(),
+                &repository.to_string_lossy()
+            ),
+            Some("self-loop/file.txt".into())
+        );
+        // NFD vs NFC root prefix strips lexically even for uncreated paths.
+        let nfc_root = temp.path().join("Caf\u{00e9}Repo");
+        let nfd_file = temp.path().join("Cafe\u{0301}Repo/sub/new.rs");
+        assert_eq!(
+            strip_root_prefix(
+                &nfd_file.to_string_lossy(),
+                &nfc_root.to_string_lossy()
+            ),
+            Some("sub/new.rs".into())
         );
     }
 

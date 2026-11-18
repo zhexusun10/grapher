@@ -52,6 +52,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // remaining text is revealed when the user opens the card again.
     const smoothContent = useSmoothStreamText(rawContent, isStreaming, isExpanded);
     const [isCopied, setIsCopied] = useState(false);
+    const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cardRef = useRef<HTMLDivElement>(null);
     const bodyRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
@@ -202,6 +203,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       window.addEventListener("pointerup", release);
       window.addEventListener("pointercancel", release);
       return () => {
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
         window.removeEventListener("pointerup", release);
         window.removeEventListener("pointercancel", release);
       };
@@ -226,11 +228,12 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
       const textToCopy = rawContent || smoothContent;
-      if (!textToCopy) return;
+      if (!textToCopy || !navigator.clipboard?.writeText) return;
       navigator.clipboard.writeText(textToCopy).then(() => {
         setIsCopied(true);
-        setTimeout(() => setIsCopied(false), 1800);
-      });
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = setTimeout(() => setIsCopied(false), 1800);
+      }).catch(() => {});
     };
 
     const toggleExpand = () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { fixtureSummaries, fixtureFileChanges, fixtureExecutionPage } from "./fixtures/current-api.mjs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -359,7 +359,7 @@ test("a failed workbench load preserves the draft without a reload button and lo
 });
 
 test("development source saves do not cache a temporarily empty module", { timeout: 30_000 }, async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "grapher-source-save-"));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "grapher-source-save-")));
   const source = path.join(root, "NodeTaskCard.js");
   let dev, watcherReady;
   const ready = new Promise(resolve => { watcherReady = resolve; });

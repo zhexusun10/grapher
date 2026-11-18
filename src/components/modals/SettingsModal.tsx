@@ -414,7 +414,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                     disabled={!dataPath}
                     onClick={() => {
                       const cleanPath = normalizeWorkspacePath(dataPath);
-                      if (cleanPath) void navigator.clipboard.writeText(cleanPath);
+                      if (cleanPath && navigator.clipboard?.writeText) void navigator.clipboard.writeText(cleanPath).catch(() => {});
                     }}
                     aria-label={t("复制路径")}
                   >

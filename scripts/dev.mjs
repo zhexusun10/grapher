@@ -148,7 +148,7 @@ export async function runDev({
     controller.signal.throwIfAborted();
     if (typeof cleanStale === 'function') {
       try {
-        await cleanStale({ installationRoot, silent: true, log });
+        await cleanStale({ installationRoot, env, silent: true, log });
       } catch {}
     }
     // Recheck after the potentially long build without killing a new listener.

@@ -31,7 +31,7 @@ pub(crate) fn slot_digest(workspace: &Path) -> Result<String, String> {
     // Resolve non-symlinked existing slots to their host directory spelling so
     // macOS/Windows case or Unicode aliases map to the same state/git digest.
     let resolved_name = if fs::symlink_metadata(workspace)
-        .is_ok_and(|meta| !meta.file_type().is_symlink())
+        .is_ok_and(|meta| !crate::workspace_symlinks::is_link(&meta))
     {
         crate::path_identity::actual_path(workspace)
             .ok()

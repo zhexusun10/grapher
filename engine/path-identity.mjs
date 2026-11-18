@@ -3,7 +3,7 @@
 // source-project paths to the current private workspace. It is not a sandbox.
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const caseCache = new Map();
@@ -187,10 +187,6 @@ export function pathStartsWith(value, prefix, caseInsensitive) {
     || foldedValue.startsWith(foldedPrefix + '\\');
 }
 
-function inside(suffix) {
-  return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith(`..${sep}`);
-}
-
 function statusIdentity(left, right) {
   if (process.platform === 'win32') return undefined;
   try {
@@ -330,10 +326,16 @@ export function mapPhysicalPath(
   // Paths already in the target workspace need no source-prefix work. This
   // keeps file-tool calls on already-mapped paths cheap on Windows.
   const workspacePath = resolve(workspace);
-  if (inside(relative(workspacePath, path))) return path;
+  if (relativePreservingCase(workspacePath, path, false) !== undefined) return path;
   for (const root of roots) {
-    const suffix = relative(resolve(root), path);
-    if (inside(suffix)) return resolve(workspace, suffix);
+    const suffix = relativePreservingCase(root, path, false);
+    if (suffix !== undefined) return resolve(workspace, suffix);
+  }
+  const wsSuffix = relativePreservingCase(workspacePath, path, workspaceCaseInsensitive);
+  if (wsSuffix !== undefined) return resolve(workspacePath, wsSuffix);
+  for (const root of roots) {
+    const suffix = relativePreservingCase(root, path, sourceCaseInsensitive);
+    if (suffix !== undefined) return resolve(workspace, suffix);
   }
   // Resolve the actual host spelling as a best-effort fallback. The workspace
   // and the requested path are local, so this covers symlinks and missing
@@ -341,26 +343,20 @@ export function mapPhysicalPath(
   // be inaccessible inside the execution sandbox and must not be required.
   const actual = actualPath(path);
   const actualWorkspace = actualPath(workspacePath);
-  if (inside(relative(actualWorkspace, actual))) return actual;
-  if (process.platform === 'win32') {
+  if (actual !== path || actualWorkspace !== workspacePath) {
+    if (relativePreservingCase(actualWorkspace, actual, false) !== undefined) return actual;
+    const actualSuffix = relativePreservingCase(actualWorkspace, actual, workspaceCaseInsensitive);
+    if (actualSuffix !== undefined) return resolve(actualWorkspace, actualSuffix);
+  }
+  if (process.platform === 'win32' && sourceCaseInsensitive) {
     for (const root of roots) {
       // MSYS roots are matched lexically above; resolving them as Win32 paths
       // would turn /c/... into C:\c\... and could match an unrelated folder.
       // Keep forward-slash UNC/extended roots available for realpath.
       if (root.startsWith('/') && !root.startsWith('//')) continue;
-      const suffix = relative(actualPath(resolve(root)), actual);
-      if (inside(suffix)) return resolve(workspace, suffix);
+      const suffix = relativePreservingCase(actualPath(resolve(root)), actual, sourceCaseInsensitive);
+      if (suffix !== undefined) return resolve(workspace, suffix);
     }
-  }
-  const wsSuffix = relativePreservingCase(workspacePath, path, workspaceCaseInsensitive);
-  if (wsSuffix !== undefined) return resolve(workspacePath, wsSuffix);
-  if (actual !== path || actualWorkspace !== workspacePath) {
-    const actualSuffix = relativePreservingCase(actualWorkspace, actual, workspaceCaseInsensitive);
-    if (actualSuffix !== undefined) return resolve(actualWorkspace, actualSuffix);
-  }
-  for (const root of roots) {
-    const suffix = relativePreservingCase(root, path, sourceCaseInsensitive);
-    if (suffix !== undefined) return resolve(workspace, suffix);
   }
   return value;
 }

@@ -1,4 +1,4 @@
-import React, { memo, useRef, useState } from "react";
+import React, { memo, useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, ChevronRight, Copy } from "lucide-react";
 import { t } from "../i18n";
 import type { TranscriptItem } from "../types";
@@ -10,8 +10,10 @@ export const TranscriptErrorCard = memo(function TranscriptErrorCard({ item, exp
   onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [localExpanded, setLocalExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
   const errors = item.errorItems?.length ? item.errorItems : [item];
   const canExpand = errors.length > 1;
   const isExpanded = canExpand && (expanded ?? localExpanded);
@@ -25,9 +27,13 @@ export const TranscriptErrorCard = memo(function TranscriptErrorCard({ item, exp
   };
   const copy = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
-    await navigator.clipboard.writeText(errors.map(error => error.content || t("未知错误")).join("\\n\\n"));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    if (!navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(errors.map(error => error.content || t("未知错误")).join("\n\n"));
+      setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 1800);
+    } catch {}
   };
 
   const headerContent = <>

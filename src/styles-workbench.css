@@ -2782,6 +2782,7 @@ button.session-label-toggle:focus-visible {
   display: block;
   min-width: 0;
   overflow: hidden;
+  background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 10px;
   cursor: pointer;

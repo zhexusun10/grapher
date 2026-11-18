@@ -306,4 +306,23 @@ fn macos_case_aliased_workspace_retains_internal_directory_symlinks() {
             directory: true
         }) if target == ".venv/lib"
     ));
+
+    // NFC scope over an NFD disk directory must also rebase internal link targets to the scope spelling.
+    let nfd_dir = workspace.join("Cafe\u{0301}Env/lib");
+    fs::create_dir_all(&nfd_dir).unwrap();
+    fs::write(nfd_dir.join("mod.py"), "ok").unwrap();
+    std::os::unix::fs::symlink(&nfd_dir, workspace.join("Cafe\u{0301}Env/lib64")).unwrap();
+    let nfc_files =
+        Files::environment(&temp.path().join("env-nfc"), &["Caf\u{00e9}Env".into()], &[]).unwrap();
+    let nfc_version = Uuid::new_v4().to_string();
+    nfc_files.capture(&aliased, &nfc_version, "", &[]).unwrap();
+    let nfc_loaded = nfc_files.load(&nfc_version).unwrap();
+    assert!(matches!(
+        nfc_loaded.entries.get("Caf\u{00e9}Env/lib64"),
+        Some(Entry::Link {
+            target,
+            internal: true,
+            directory: true
+        }) if target == "Caf\u{00e9}Env/lib" && nfc_loaded.entries.contains_key(target)
+    ));
 }

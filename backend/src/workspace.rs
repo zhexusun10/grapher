@@ -3237,17 +3237,13 @@ pub(crate) fn generated_artifact_pathspecs() -> Vec<String> {
     specs
 }
 
-pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec<String> {
+pub(crate) fn scoped_args_at(path: &Path, base: &[&str], exclusions: &[String]) -> Vec<String> {
     let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
     if !exclusions.is_empty() {
         args.extend(["--".into(), ".".into()]);
-        args.extend(exclusions.iter().map(|s| {
-            if cfg!(windows) {
-                format!(":(exclude,literal,icase){s}")
-            } else {
-                format!(":(exclude,literal){s}")
-            }
-        }));
+        for scope in exclusions {
+            push_exclude_scope_specs(path, scope, &mut args);
+        }
     }
     args
 }
@@ -3256,7 +3252,7 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     // Graph source status compares the working tree against the host snapshot;
     // node workspaces resolve to their own Git view. The user's staged state is
     // preserved separately and is intentionally not part of Graph collection.
-    let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
+    let args = scoped_args_at(path, &["status", "--porcelain", "-z"], exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     if crate::workspace_view::is_bound(path) {
         // Rebuildable caches are not collected, so do not enumerate them as
@@ -3285,7 +3281,8 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     }
     let mut status = filtered_status(raw, path, exclusions);
     if !cfg!(target_os = "macos") {
-        let mut args = scoped_args(
+        let mut args = scoped_args_at(
+            path,
             &[
                 "ls-files",
                 "--others",
@@ -3494,7 +3491,7 @@ fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> Strin
 fn is_host_metadata_name(relative: &str) -> bool {
     let relative = relative.trim_end_matches('/');
     let name = relative.rsplit('/').next().unwrap_or(relative);
-    name == ".DS_Store" || name.starts_with("._")
+    name.eq_ignore_ascii_case(".DS_Store") || name.starts_with("._")
 }
 
 /// macOS host bookkeeping is not project output. Windows keeps its existing
@@ -3508,10 +3505,15 @@ fn host_metadata_exclusions() -> Vec<String> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
-    [".DS_Store", "**/.DS_Store", "._*", "**/._*"]
-        .into_iter()
-        .map(|pattern| format!(":(exclude,glob){pattern}"))
-        .collect()
+    [
+        ":(exclude,glob,icase).DS_Store",
+        ":(exclude,glob,icase)**/.DS_Store",
+        ":(exclude,glob)._*",
+        ":(exclude,glob)**/._*",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -3534,10 +3536,10 @@ fn capture_tracked_host_metadata(
         "ls-files",
         "-z",
         "--",
-        ".DS_Store",
-        "**/.DS_Store",
-        "._*",
-        "**/._*",
+        ":(glob,icase).DS_Store",
+        ":(glob,icase)**/.DS_Store",
+        ":(glob)._*",
+        ":(glob)**/._*",
     ])?;
     let mut seen: std::collections::BTreeSet<String> = tracked
         .split('\0')

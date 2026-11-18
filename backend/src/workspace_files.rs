@@ -593,8 +593,26 @@ impl Files {
                 return Ok(());
             };
             if let Ok(local) = resolved.strip_prefix(root) {
-                let local = path_name(local)?;
+                let mut local = path_name(local)?;
                 relative(&local)?;
+                if let Some(scopes) = &self.scopes {
+                    if let Some(target_scope) = scopes.iter().find(|scope| {
+                        !Path::new(&local).starts_with(scope)
+                            && workspace::scope_contains_at(root, Path::new(&local), scope)
+                    }) {
+                        let rest: PathBuf = Path::new(&local)
+                            .components()
+                            .skip(target_scope.components().count())
+                            .collect();
+                        let rebased = if rest.as_os_str().is_empty() {
+                            target_scope.clone()
+                        } else {
+                            target_scope.join(rest)
+                        };
+                        local = path_name(&rebased)?;
+                        relative(&local)?;
+                    }
+                }
                 if self.is_excluded(root, Path::new(&local)) {
                     return Err(format!("Workspace link crosses a managed scope: {name}"));
                 }
@@ -966,13 +984,14 @@ impl Files {
         } else {
             String::new()
         };
-        let tracked: BTreeSet<_> = tracked
+        let tracked: BTreeSet<String> = tracked
             .split('\0')
             .filter(|name| !name.is_empty())
+            .map(str::to_owned)
             .collect();
         // Validate every conflict before changing any destination files.
         for (name, entry) in &desired {
-            if tracked.contains(name.as_str()) {
+            if workspace::tracked_path_matches(Some(workspace), &tracked, name) {
                 if let Entry::File { blob, .. } = entry {
                     if workspace.join(name).is_file() && hash(&workspace.join(name))? == *blob {
                         continue;
@@ -1062,7 +1081,7 @@ impl Files {
             root,
             desired,
             current,
-            tracked: tracked.into_iter().map(str::to_owned).collect(),
+            tracked,
             previous_paths,
         }))
     }
@@ -1080,10 +1099,11 @@ impl Files {
             if matches!(entry, Entry::Directory { .. }) {
                 use std::os::unix::fs::PermissionsExt;
                 let path = root.join(name);
-                let mode = fs::metadata(&path)
-                    .map_err(|e| e.to_string())?
-                    .permissions()
-                    .mode();
+                let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+                #[cfg(target_os = "macos")]
+                crate::workspace_cleanup::clear_macos_immutable_flags(&path, &meta)
+                    .map_err(|e| e.to_string())?;
+                let mode = meta.permissions().mode();
                 if mode & 0o700 != 0o700 {
                     fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))
                         .map_err(|e| e.to_string())?;
@@ -1099,7 +1119,9 @@ impl Files {
                 path.strip_prefix(&root)
                     .map_err(|error| error.to_string())?,
             )?;
-            if tracked.contains(name.as_str()) || self.is_excluded(&root, Path::new(&name)) {
+            if workspace::tracked_path_matches(Some(&root), &tracked, &name)
+                || self.is_excluded(&root, Path::new(&name))
+            {
                 continue;
             }
             // Never traverse a destination junction/link to delete another tree.
@@ -1108,14 +1130,20 @@ impl Files {
             }
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
+                    #[cfg(target_os = "macos")]
+                    crate::workspace_cleanup::clear_macos_immutable_flags(&path, &metadata)
+                        .map_err(|e| e.to_string())?;
                     unlink(&path, metadata.is_dir() || path.is_dir())?
                 }
                 Ok(metadata) if metadata.is_dir() => {
+                    #[cfg(target_os = "macos")]
+                    crate::workspace_cleanup::clear_macos_immutable_flags(&path, &metadata)
+                        .map_err(|e| e.to_string())?;
+                    let _ = metadata;
                     // A managed scope may contain tracked descendants.
-                    if !tracked
-                        .iter()
-                        .any(|tracked| tracked.starts_with(&(name.clone() + "/")))
-                    {
+                    if !tracked.iter().any(|tracked| {
+                        workspace::scope_contains_at(&root, Path::new(tracked), Path::new(&name))
+                    }) {
                         // Deepest-first removal must not delete managed exclusions
                         // or tracked descendants nested inside a managed scope.
                         match fs::remove_dir(&path) {
@@ -1129,7 +1157,10 @@ impl Files {
                     #[cfg(windows)]
                     crate::workspace_cleanup::clear_readonly_attribute(&path, &metadata)
                         .map_err(|e| e.to_string())?;
-                    #[cfg(not(windows))]
+                    #[cfg(target_os = "macos")]
+                    crate::workspace_cleanup::clear_macos_immutable_flags(&path, &metadata)
+                        .map_err(|e| e.to_string())?;
+                    #[cfg(not(any(windows, target_os = "macos")))]
                     let _ = metadata;
                     fs::remove_file(&path).map_err(|error| error.to_string())?;
                 }
@@ -1138,7 +1169,7 @@ impl Files {
             }
         }
         for (name, entry) in &desired {
-            if tracked.contains(name.as_str()) {
+            if workspace::tracked_path_matches(Some(&root), &tracked, name) {
                 continue;
             }
             let path = root.join(relative(name)?);
@@ -1182,7 +1213,7 @@ impl Files {
         }
         // Link targets may be later in lexical order, so create links last.
         for (name, entry) in &desired {
-            if tracked.contains(name.as_str()) {
+            if workspace::tracked_path_matches(Some(&root), &tracked, name) {
                 continue;
             }
             if let Entry::Link {

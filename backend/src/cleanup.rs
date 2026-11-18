@@ -170,7 +170,9 @@ pub(crate) fn configuration_targets(
         return Ok(targets);
     }
     let source = match source.canonicalize() {
-        Ok(source) if source.is_dir() => source,
+        Ok(source) if source.is_dir() => {
+            crate::path_identity::actual_path(&source).unwrap_or(source)
+        }
         Ok(_) => return Ok(targets),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(targets),
         Err(error) => return Err(error.to_string()),
@@ -178,7 +180,10 @@ pub(crate) fn configuration_targets(
     if Uuid::parse_str(run_id).is_ok() {
         let parent = crate::workspace::workspaces_parent(root);
         fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
-        let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+        let parent = parent
+            .canonicalize()
+            .map(|resolved| crate::path_identity::actual_path(&resolved).unwrap_or(resolved))
+            .map_err(|error| error.to_string())?;
         targets.insert(Target::workspace(&parent, run_id, ".grapher-worktrees"));
     }
     let shadow = crate::workspace::shadow_repo_dir(&source)?;
@@ -303,7 +308,10 @@ pub(crate) fn manifest(
     let mut protect = |config: &Config| {
         let path = PathBuf::from(&config.repository);
         if path.is_absolute() {
-            protected_sources.insert(path.canonicalize().unwrap_or(path));
+            let resolved = crate::path_identity::actual_path(&path)
+                .or_else(|_| path.canonicalize())
+                .unwrap_or(path);
+            protected_sources.insert(resolved);
         }
     };
     if let Some(config) = &state.config {

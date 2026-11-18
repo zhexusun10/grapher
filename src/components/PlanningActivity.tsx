@@ -153,7 +153,11 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     const signal = lifetime.current;
     if (!ready || !signal || signal.aborted) return false;
     if (olderBusy.current) {
-      if (preserveReading) { olderRequested.current = true; setShowOlderLoading(true); }
+      if (preserveReading) {
+        olderRequested.current = true;
+        setShowOlderLoading(true);
+        markTranscriptPrepend(sectionRef.current);
+      }
       return false;
     }
     // A page the reader has not reached yet is already in memory; retry its
@@ -192,10 +196,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         setHoldingOlder(true);
         return true;
       }
-      // Before reveal the caller has not placed the viewport yet. Being above
-      // the bottom then is not scrollback: marking it as such makes a revision
-      // preload start another reader-owned page and can stall initial readiness.
-      if (!preserveReading && announcedRef.current) markTranscriptPrependIfReading(sectionRef.current);
+      if (announcedRef.current) markTranscriptPrependIfReading(sectionRef.current);
       const latest = segments.current.get(id);
       const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
       publish(id, next);

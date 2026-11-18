@@ -28,8 +28,8 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme-graph.png" width="100%" alt="Current Grapher workbench showing a 21-node example video detection research plan awaiting approval">
-  <br><sub>Grapher Workbench: A 21-node example plan compiled into parallel branches, execution batches, and bounded feedback loops (shown with manual approval enabled; not a completed run).</sub>
+  <img src="assets/readme-graph.png" width="100%" alt="Current Grapher workbench showing a 12-node AI video detection pipeline plan awaiting approval">
+  <br><sub>Grapher Workbench: A 12-node, 6-batch example plan compiled into parallel spatial, temporal, and frequency lanes, validation selection, and a bounded feedback loop (shown with manual approval enabled; not a completed run).</sub>
 </p>
 
 ---
@@ -71,7 +71,7 @@ Goal → Planner → Compiled Graph → Deterministic Rust Runtime
 ## Right-Sized for Every Task: Serial vs. Graph
 
 <p align="center">
-  <img src="assets/readme-home.png" width="100%" alt="Current Grapher home screen with a video detection research goal and Serial and Graph mode controls">
+  <img src="assets/readme-home.png" width="100%" alt="Current Grapher home screen with a detailed AI video detection pipeline goal and Serial and Graph mode controls">
   <br><sub>Start with a goal and choose Serial or Graph. Auto routing can be enabled in Harness settings.</sub>
 </p>
 

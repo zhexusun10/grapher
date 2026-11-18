@@ -72,7 +72,7 @@ test('file tools convert registered Git Bash mounts such as /tmp', { skip: proce
 });
 
 test('file tools preserve suffix case and honor sourceCaseInsensitive independently', () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-tool-suffix-')));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'grapher-tool-suffix-')));
   try {
     const source = join(root, 'SourceRoot');
     const workspace = join(root, 'WorkspaceRoot');

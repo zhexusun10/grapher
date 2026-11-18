@@ -665,6 +665,7 @@ test("provider loading stays in the Refresh icon without a status panel or layou
     await page.evaluate(() => window.audit.open());
     await refresh.waitFor();
     await assertReady();
+    await page.locator(".settings-modal").evaluate(el => Promise.allSettled(el.getAnimations().map(a => a.finished)));
     assert.equal(requests.length, 1, "reopening Settings reuses the catalog without a loading panel");
     assert.equal(await page.locator(".provider-status-loading").count(), 0);
 
@@ -5169,6 +5170,7 @@ test("editing a node objective replaces the opening turn without creating a chat
     assert.ok(editedOrder, 'the replacement attempt remains before the later follow-up and its attempt');
     await page.reload({ waitUntil: 'networkidle' }); await open();
     await page.getByText('Response after edit', { exact: true }).waitFor();
+    await page.locator('.node-task-content').waitFor();
     assert.equal(await page.locator('.node-task-content').innerText(), 'Updated objective');
     assert.equal(await page.locator('.chat-message-row.user', { hasText: 'Updated objective' }).count(), 0);
     assert.equal(await page.locator('.node-task-card').getByRole('group', { name: 'Version history' }).count(), 0);
@@ -5763,10 +5765,10 @@ for (const kind of ["publication", "node"]) {
     const output = text => `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
     const mergerNode = kind === "publication" ? "merger" : "merge:task";
     const cardSelector = kind === "publication" ? '.task-node[data-card-id="merger:publication"]' : '.task-node[data-card-id="merger:task"]';
-    const initialStatus = kind === "publication" ? "completed" : "failed";
+    const initialStatus = "failed";
     const first = {
       id: `${kind}-merger-1`, node: mergerNode, revision: 1, attempt: 1, sessionId: `${kind}-session`,
-      worktree: "/a", before: "base", after: initialStatus === "completed" ? "head-1" : null,
+      worktree: "/a", before: "base", after: null,
       status: initialStatus, startedAt: 1, completedAt: 2, output: output("Initial merger output"),
     };
     const taskExec = {
@@ -5779,7 +5781,7 @@ for (const kind of ["publication", "node"]) {
     };
     let current = {
       runId: `${kind}-merger-order-run`, config, planType: "graph",
-      phase: kind === "publication" ? "completed" : "needs_attention",
+      phase: kind === "publication" ? "publication_failed" : "needs_attention",
       approved: true, paused: false, base: "base",
       graph: { originalGoal: "Resolve conflicts", nodes: [{ id: "task", task: "Do task" }], edges: [] },
       nodes: { task: { status: kind === "publication" ? "completed" : "blocked", revision: 1, instruction: "", error: null } },
@@ -5789,12 +5791,10 @@ for (const kind of ["publication", "node"]) {
         { type: "created", sequence: 1, timestamp: 1, graph: { originalGoal: "Resolve conflicts", nodes: [{ id: "task", task: "Do task" }], edges: [] }, config },
         { type: "approved", sequence: 2, timestamp: 1, base: "base" },
         { type: "merger_started", sequence: 3, timestamp: 1, execution: first },
-        initialStatus === "completed"
-          ? { type: "merger_finished", sequence: 4, timestamp: 2, execution_id: first.id, head: "head-1", output_bytes: first.output.length }
-          : { type: "merger_failed", sequence: 4, timestamp: 2, execution_id: first.id, error: "conflict", output_bytes: first.output.length },
+        { type: "merger_failed", sequence: 4, timestamp: 2, execution_id: first.id, error: "conflict", output_bytes: first.output.length },
       ],
       feedbackCounts: {},
-      ...(kind === "publication" ? { publication: { status: "completed", target: "main" } } : {}),
+      ...(kind === "publication" ? { publication: { status: "failed", target: "main" } } : {}),
     };
     const actions = [], errors = [];
     const continueGate = deferred();
@@ -5870,7 +5870,7 @@ for (const kind of ["publication", "node"]) {
     const showInitialOutput = async () => {
       // A failed predecessor defaults to collapsed after a continuation starts.
       // This test inspects ordering, so explicitly open that retained history.
-      if (kind === "node" && current.mergers.length > 1) {
+      if (current.mergers.length > 1) {
         const expand = page.locator('.session-label-toggle[aria-expanded="false"]').filter({ hasText: "#1" });
         if (await expand.count()) await expand.click();
       }
@@ -5922,6 +5922,7 @@ for (const kind of ["publication", "node"]) {
         "live steer on continuation merger sits below its output",
       );
 
+      await waitFor(() => actions.length >= 2);
       assert.deepEqual(actions, [
         { action: "continue_merger", executionId: first.id, node: mergerNode },
         { action: "steer", executionId: `${kind}-merger-2`, node: mergerNode },

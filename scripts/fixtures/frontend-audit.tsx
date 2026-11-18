@@ -265,12 +265,18 @@ function HistoryRegressionFixture() {
   };
   audit.planningCacheKeys = () => [...planningTranscriptCache.keys()];
   audit.deleteConversation = () => invalidateTranscriptCaches("regression");
-  const ready = useCallback(() => { requestAnimationFrame(() => {
+  const ready = useCallback(() => {
     if (scroll.current) {
       delete scroll.current.dataset.transcriptHistoryReading;
       scroll.current.scrollTop = scroll.current.scrollHeight;
     }
-  }); }, [view]);
+    requestAnimationFrame(() => {
+      if (scroll.current) {
+        delete scroll.current.dataset.transcriptHistoryReading;
+        scroll.current.scrollTop = scroll.current.scrollHeight;
+      }
+    });
+  }, [view]);
   return <div className="initial-query-scroll" data-shared-scroll ref={scroll} style={{ height: 380, width: 850, flex: "none", overflowY: "auto" }}>
     <div style={{ height: headingHeight, flexShrink: 0 }}>Conversation heading and task above the transcript</div>
     {view === "node" && <ExecutionTranscript runId="regression" execution={{ id: "worker", node: "worker", status: running ? "running" : "failed",

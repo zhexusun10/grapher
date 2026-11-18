@@ -349,6 +349,7 @@ fn verify_target_candidates(
     }
 }
 
+#[cfg(test)]
 fn verify_target(
     repository: &Path,
     relative: &str,

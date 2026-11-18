@@ -431,7 +431,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
-              navigator.clipboard?.writeText(normalizeWorkspacePath(projectContextMenu.project.path));
+              void navigator.clipboard?.writeText(normalizeWorkspacePath(projectContextMenu.project.path)).catch(() => {});
               setProjectContextMenu(null);
             }}
           >
@@ -469,7 +469,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
-              navigator.clipboard?.writeText(runContextMenu.runId);
+              void navigator.clipboard?.writeText(runContextMenu.runId).catch(() => {});
               setRunContextMenu(null);
             }}
           >

@@ -47,6 +47,11 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
   const rafIdRef = useRef<number | null>(null);
   const interruptedRef = useRef(false);
   const cleanupListenersRef = useRef<(() => void) | null>(null);
+  const prevOpenRef = useRef(false);
+  const onBeforeToggleRef = useRef(onBeforeToggle);
+  const onAfterToggleRef = useRef(onAfterToggle);
+  onBeforeToggleRef.current = onBeforeToggle;
+  onAfterToggleRef.current = onAfterToggle;
 
   useEffect(() => () => {
     if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
@@ -54,11 +59,13 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
   }, []);
 
   useLayoutEffect(() => {
+    if (open === prevOpenRef.current) return;
+    prevOpenRef.current = open;
     const animator = animatorRef.current;
     const content = contentRef.current;
     const panel = panelRef.current;
     // Mounting starts collapsed (height 0 in the initial style), so a run with
-    // null refs or an already-closed panel is a harmless no-op.
+    // null refs is a harmless no-op.
     if (!animator || !content || !panel) return;
 
     const container = scrollContainerRef?.current
@@ -86,7 +93,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     rafIdRef.current = null;
     cleanupListenersRef.current?.();
     cleanupListenersRef.current = null;
-    onBeforeToggle?.();
+    onBeforeToggleRef.current?.();
 
     if (container && open) {
       const viewport = getConversationViewport(container);
@@ -134,10 +141,10 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
       cleanupListenersRef.current = null;
       animator.style.height = open ? "auto" : "0px";
       animator.style.opacity = open ? "1" : "0";
-      onAfterToggle?.();
+      onAfterToggleRef.current?.();
     };
     rafIdRef.current = requestAnimationFrame(tick);
-  }, [open, onAfterToggle, onBeforeToggle, panelRef, scrollContainerRef]);
+  }, [open, panelRef, scrollContainerRef]);
 
   return <div
     ref={animatorRef}

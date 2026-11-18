@@ -324,6 +324,8 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
         &[
             "-c",
             "core.ignorecase=false",
+            "-c",
+            "core.precomposeunicode=false",
             "update-index",
             "--force-remove",
             "-z",
@@ -350,6 +352,8 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
                 // this private skeleton. Stored configuration is untouched.
                 "-c",
                 "core.ignorecase=false",
+                "-c",
+                "core.precomposeunicode=false",
                 "-c",
                 "core.sparseCheckout=false",
                 "add",
@@ -402,7 +406,14 @@ fn restore_flags<'a>(
         if !input.is_empty() {
             workspace::project_git_bytes(
                 path,
-                &["update-index", flag, "-z", "--stdin"],
+                &[
+                    "-c",
+                    "core.precomposeunicode=false",
+                    "update-index",
+                    flag,
+                    "-z",
+                    "--stdin",
+                ],
                 Some(&input),
             )?;
         }
@@ -590,6 +601,8 @@ pub(crate) fn compose(
         &[
             "-c",
             "core.ignorestat=false",
+            "-c",
+            "core.precomposeunicode=false",
             "update-index",
             "-z",
             "--index-info",

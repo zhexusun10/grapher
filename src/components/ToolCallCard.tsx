@@ -1,5 +1,5 @@
 import { t } from "../i18n";
-import React, { useState, useMemo, useRef, useLayoutEffect } from "react";
+import React, { useState, useMemo, useRef, useLayoutEffect, useEffect } from "react";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import { CardReveal } from "./CardReveal";
 import { useCardAppear } from "../services/cardAnimations";
@@ -58,7 +58,9 @@ function webSearchSummary(args: Record<string, any>): string {
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
+    const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cardRef = useRef<HTMLDivElement>(null);
+    useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
     // Code blocks are scrollable only when their own content overflows. A
     // contained but non-scrollable block would swallow the conversation wheel.
     // One observer per mounted card watches the blocks that exist now and any
@@ -219,9 +221,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
       const textToCopy = resultText || argsText.text;
-      navigator.clipboard.writeText(textToCopy);
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 1800);
+      if (!textToCopy || !navigator.clipboard?.writeText) return;
+      navigator.clipboard.writeText(textToCopy).then(() => {
+        setIsCopied(true);
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = setTimeout(() => setIsCopied(false), 1800);
+      }).catch(() => {});
     };
 
     const isInterrupted = useMemo(

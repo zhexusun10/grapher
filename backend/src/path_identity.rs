@@ -40,8 +40,11 @@ fn actual_existing(path: &Path) -> Option<PathBuf> {
     use std::os::unix::io::AsRawFd;
     // Never open FIFOs, sockets or special devices: `File::open` on a named
     // pipe blocks waiting for a writer, while `realpath`/`canonicalize` does not.
+    // Also skip `F_GETPATH` on multi-link regular files (`nlink > 1`): XNU's
+    // vnode name cache stores only one link name per inode, so a concurrent
+    // open/link on a sibling hardlink would make `F_GETPATH` report the other name.
     let meta = fs::metadata(path).ok()?;
-    if meta.is_dir() || meta.is_file() {
+    if meta.is_dir() || (meta.is_file() && meta.nlink() == 1) {
         if let Ok(file) = fs::File::open(path) {
             let mut buffer = vec![0u8; libc::PATH_MAX as usize + 1];
             let result =
@@ -361,6 +364,18 @@ pub(crate) fn actual_path(path: &Path) -> Result<PathBuf, String> {
 
 /// Stable comparison key. Existing paths use the host's actual spelling;
 /// fallback spelling normalization covers paths that do not exist yet.
+#[cfg(not(windows))]
+fn trim_posix_trailing_slashes(text: String) -> String {
+    if text.len() > 1 {
+        let trimmed = text.trim_end_matches('/');
+        if trimmed.is_empty() && text.starts_with('/') {
+            return "/".to_owned();
+        }
+        return trimmed.to_owned();
+    }
+    text
+}
+
 pub(crate) fn path_key(path: &Path) -> String {
     let text = actual_path(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -380,7 +395,7 @@ pub(crate) fn path_key(path: &Path) -> String {
     {
         #[cfg(target_os = "macos")]
         {
-            let text = macos_nfd(&text);
+            let text = trim_posix_trailing_slashes(macos_nfd(&text));
             if case_insensitive_volume(Path::new(&text)) {
                 text.to_lowercase()
             } else {
@@ -389,7 +404,7 @@ pub(crate) fn path_key(path: &Path) -> String {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            text
+            trim_posix_trailing_slashes(text)
         }
     }
 }
@@ -481,7 +496,11 @@ pub(crate) fn lexical_key(path: &Path) -> String {
             .trim_end_matches('\\')
             .to_ascii_lowercase()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        trim_posix_trailing_slashes(macos_nfd(&text))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         text
     }
@@ -868,12 +887,21 @@ mod tests {
             base_canon.join("Cafe\u{0301}Tools/Named.Pipe")
         );
 
-        // Unreadable hardlinked files sharing (dev, ino) must resolve to their own name.
+        // Readable and unreadable hardlinked files sharing (dev, ino) must resolve to their own name.
         use std::os::unix::fs::PermissionsExt;
         let hard_a = real_dir.join("alpha-unreadable");
         let hard_b = real_dir.join("beta-unreadable");
         fs::write(&hard_a, b"secret").unwrap();
         fs::hard_link(&hard_a, &hard_b).unwrap();
+        let _keep_b_open = fs::File::open(&hard_b).unwrap();
+        assert_eq!(
+            actual_path(&hard_a).unwrap(),
+            base_canon.join("Cafe\u{0301}Tools/alpha-unreadable")
+        );
+        assert_eq!(
+            actual_path(&hard_b).unwrap(),
+            base_canon.join("Cafe\u{0301}Tools/beta-unreadable")
+        );
         fs::set_permissions(&hard_a, fs::Permissions::from_mode(0o000)).unwrap();
         let resolved_a = actual_path(&hard_a).unwrap();
         let resolved_b = actual_path(&hard_b).unwrap();

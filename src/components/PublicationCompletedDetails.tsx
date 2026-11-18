@@ -1,5 +1,5 @@
 import { t, locale } from "../i18n";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
 import type { Snapshot, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
@@ -16,7 +16,9 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
   repository,
 }) => {
   const [copiedRepo, setCopiedRepo] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [mergerDetailsOpen, setMergerDetailsOpen] = useState(false);
+  useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
   const [selectedMergerId, setSelectedMergerId] = useState("");
   const mergerSelectId = React.useId();
 
@@ -31,11 +33,12 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
   const activeMerger = mergers.find(m => m.id === selectedMergerId) ?? mergers[mergers.length - 1];
 
   const handleCopyRepo = async () => {
-    if (!targetRepo) return;
+    if (!targetRepo || !navigator.clipboard?.writeText) return;
     try {
       await navigator.clipboard.writeText(targetRepo);
       setCopiedRepo(true);
-      setTimeout(() => setCopiedRepo(false), 2000);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedRepo(false), 2000);
     } catch { }
   };
 

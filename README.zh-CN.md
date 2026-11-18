@@ -28,8 +28,8 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme-graph-zh.png" width="100%" alt="当前 Grapher 工作台：等待批准的视频检测研究示例计划，包含 21 个节点">
-  <br><sub>Grapher 工作台：包含 21 个节点的示例计划，直观呈现并行分支、执行批次与有界反馈（图中已开启手动审批，并非已完成的运行记录）。</sub>
+  <img src="assets/readme-graph-zh.png" width="100%" alt="当前 Grapher 工作台：等待批准的 AI 视频检测工程示例计划，包含 12 个节点与 6 个执行批次">
+  <br><sub>Grapher 工作台：包含 12 个节点、6 个执行批次的示例计划，直观呈现并行模态分支、验证集选型冻结与有界反馈回路（图中已开启手动审批，并非已完成的运行记录）。</sub>
 </p>
 
 ---
@@ -71,7 +71,7 @@ Grapher（编译式执行图）
 ## 按需选型：Serial vs. Graph
 
 <p align="center">
-  <img src="assets/readme-home-zh.png" width="100%" alt="当前 Grapher 首页：输入视频检测研究目标，并可选择 Serial 或 Graph 模式">
+  <img src="assets/readme-home-zh.png" width="100%" alt="当前 Grapher 首页：输入详细的 AI 视频检测流水线目标，并可选择 Serial 或 Graph 模式">
   <br><sub>从一个目标出发，按需选择 Serial 或 Graph；也可在 Harness 设置中开启 Auto 自动路由。</sub>
 </p>
 

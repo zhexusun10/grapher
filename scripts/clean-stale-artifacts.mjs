@@ -13,11 +13,16 @@ export async function parseActiveArtifacts({
   bin = 'grapher',
   release = false,
   extraCargoArgs = [],
+  env = process.env,
 } = {}) {
   const fullManifest = resolve(installationRoot, manifestPath);
   if (!existsSync(fullManifest)) {
-    return { activeFiles: new Set(), activeBuildDirs: new Set(), profile: release ? 'release' : 'debug', targetDir: '' };
+    return { activeFiles: new Set(), activeBuildDirs: new Set(), profile: release ? 'release' : 'debug', targetDir: '', failed: true };
   }
+
+  const targetBase = env.CARGO_TARGET_DIR
+    ? resolve(installationRoot, env.CARGO_TARGET_DIR)
+    : resolve(installationRoot, 'backend', 'target');
 
   return new Promise((resolveArtifacts, reject) => {
     const cargoScript = join(installationRoot, 'scripts', 'cargo.mjs');
@@ -33,60 +38,121 @@ export async function parseActiveArtifacts({
     if (release) args.push('--release');
     args.push(...extraCargoArgs);
 
-    const child = spawn('node', args, {
+    const child = spawn(process.execPath, args, {
       cwd: installationRoot,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     const activeFiles = new Set();
     const activeBuildDirs = new Set();
     let buffer = '';
+    const processLine = line => {
+      if (!line.trim()) return;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.reason === 'compiler-artifact') {
+          if (Array.isArray(msg.filenames)) {
+            for (const filename of msg.filenames) {
+              const fullPath = resolve(installationRoot, filename);
+              activeFiles.add(fullPath);
+
+              const fileDir = dirname(fullPath);
+              const fileBase = basename(fullPath);
+
+              if (fullPath.includes(targetBase) && fileDir.includes('build')) {
+                activeBuildDirs.add(fileDir);
+              }
+
+              activeFiles.add(join(fileDir, fileBase.replace(/\.[^.]+$/, '.d')));
+              if (fileBase.startsWith('lib')) {
+                activeFiles.add(join(fileDir, fileBase.replace(/^lib/, '').replace(/\.[^.]+$/, '.d')));
+              }
+            }
+          }
+          if (msg.executable) {
+            activeFiles.add(resolve(installationRoot, msg.executable));
+          }
+        } else if (msg.reason === 'build-script-executed' && msg.out_dir) {
+          activeBuildDirs.add(resolve(msg.out_dir, '..'));
+        }
+      } catch {}
+    };
 
     child.stdout.on('data', chunk => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
       for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.reason === 'compiler-artifact') {
-            if (Array.isArray(msg.filenames)) {
-              for (const filename of msg.filenames) {
-                const fullPath = resolve(installationRoot, filename);
-                activeFiles.add(fullPath);
-
-                const fileDir = dirname(fullPath);
-                const fileBase = basename(fullPath);
-
-                if (fullPath.includes(`${resolve(installationRoot, 'backend', 'target')}`) && fileDir.includes('build')) {
-                  activeBuildDirs.add(fileDir);
-                }
-
-                activeFiles.add(join(fileDir, fileBase.replace(/\.[^.]+$/, '.d')));
-                if (fileBase.startsWith('lib')) {
-                  activeFiles.add(join(fileDir, fileBase.replace(/^lib/, '').replace(/\.[^.]+$/, '.d')));
-                }
-              }
-            }
-            if (msg.executable) {
-              activeFiles.add(resolve(installationRoot, msg.executable));
-            }
-          } else if (msg.reason === 'build-script-executed' && msg.out_dir) {
-            activeBuildDirs.add(resolve(msg.out_dir, '..'));
-          }
-        } catch {}
+        processLine(line);
       }
     });
 
-    child.on('close', () => {
+    child.on('close', code => {
+      if (buffer) processLine(buffer);
       const profile = release ? 'release' : 'debug';
-      const targetDir = resolve(installationRoot, 'backend', 'target', profile);
-      for (const ext of ['.exe', '.pdb', '.d', '.lib', '.exp', '']) {
+      const targetDir = join(targetBase, profile);
+      const artifactTracked = activeFiles.size > 0 && code === 0;
+      const escapedBin = bin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const exts = ['.exe', '.pdb', '.d', '.lib', '.exp', '.dSYM', ''];
+      for (const ext of exts) {
         activeFiles.add(resolve(targetDir, `${bin}${ext}`));
         activeFiles.add(resolve(targetDir, 'deps', `${bin}${ext}`));
       }
-      resolveArtifacts({ activeFiles, activeBuildDirs, profile, targetDir });
+      // Cargo emits only `target/<profile>/<bin>` in compiler-artifact filenames
+      // for the binary target, while storing the linked binary and dep-info at
+      // `target/<profile>/deps/<bin>-<hash>` on macOS/Linux. Protect the active
+      // binary hash so a subsequent `cargo run` does not have to relink `bin`.
+      const activeBinHashes = new Set();
+      const fpRoot = join(targetDir, '.fingerprint');
+      const fpPattern = new RegExp(`^${escapedBin}-([0-9a-f]{16})$`);
+      if (existsSync(fpRoot)) {
+        let newestHash = null;
+        let newestMtime = -1;
+        for (const name of readdirSync(fpRoot)) {
+          const match = fpPattern.exec(name);
+          if (!match) continue;
+          const marker = join(fpRoot, name, `bin-${bin}`);
+          try {
+            const s = statSync(marker);
+            if (s.mtimeMs > newestMtime) {
+              newestMtime = s.mtimeMs;
+              newestHash = match[1];
+            }
+          } catch {}
+        }
+        if (newestHash) activeBinHashes.add(newestHash);
+      }
+      const depsDir = join(targetDir, 'deps');
+      const binExecPattern = new RegExp(`^${escapedBin}-([0-9a-f]{16})(?:\\.exe)?$`);
+      if (existsSync(depsDir)) {
+        let binIno = null;
+        try {
+          const binPath = resolve(targetDir, process.platform === 'win32' ? `${bin}.exe` : bin);
+          if (existsSync(binPath)) binIno = statSync(binPath).ino;
+        } catch {}
+        let newestDepHash = null;
+        let newestDepMtime = -1;
+        for (const name of readdirSync(depsDir)) {
+          const match = binExecPattern.exec(name);
+          if (!match) continue;
+          try {
+            const s = statSync(join(depsDir, name));
+            if (binIno && s.ino === binIno) activeBinHashes.add(match[1]);
+            if (s.mtimeMs > newestDepMtime) {
+              newestDepMtime = s.mtimeMs;
+              newestDepHash = match[1];
+            }
+          } catch {}
+        }
+        if (newestDepHash) activeBinHashes.add(newestDepHash);
+      }
+      for (const hash of activeBinHashes) {
+        for (const ext of exts) {
+          activeFiles.add(resolve(targetDir, 'deps', `${bin}-${hash}${ext}`));
+        }
+      }
+      resolveArtifacts({ activeFiles, activeBuildDirs, profile, targetDir, failed: !artifactTracked });
     });
 
     child.on('error', reject);
@@ -117,6 +183,7 @@ export async function cleanStaleArtifacts({
   silent = false,
   verbose = false,
   log = console.log,
+  env = process.env,
 } = {}) {
   const fullManifest = resolve(installationRoot, manifestPath);
   if (!existsSync(fullManifest)) {
@@ -134,12 +201,23 @@ export async function cleanStaleArtifacts({
     log(`[clean-stale] Collecting active artifacts from Cargo (${release ? 'release' : 'debug'})...`);
   }
 
-  const { activeFiles, activeBuildDirs, profile, targetDir } = await parseActiveArtifacts({
+  const { activeFiles, activeBuildDirs, profile, targetDir, failed } = await parseActiveArtifacts({
     installationRoot,
     manifestPath,
     bin,
     release,
+    env,
   });
+  if (failed) {
+    return {
+      dryRun,
+      activeCount: 0,
+      activeBytes: 0,
+      staleCount: 0,
+      deletedCount: 0,
+      reclaimedBytes: 0,
+    };
+  }
 
   const depsDir = join(targetDir, 'deps');
   const buildDir = join(targetDir, 'build');
@@ -163,8 +241,10 @@ export async function cleanStaleArtifacts({
       if (!activeFiles.has(fullPath)) {
         try {
           const s = statSync(fullPath);
-          staleDeps.push({ path: fullPath, name: file, size: s.size });
-          staleDepsBytes += s.size;
+          const isDirectory = s.isDirectory();
+          const size = isDirectory ? calculateDirSize(fullPath) : s.size;
+          staleDeps.push({ path: fullPath, name: file, size, isDirectory });
+          staleDepsBytes += size;
         } catch {}
       }
     }
@@ -230,7 +310,11 @@ export async function cleanStaleArtifacts({
 
   for (const item of staleDeps) {
     try {
-      unlinkSync(item.path);
+      if (item.isDirectory) {
+        rmSync(item.path, { recursive: true, force: true });
+      } else {
+        unlinkSync(item.path);
+      }
       deletedCount++;
       if (verbose) log(`  - Deleted file: ${item.name}`);
     } catch (error) {

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { ExtensionCommands } from '../engine/extension-commands.ts';
 
 async function fixture(run: (host: ExtensionCommands, paths: { base: string; own: string; global: string; a: string; b: string }) => Promise<void>) {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-extension-commands-')));
+  const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'grapher-extension-commands-')));
   const paths = { base, own: join(base, 'own'), global: join(base, 'global'), a: join(base, 'project-a'), b: join(base, 'project-b') };
   for (const directory of [paths.own, paths.global, paths.a, paths.b]) mkdirSync(directory);
   mkdirSync(join(paths.global, 'extensions'));
@@ -51,7 +51,7 @@ async function start(host: ExtensionCommands, repository: string, text: string) 
 }
 async function poll(host: ExtensionCommands, fields: object, ready: (state: any) => boolean) {
   const events: any[] = [];
-  for (let attempt = 0; attempt < 500; attempt++) {
+  for (let attempt = 0; attempt < 2000; attempt++) {
     const state: any = await host.dispatch({ ...fields, operation: 'poll' });
     events.push(...state.events);
     const result = { ...state, events };

@@ -130,7 +130,13 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
     const before = windowRef.current;
     const signal = lifetime.current;
     if (!signal || signal.aborted) return;
-    if (olderBusy.current) { if (preserveReading) setShowOlderLoading(true); return; }
+    if (olderBusy.current) {
+      if (preserveReading) {
+        setShowOlderLoading(true);
+        markTranscriptPrepend(wrapperRef.current);
+      }
+      return;
+    }
     if (pendingOlder.current) { if (commitPendingOlder()) setHoldingOlder(false); return; }
     if (!before || before.start === 0) return;
     const scroller = transcriptScrollParent(wrapperRef.current);
@@ -155,7 +161,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
         setHoldingOlder(true);
         return;
       }
-      if (!preserveReading) markTranscriptPrependIfReading(wrapperRef.current);
+      if (announcedRef.current) markTranscriptPrependIfReading(wrapperRef.current);
       // A simultaneous forward response may have extended end; never replace it.
       const next = prependTranscriptPage(windowRef.current!, page);
       publish(next);

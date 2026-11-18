@@ -1762,6 +1762,7 @@ export default function App() {
         let partInTag = false;
         let planInTag = false;
         const graphEditQueue = new PlannerGraphEditQueue();
+        const previewKnownNodes = new Set((isContinuing ? state.graph.nodes : []).map((item) => item.id));
 
         abortController = new AbortController();
         planningAbortControllerRef.current = abortController;
@@ -1955,10 +1956,13 @@ export default function App() {
                     if (edits.length > 0) {
                       previewApplied = true;
                       // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
-                      const existing = new Set(state.graph.nodes.map((item) => item.id));
                       const addedNodeNames = edits
-                        .filter((edit) => !edit.delete && !existing.has(edit.id))
+                        .filter((edit) => !edit.delete && !previewKnownNodes.has(edit.id))
                         .map((edit) => edit.id);
+                      for (const edit of edits) {
+                        if (edit.delete) previewKnownNodes.delete(edit.id);
+                        else previewKnownNodes.add(edit.id);
+                      }
                       setState((prev) => applyPlannerNodeEditsToState(prev, edits));
                       if (addedNodeNames.length > 0) {
                         setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));

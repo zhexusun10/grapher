@@ -140,12 +140,15 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
         const shell = document.querySelector(".app-shell");
         const prompt = home.querySelector(".prompt-box-container").getBoundingClientRect();
         return { shellOverflow: getComputedStyle(shell).overflowY,
+          shellScrollTop: shell.scrollTop, shellScrollLeft: shell.scrollLeft,
           documentHeight: document.documentElement.scrollHeight, viewport: innerHeight, promptTop: prompt.top, promptBottom: prompt.bottom };
       });
       // The dot background deliberately paints outside the landing screen (under
       // the sidebar), so the landing box itself is no longer the clipping
-      // boundary. The app shell stays the viewport bound and must not move.
-      assert.equal(metrics.shellOverflow, "hidden");
+      // boundary. The app shell clips to the viewport without scrolling.
+      assert.ok(metrics.shellOverflow === "hidden" || metrics.shellOverflow === "clip", `expected hidden/clip overflowY, got ${metrics.shellOverflow}`);
+      assert.equal(metrics.shellScrollTop, 0);
+      assert.equal(metrics.shellScrollLeft, 0);
       assert.equal(metrics.documentHeight, metrics.viewport);
       assert.ok(metrics.promptTop >= 0 && metrics.promptBottom <= height, "composer remains visible");
       // The dot layer is the only element allowed to paint outside the landing
@@ -673,7 +676,9 @@ test("removing active workspace returns to home landing page instead of switchin
 
     // Verify it returns to home landing screen rather than navigating into Beta conversation
     await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
     assert.equal(await page.locator(".chat-messages-stream").count(), 0);
+    await page.waitForFunction(() => document.querySelectorAll(".project-workspace-item").length === 1);
     assert.equal(await page.locator(".project-workspace-item").count(), 1);
     assert.equal(await page.locator(".project-workspace-item.active").count(), 0);
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_projects")).map(p => p.name)), ["Beta"]);

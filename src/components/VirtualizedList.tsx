@@ -46,7 +46,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const onRestoreScrollRef = useRef(onRestoreScroll);
   onRestoreScrollRef.current = onRestoreScroll;
   const [heightVersion, setHeightVersion] = useState(0);
-  const committedHeightVersionRef = useRef(heightVersion);
+  const measuredRevisionRef = useRef(0);
+  const committedOffsetsRevisionRef = useRef(0);
   const flushScheduled = useRef(false);
   const mounted = useRef(false);
   const frame = useRef<number | null>(null);
@@ -59,6 +60,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const existing = heights.current.get(id);
     if (existing !== undefined && Math.abs(existing - height) < 1) return;
     heights.current.set(id, height);
+    measuredRevisionRef.current += 1;
     if (flushScheduled.current) return;
     flushScheduled.current = true;
     queueMicrotask(() => {
@@ -69,9 +71,12 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const previousIds = useRef<string[]>([]);
   const ids = useMemo(() => shareJson(previousIds.current, items.map(item => item.id)), [items]);
   previousIds.current = ids;
-  const offsets = useMemo(() => rowOffsets(ids,
-    { get: (id: string) => { const height = heights.current.get(id); return height === undefined ? undefined : height + gap; } },
-    (id: string) => estimateTranscriptRowHeight(id) + gap), [ids, gap, heightVersion]);
+  const { offsets, revision: offsetsRevision } = useMemo(() => ({
+    offsets: rowOffsets(ids,
+      { get: (id: string) => { const height = heights.current.get(id); return height === undefined ? undefined : height + gap; } },
+      (id: string) => estimateTranscriptRowHeight(id) + gap),
+    revision: measuredRevisionRef.current,
+  }), [ids, gap, heightVersion]);
   const previousOffsets = useRef(offsets);
   const previousOffsetIds = useRef(ids);
   // Keep the anchor through the subsequent first measurements too. Otherwise
@@ -186,8 +191,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           gestureTimer = null;
           if (gestureRowAnchor.current !== anchor || !anchor.awaitingScroll) return;
           anchor.awaitingScroll = false;
-          if (mounted.current) setHeightVersion(value => value + 1);
-        }, 160);
+          if (pendingGestureMeasurementRef.current && mounted.current) setHeightVersion(value => value + 1);
+        }, 80);
       }
     };
     const visibleBounds = () => {
@@ -369,11 +374,13 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const before = previousOffsets.current;
     const parent = parentRef.current;
     // Child layout effects can measure newly mounted overscan rows before this
-    // commit, while `offsets` still contains their estimates. Associate those
-    // measurements with the next height-version render rather than consuming a
-    // flag here, or the correction is lost and upward scrolling feels resisted.
-    const hasMeasurementChange = heightVersion !== committedHeightVersionRef.current;
-    committedHeightVersionRef.current = heightVersion;
+    // commit, while `offsets` still contains their estimates. Capture the
+    // measurement revision when `offsets` was computed so those later child
+    // measurements are associated with the next render that actually includes them,
+    // and measurements that already updated `offsets` in an `items` render are
+    // compensated right away rather than dropped.
+    const hasMeasurementChange = offsetsRevision !== committedOffsetsRevisionRef.current;
+    committedOffsetsRevisionRef.current = offsetsRevision;
     // Follow state is also updated imperatively from scroll handlers without a
     // React render. Re-read it at commit time so a reader who just scrolled up
     // is never pulled back by this frame's row measurement.
@@ -478,7 +485,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     }
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-  }, [offsets, ids, viewport.top, anchor, followingLatest, heightVersion, updateViewport]);
+  }, [offsets, offsetsRevision, ids, viewport.top, anchor, followingLatest, updateViewport]);
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
   const height = parent?.clientHeight || viewport.height;
   const totalHeight = offsets.at(-1) ?? 0;
