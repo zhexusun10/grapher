@@ -32,26 +32,44 @@ if (process.argv[2] === '--cache-key') {
   }
   const hash = createHash('sha256').update(`grapher-native-runtime-v2:${process.platform}:${process.arch}:${process.versions.modules}\n`);
   const directories = new Set();
-  const add = (path, name) => {
-    // Windows copies dereference links. Hash the same bytes/shape that the
-    // destination retains, not a junction spelling absent from that copy.
-    const stat = process.platform === 'win32' ? statSync(path) : lstatSync(path);
+  const add = (path, name, dirent) => {
     hash.update(`${name}\0`);
-    if (stat.isSymbolicLink()) {
-      hash.update(`link:${readlinkSync(path)}\0`);
-    } else if (stat.isDirectory()) {
-      const physical = process.platform === 'win32' ? realpathSync.native(path) : undefined;
-      if (physical && directories.has(physical)) throw new Error(`Cyclic native runtime input: ${name}`);
-      if (physical) directories.add(physical);
-      try {
-        for (const child of readdirSync(path).sort()) {
-          if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) add(join(path, child), `${name}/${child}`);
+    if (process.platform === 'win32') {
+      // Windows copies dereference links. Hash the same bytes/shape that the
+      // destination retains, not a junction spelling absent from that copy.
+      const stat = statSync(path);
+      if (stat.isDirectory()) {
+        const physical = realpathSync.native(path);
+        if (directories.has(physical)) throw new Error(`Cyclic native runtime input: ${name}`);
+        directories.add(physical);
+        try {
+          for (const child of readdirSync(path).sort()) {
+            if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) add(join(path, child), `${name}/${child}`);
+          }
+        } finally {
+          directories.delete(physical);
         }
-      } finally {
-        if (physical) directories.delete(physical);
+      } else {
+        const content = readFileSync(path);
+        hash.update(String(content.length)).update('\0').update(content);
+      }
+      return;
+    }
+    const kind = dirent && (dirent.isSymbolicLink() || dirent.isDirectory() || dirent.isFile())
+      ? dirent
+      : lstatSync(path);
+    if (kind.isSymbolicLink()) {
+      hash.update(`link:${readlinkSync(path)}\0`);
+    } else if (kind.isDirectory()) {
+      const children = readdirSync(path, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const child of children) {
+        if (child.name !== 'node_modules' && child.name !== '.git' && !child.name.startsWith('.grapher-masks-')) {
+          add(join(path, child.name), `${name}/${child.name}`, child);
+        }
       }
     } else {
-      hash.update(String(stat.size)).update('\0').update(readFileSync(path));
+      const content = readFileSync(path);
+      hash.update(String(content.length)).update('\0').update(content);
     }
   };
   for (const name of ['engine', 'package.json', 'package-lock.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) add(join(input, name), name);

@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { devPort, loadDevEnvironment, runDev } from './dev.mjs';
+import { devBackendExecutable, devPort, loadDevEnvironment, runDev } from './dev.mjs';
 
 async function freePort() {
   const server = createServer();
@@ -190,4 +190,37 @@ test('invalid and conflicting ports fail before installation', async t => {
   const dev = await f.start({ env: { ...f.env, GRAPHER_PORT: f.env.GRAPHER_FRONTEND_PORT } });
   assert.equal(await dev.completed, 1);
   assert.deepEqual(f.phases, []);
+});
+
+test('built dev backend launches directly without a second cargo run and defers stale cleanup', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const debugDir = join(f.root, 'backend', 'target', 'debug');
+  const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
+  mkdirSync(debugDir, { recursive: true });
+  writeFileSync(binary, 'stub-binary');
+  assert.equal(devBackendExecutable(f.root, f.env), binary);
+
+  const spawnedCommands = [];
+  let cleanupStartedBeforeFrontend = false;
+  const spawnProcess = (command, args, options) => {
+    spawnedCommands.push([command, args]);
+    if (command === binary) {
+      f.phases.push('binary');
+      const child = spawn(process.execPath, [join(f.root, 'child.mjs'), 'run'], { ...options, stdio: 'ignore' });
+      f.children.push(child);
+      return child;
+    }
+    return f.options.spawnProcess(command, args, options);
+  };
+  const dev = await f.start({
+    spawnProcess,
+    cleanStale: async () => {
+      if (!f.phases.includes('frontend')) cleanupStartedBeforeFrontend = true;
+    },
+  });
+  assert.deepEqual(f.phases, ['build', 'binary', 'frontend']);
+  assert.equal(cleanupStartedBeforeFrontend, false, 'stale artifact cleanup must not block startup');
+  assert.equal(spawnedCommands.some(([, args]) => args[0] === 'run'), false);
+  await dev.stop();
+  assert.equal(await dev.completed, 0);
 });

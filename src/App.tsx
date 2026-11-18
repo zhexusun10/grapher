@@ -1,5 +1,5 @@
 import { t, localizeError } from "./i18n";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
@@ -59,11 +59,14 @@ import { useHideAutoMode, useLandingBackground } from "./services/displayPrefere
 import { STORAGE_KEYS, readStorageJson, readStorageString, writeStorageJson, writeStorageString } from "./services/appStorage";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
-import { ApprovalModal } from "./components/modals/ApprovalModal";
-import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
+import type { ConfirmModalState } from "./components/modals/ConfirmModal";
 
-import { SettingsModal } from "./components/modals/SettingsModal";
-import { EditorModal } from "./components/modals/EditorModal";
+const ApprovalModal = lazy(() => import("./components/modals/ApprovalModal"));
+const ConfirmModal = lazy(() =>
+  import("./components/modals/ConfirmModal").then(module => ({ default: module.ConfirmModal }))
+);
+const SettingsModal = lazy(() => import("./components/modals/SettingsModal"));
+const EditorModal = lazy(() => import("./components/modals/EditorModal"));
 
 type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
 type WorkbenchLoadKind = "initial" | "navigation";
@@ -3198,54 +3201,56 @@ export default function App() {
           </main>
 
           {/* Modals with Opening and Closing Animations */}
-          <AnimatePresence>
-            {modal === "settings" && (
-              <SettingsModal
-                key="settings-modal"
-                isOpen={true}
-                onClose={handleCloseSettings}
-                config={config}
-                dataPath={dataPath}
-                envOverrides={envOverrides}
-                conversationScoped={!!state.runId}
-                onSaveConfig={handleSaveConfig}
-              />
-            )}
+          <Suspense fallback={null}>
+            <AnimatePresence>
+              {modal === "settings" && (
+                <SettingsModal
+                  key="settings-modal"
+                  isOpen={true}
+                  onClose={handleCloseSettings}
+                  config={config}
+                  dataPath={dataPath}
+                  envOverrides={envOverrides}
+                  conversationScoped={!!state.runId}
+                  onSaveConfig={handleSaveConfig}
+                />
+              )}
 
-            {modal === "editor" && (
-              <EditorModal
-                key={`editor-modal-${state.runId || currentRepoPath}`}
-                isOpen={true}
-                onClose={() => setModal(null)}
-                initialGraph={state.graph.nodes.length ? state.graph : emptyGraph}
-                busy={busy}
-                active={active}
-                onSave={save}
-                onError={setError}
-              />
-            )}
+              {modal === "editor" && (
+                <EditorModal
+                  key={`editor-modal-${state.runId || currentRepoPath}`}
+                  isOpen={true}
+                  onClose={() => setModal(null)}
+                  initialGraph={state.graph.nodes.length ? state.graph : emptyGraph}
+                  busy={busy}
+                  active={active}
+                  onSave={save}
+                  onError={setError}
+                />
+              )}
 
-            {modal === "approval" && (
-              <ApprovalModal
-                key="approval-modal"
-                isOpen={true}
-                onClose={() => setModal(null)}
-                state={state}
-                config={config}
-                busy={busy || repositoryBlocked}
-                onAdjustPlan={() => setModal("editor")}
-                onApprove={() => control("approve")}
-              />
-            )}
+              {modal === "approval" && (
+                <ApprovalModal
+                  key="approval-modal"
+                  isOpen={true}
+                  onClose={() => setModal(null)}
+                  state={state}
+                  config={config}
+                  busy={busy || repositoryBlocked}
+                  onAdjustPlan={() => setModal("editor")}
+                  onApprove={() => control("approve")}
+                />
+              )}
 
-            {confirmModal && (
-              <ConfirmModal
-                key="confirm-modal"
-                config={confirmModal}
-                onClose={() => setConfirmModal(null)}
-              />
-            )}
-          </AnimatePresence>
+              {confirmModal && (
+                <ConfirmModal
+                  key="confirm-modal"
+                  config={confirmModal}
+                  onClose={() => setConfirmModal(null)}
+                />
+              )}
+            </AnimatePresence>
+          </Suspense>
         </div>
       </FloatingPathsBackground>
     </div>

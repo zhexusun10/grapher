@@ -1,13 +1,41 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs';
 import { toolchainEnv, prependPath } from './cargo.mjs';
 import { cleanStaleArtifacts } from './clean-stale-artifacts.mjs';
+
+export function devBackendExecutable(installationRoot, env = process.env) {
+  const targetBase = env.CARGO_TARGET_DIR
+    ? resolve(installationRoot, env.CARGO_TARGET_DIR)
+    : join(installationRoot, 'backend', 'target');
+  const debugDir = join(targetBase, 'debug');
+  const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
+  // On macOS, even a no-op `cargo build` unlinks and re-clones `target/debug/grapher`
+  // with a fresh inode, invalidating AMFI/XProtect binary trust caching (~500ms per launch).
+  // The underlying `deps/grapher-<hash>` keeps a stable inode until rustc actually relinks.
+  if (process.platform === 'darwin' && existsSync(binary)) {
+    try {
+      const binStat = lstatSync(binary);
+      const depsDir = join(debugDir, 'deps');
+      const matches = [];
+      for (const name of readdirSync(depsDir)) {
+        if (!/^grapher-[0-9a-f]{16}$/.test(name)) continue;
+        const candidate = join(depsDir, name);
+        const stat = lstatSync(candidate);
+        if (stat.isFile() && !stat.isSymbolicLink() && stat.size === binStat.size && Math.trunc(stat.mtimeMs) === Math.trunc(binStat.mtimeMs)) {
+          matches.push(candidate);
+        }
+      }
+      if (matches.length === 1) return matches[0];
+    } catch {}
+  }
+  return binary;
+}
 
 export function loadDevEnvironment(installationRoot, base = process.env) {
   const env = { ...base };
@@ -50,19 +78,23 @@ export function assertPortAvailable(port) {
 }
 
 async function waitForBackend(port, signal, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
     try {
       // /api/ is deliberately a lightweight HTTP readiness probe, not bootstrap
       // (which can load history/providers). GET returns JSON-POST-required (415).
       const response = await fetch(`http://127.0.0.1:${port}/api/`, {
+        headers: { Connection: 'close' },
         signal: AbortSignal.any([signal, AbortSignal.timeout(Math.min(800, timeoutMs))]),
       });
       await response.body?.cancel();
       if (response.status === 415) return;
     } catch { signal.throwIfAborted(); }
-    await delay(100, undefined, { signal });
+    const elapsed = Date.now() - started;
+    const pollMs = elapsed < 300 ? 15 : elapsed < 1000 ? 40 : 100;
+    await delay(pollMs, undefined, { signal });
   }
   throw new Error(`Backend did not become ready on port ${port} within ${timeoutMs / 1000}s after compilation finished.`);
 }
@@ -146,11 +178,6 @@ export async function runDev({
     log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
     await run(cargo, ['build', ...cargoArgs]);
     controller.signal.throwIfAborted();
-    if (typeof cleanStale === 'function') {
-      try {
-        await cleanStale({ installationRoot, env, silent: true, log });
-      } catch {}
-    }
     // Recheck after the potentially long build without killing a new listener.
     await assertPortAvailable(frontendPort);
     await assertPortAvailable(backendPort);
@@ -163,9 +190,15 @@ export async function runDev({
       });
     };
     log(`[dev] Starting backend; waiting for port ${backendPort}...`);
-    const backend = start(cargo, ['run', ...cargoArgs], { env: {
+    const backendEnv = {
       ...env, GRAPHER_DEV_LAZY_PRIMARY: '1', GRAPHER_DEV_HIDE_BACKEND_URL: '1',
-    } });
+    };
+    // Cargo just built this target; launch the compiled binary directly when
+    // present instead of paying for a second `cargo run` invocation on every start.
+    const compiledBinary = devBackendExecutable(installationRoot, env);
+    const backend = existsSync(compiledBinary)
+      ? start(compiledBinary, [], { env: backendEnv })
+      : start(cargo, ['run', ...cargoArgs], { env: backendEnv });
     watch(backend, 'Backend');
     await waitForBackend(backendPort, controller.signal, startupTimeoutMs);
     controller.signal.throwIfAborted();
@@ -173,6 +206,13 @@ export async function runDev({
     log('[dev] Backend ready. Starting frontend...');
     const frontend = start(process.execPath, [join(installationRoot, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', String(frontendPort)]);
     watch(frontend, 'Frontend');
+    // Stale Cargo artifact cleanup is housekeeping, not a startup prerequisite.
+    // Defer it until after Vite and the initial page load settle.
+    if (typeof cleanStale === 'function') {
+      void delay(3000, undefined, { signal: controller.signal })
+        .then(() => cleanStale({ installationRoot, env, silent: true, log, signal: controller.signal }))
+        .catch(() => {});
+    }
   } catch (error) {
     if (!stopping) { logError(`[dev] ${error.message}`); await stop(1); }
   }

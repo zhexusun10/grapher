@@ -95,14 +95,24 @@ export function verifyPiDependencies(root, { installationRoot = root } = {}) {
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path) continue;
     const metadata = join(source, path, 'package.json');
-    if (!existsSync(metadata) && entry.optional) continue; // Non-host platform binaries.
-    if (!existsSync(metadata) || json(metadata).version !== entry.version) throw new Error(`Installed Pi dependency mismatch: ${path}; run npm run pi:setup`);
+    let raw;
+    try { raw = readFileSync(metadata, 'utf8'); }
+    catch (error) {
+      if (error?.code === 'ENOENT' && entry.optional) continue; // Non-host platform binaries.
+      throw new Error(`Installed Pi dependency mismatch: ${path}; run npm run pi:setup`);
+    }
+    if (JSON.parse(raw).version !== entry.version) throw new Error(`Installed Pi dependency mismatch: ${path}; run npm run pi:setup`);
   }
   // Reject extraneous packages too: an old monorepo install must not leave the
   // vulnerable example/build graph in an otherwise valid runtime copy.
   const inspect = directory => {
-    if (!existsSync(directory)) return;
-    const paths = readdirSync(directory).filter(name => !name.startsWith('.')).flatMap(name => {
+    let entries;
+    try { entries = readdirSync(directory); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    const paths = entries.filter(name => !name.startsWith('.')).flatMap(name => {
       const path = join(directory, name);
       return name.startsWith('@') ? readdirSync(path).map(child => join(path, child)) : [path];
     });

@@ -144,3 +144,107 @@ fn static_files_refuse_symlinks_and_windows_junctions_below_the_web_root() {
         "private"
     );
 }
+
+#[test]
+fn static_assets_send_connection_close_and_cache_headers_without_keep_alive_starvation() {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let web_root = temp.path().join("dist");
+    fs::create_dir_all(web_root.join("assets")).unwrap();
+    fs::write(web_root.join("index.html"), "<!doctype html>").unwrap();
+    fs::write(web_root.join("assets/app-abc123.js"), "console.log(1);").unwrap();
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open_lazy(temp.path()).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused"),
+    });
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+    let address = server.server_addr().to_ip().unwrap();
+    let server_worker = server.clone();
+    let worker = std::thread::spawn(move || {
+        for _ in 0..8 {
+            handle_http_request(
+                server_worker.recv().unwrap(),
+                &service,
+                &web_root,
+                address.port(),
+            );
+        }
+    });
+
+    // Open 8 simultaneous keep-alive requests (exceeding tiny_http's 4-thread
+    // TaskPool minimum). Like a real HTTP/1.1 client honoring `Connection: close`,
+    // each client reads headers + Content-Length body and closes its socket,
+    // releasing tiny_http's reader thread immediately so none stalls.
+    let started = Instant::now();
+    let mut clients = Vec::new();
+    for index in 0..8 {
+        let path = if index % 2 == 0 {
+            "/"
+        } else {
+            "/assets/app-abc123.js"
+        };
+        clients.push(std::thread::spawn(move || {
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write!(
+                socket,
+                "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: keep-alive\r\n\r\n"
+            )
+            .unwrap();
+            let mut reader = std::io::BufReader::new(socket);
+            let mut headers = String::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if let Some(value) = line
+                    .strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                {
+                    content_length = value.trim().parse().unwrap();
+                }
+                headers.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            (path, headers, String::from_utf8(body).unwrap())
+        }));
+    }
+    for client in clients {
+        let (path, headers, body) = client.join().unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+        assert!(
+            headers.contains("Connection: close\r\n"),
+            "missing Connection: close for {path}: {headers}"
+        );
+        if path.starts_with("/assets/") {
+            assert!(
+                headers.contains("Cache-Control: public, max-age=31536000, immutable\r\n"),
+                "{headers}"
+            );
+            assert_eq!(body, "console.log(1);");
+        } else {
+            assert!(headers.contains("Cache-Control: no-cache\r\n"), "{headers}");
+            assert_eq!(body, "<!doctype html>");
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "parallel requests stalled for {:?}",
+        started.elapsed()
+    );
+    worker.join().unwrap();
+}

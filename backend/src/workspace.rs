@@ -423,23 +423,29 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            let path = entry.path();
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(m) => m,
+            // `DirEntry::file_type` never follows symlinks and avoids `lstat`
+            // syscalls on Unix filesystems that populate `d_type`.
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
                 Err(_) => continue,
             };
-            // Never follow symlinks or Windows junctions
-            if metadata.file_type().is_symlink() {
+            if file_type.is_symlink() {
                 continue;
             }
-            if metadata.is_dir() {
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_type.is_dir() {
                 // Exclude .git and internal .grapher* directories.
-                if crate::path_identity::is_runtime_metadata_name(std::ffi::OsStr::new(file_name)) {
+                if crate::path_identity::is_runtime_metadata_name(&entry.file_name()) {
                     continue;
                 }
-                stack.push(path);
-            } else if metadata.is_file() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
                 total_bytes = total_bytes.saturating_add(metadata.len());
                 if total_bytes > max_bytes {
                     return Err(
@@ -454,36 +460,88 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
 }
 
 pub(crate) fn cached_check_workspace_size(root: &Path) -> Result<(), String> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Condvar, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
-    type WorkspaceSizeCache = Mutex<Option<HashMap<PathBuf, (Instant, Result<(), String>)>>>;
-    static CACHE: WorkspaceSizeCache = Mutex::new(None);
-
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let now = Instant::now();
-    let ttl = Duration::from_secs(30);
-
-    {
-        if let Ok(mut lock) = CACHE.lock() {
-            let map = lock.get_or_insert_with(HashMap::new);
-            if let Some((timestamp, cached_res)) = map.get(&canonical_root) {
-                if now.duration_since(*timestamp) < ttl {
-                    return cached_res.clone();
+    struct SizeCacheState {
+        entries: HashMap<PathBuf, (Instant, Result<(), String>)>,
+        in_flight: HashSet<PathBuf>,
+    }
+    struct SizeCache {
+        state: Mutex<SizeCacheState>,
+        ready: Condvar,
+    }
+    struct InFlightGuard<'a> {
+        cache: &'a SizeCache,
+        key: Option<PathBuf>,
+    }
+    impl Drop for InFlightGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(key) = self.key.take() {
+                if let Ok(mut state) = self.cache.state.lock() {
+                    state.in_flight.remove(&key);
+                    self.cache.ready.notify_all();
                 }
             }
         }
     }
 
-    let result = check_workspace_size(&canonical_root, MAX_WORKSPACE_BYTES);
+    static CACHE: OnceLock<SizeCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| SizeCache {
+        state: Mutex::new(SizeCacheState {
+            entries: HashMap::new(),
+            in_flight: HashSet::new(),
+        }),
+        ready: Condvar::new(),
+    });
 
-    if let Ok(mut lock) = CACHE.lock() {
-        let map = lock.get_or_insert_with(HashMap::new);
-        if map.len() > 50 {
-            map.retain(|_, (t, _)| now.duration_since(*t) < ttl);
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let ttl = Duration::from_secs(30);
+
+    // Coalesce concurrent cold scans (e.g. startup `detect_repository` +
+    // `repository_status`) so only one thread walks the workspace tree.
+    let mut guard = {
+        let mut state = cache
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let now = Instant::now();
+            if let Some((timestamp, cached_res)) = state.entries.get(&canonical_root) {
+                if now.duration_since(*timestamp) < ttl {
+                    return cached_res.clone();
+                }
+            }
+            if !state.in_flight.contains(&canonical_root) {
+                state.in_flight.insert(canonical_root.clone());
+                break InFlightGuard {
+                    cache,
+                    key: Some(canonical_root.clone()),
+                };
+            }
+            state = cache
+                .ready
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        map.insert(canonical_root.to_path_buf(), (now, result.clone()));
+    };
+
+    let result = check_workspace_size(&canonical_root, MAX_WORKSPACE_BYTES);
+    let completed = Instant::now();
+
+    if let Ok(mut state) = cache.state.lock() {
+        if state.entries.len() > 50 {
+            state
+                .entries
+                .retain(|_, (t, _)| completed.duration_since(*t) < ttl);
+        }
+        state
+            .entries
+            .insert(canonical_root.clone(), (completed, result.clone()));
+        state.in_flight.remove(&canonical_root);
+        guard.key = None;
+        cache.ready.notify_all();
     }
 
     result

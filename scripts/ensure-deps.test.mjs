@@ -411,3 +411,26 @@ test('failed or incomplete Pi setup cannot be reported as ready', async t => {
   f.write('pi/package.json', '{}');
   await assert.rejects(bootstrap(f, () => {}));
 });
+
+test('warm starts skip spawning patch-picomatch when the patch is already verified', async t => {
+  const f = fixture(t);
+  installPiFixture(f);
+  f.write('node_modules/picomatch/package.json', JSON.stringify({ version: '4.0.7' }));
+  f.write('node_modules/picomatch/lib/parse.js', `const repeatedExtglobRecursion = pattern => {
+  if (sawStarSequence) {
+    return combinable
+      ? { risky: true, safeOutput: buildCharClassStar([...new Set(safeChars)]) }
+      : { risky: true };
+  }
+
+  return { risky: false };
+}
+const render = () => {
+    let output = token.close + (opts.capture ? ')' : '');
+};
+`);
+  assert.equal(await patchPicomatch(f.root), true);
+  const calls = [];
+  await bootstrap(f, (command, args) => calls.push([command, args]));
+  assert.deepEqual(calls.map(([, args]) => args), [['--version'], ['--version']]);
+});

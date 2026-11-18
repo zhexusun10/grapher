@@ -14,9 +14,10 @@ export async function parseActiveArtifacts({
   release = false,
   extraCargoArgs = [],
   env = process.env,
+  signal,
 } = {}) {
   const fullManifest = resolve(installationRoot, manifestPath);
-  if (!existsSync(fullManifest)) {
+  if (!existsSync(fullManifest) || signal?.aborted) {
     return { activeFiles: new Set(), activeBuildDirs: new Set(), profile: release ? 'release' : 'debug', targetDir: '', failed: true };
   }
 
@@ -29,6 +30,7 @@ export async function parseActiveArtifacts({
     const args = [
       cargoScript,
       'build',
+      '--locked',
       '--manifest-path',
       fullManifest,
       '--bin',
@@ -43,6 +45,10 @@ export async function parseActiveArtifacts({
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const onAbort = () => {
+      try { child.kill('SIGTERM'); } catch {}
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     const activeFiles = new Set();
     const activeBuildDirs = new Set();
@@ -89,6 +95,11 @@ export async function parseActiveArtifacts({
     });
 
     child.on('close', code => {
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) {
+        resolveArtifacts({ activeFiles: new Set(), activeBuildDirs: new Set(), profile: release ? 'release' : 'debug', targetDir: '', failed: true });
+        return;
+      }
       if (buffer) processLine(buffer);
       const profile = release ? 'release' : 'debug';
       const targetDir = join(targetBase, profile);
@@ -155,7 +166,10 @@ export async function parseActiveArtifacts({
       resolveArtifacts({ activeFiles, activeBuildDirs, profile, targetDir, failed: !artifactTracked });
     });
 
-    child.on('error', reject);
+    child.on('error', error => {
+      signal?.removeEventListener('abort', onAbort);
+      reject(error);
+    });
   });
 }
 
@@ -184,9 +198,10 @@ export async function cleanStaleArtifacts({
   verbose = false,
   log = console.log,
   env = process.env,
+  signal,
 } = {}) {
   const fullManifest = resolve(installationRoot, manifestPath);
-  if (!existsSync(fullManifest)) {
+  if (!existsSync(fullManifest) || signal?.aborted) {
     return {
       dryRun,
       activeCount: 0,
@@ -207,6 +222,7 @@ export async function cleanStaleArtifacts({
     bin,
     release,
     env,
+    signal,
   });
   if (failed) {
     return {

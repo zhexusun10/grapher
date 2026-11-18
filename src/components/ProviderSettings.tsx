@@ -91,7 +91,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const [answer, setAnswer] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(() => !providerAuth.getCachedCatalog());
   const [error, setError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
   const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);

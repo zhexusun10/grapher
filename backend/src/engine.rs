@@ -83,6 +83,54 @@ pub fn warm_planning_engines(config: Config) {
 }
 
 #[cfg(not(feature = "fixture"))]
+fn sleep_unless_prewarm_stopping(duration: Duration) -> bool {
+    let deadline = Instant::now() + duration;
+    loop {
+        if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+/// Startup-only staggered variant: avoids spawning five heavy Node/Pi processes
+/// at the exact instant the HTTP server binds, keeping initial UI load and
+/// Vite/browser startup uncontended while still warming every role promptly.
+#[cfg(not(feature = "fixture"))]
+pub fn warm_planning_engines_staggered(
+    config: Config,
+    initial_delay: Duration,
+    step_delay: Duration,
+) {
+    if cfg!(test)
+        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+        || config.repository.trim().is_empty()
+    {
+        return;
+    }
+    if !sleep_unless_prewarm_stopping(initial_delay) {
+        return;
+    }
+    for (index, role) in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 && !sleep_unless_prewarm_stopping(step_delay) {
+            return;
+        }
+        process_prewarm::request(&config, role, false);
+    }
+    if !sleep_unless_prewarm_stopping(step_delay) {
+        return;
+    }
+    crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+}
+
+#[cfg(not(feature = "fixture"))]
 pub fn stop_partition_prewarm() {
     PREWARM_SHUTTING_DOWN.store(true, Ordering::SeqCst);
     process_prewarm::shutdown();

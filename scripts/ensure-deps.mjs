@@ -5,6 +5,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { missingBundledExtensions } from './bundled-extensions.mjs';
 import { toolchainEnv, pathValue, prependPath } from './cargo.mjs';
+import { verifyPicomatchPatch } from './patch-picomatch.mjs';
 import { verifyPiDependencies } from './pi-dependencies.mjs';
 import { piBuildReady } from './pi-build-state.mjs';
 
@@ -39,8 +40,13 @@ export function rootDependenciesReady(installationRoot = root) {
     for (const [path, entry] of Object.entries(lock.packages)) {
       if (!path) continue;
       const metadata = join(installationRoot, path, 'package.json');
-      if (!existsSync(metadata) && entry.optional) continue;
-      if (!existsSync(metadata) || json(metadata).version !== entry.version) return false;
+      let raw;
+      try { raw = readFileSync(metadata, 'utf8'); }
+      catch (error) {
+        if (error?.code === 'ENOENT' && entry.optional) continue;
+        return false;
+      }
+      if (JSON.parse(raw).version !== entry.version) return false;
     }
     return ['vite/bin/vite.js', 'tsx/dist/cli.mjs', 'typescript/bin/tsc'].every(path =>
       existsSync(join(installationRoot, 'node_modules', path))) && missingBundledExtensions(installationRoot).length === 0;
@@ -72,9 +78,13 @@ export async function ensureDependencies({
   if (!cargoPath) throw new Error(`Rust/Cargo is required. Install stable Rust from https://rustup.rs/ and a native compiler/linker${process.platform === 'darwin' ? ' (macOS: xcode-select --install)' : ''}, reopen your terminal, then run npm run dev again.`);
   const childEnv = toolchainEnv(prependPath({ ...env }, dirname(cargoPath)));
   const options = { cwd: installationRoot, env: childEnv, stdio: 'inherit' };
-  for (const [command, name] of [['git', 'Git'], [cargoPath, 'Rust/Cargo']]) {
-    try { await run(command, ['--version'], { ...options, stdio: 'pipe' }); }
-    catch {
+  const checks = [['git', 'Git'], [cargoPath, 'Rust/Cargo']];
+  const checkResults = await Promise.allSettled(
+    checks.map(([command]) => Promise.resolve().then(() => run(command, ['--version'], { ...options, stdio: 'pipe' }))),
+  );
+  for (let index = 0; index < checks.length; index++) {
+    if (checkResults[index].status === 'rejected') {
+      const name = checks[index][1];
       const install = name === 'Git'
         ? process.platform === 'win32'
           ? 'Git for Windows from https://git-scm.com/download/win (it includes Bash)'
@@ -102,7 +112,9 @@ export async function ensureDependencies({
     catch { throw new Error('Locked npm installation failed. Check the error above, network/proxy access and package-lock.json, then retry npm run dev. Startup does not fall back to npm install or rewrite the lockfile.'); }
     if (!rootDependenciesReady(installationRoot)) throw new Error('npm ci completed but required Grapher dependencies are still missing; check npm omit/optional settings and retry npm run dev.');
   }
-  await run(process.execPath, [join(installationRoot, 'scripts/patch-picomatch.mjs'), installationRoot], options);
+  if (!(await verifyPicomatchPatch(installationRoot))) {
+    await run(process.execPath, [join(installationRoot, 'scripts/patch-picomatch.mjs'), installationRoot], options);
+  }
   let action = 'build';
   try { verifyPiDependencies(installationRoot); } catch { action = 'setup'; }
   if (action === 'setup' || !piBuildReady(installationRoot)) {

@@ -5579,34 +5579,38 @@ fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
     crate::cleanup::detached::drain(&root, &store)
 }
 
-fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
-    {
-        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-        runtime.store.backfill_cleanup_sources()?;
-        for id in runtime.store.orphaned_cleanup_owners()? {
-            let manifest = crate::cleanup::Manifest {
-                targets: runtime.store.owned_cleanup_targets(&id)?,
-                ..Default::default()
-            };
-            runtime
-                .store
-                .delete_run_with_cleanup(&id, Some(&manifest))?;
-        }
-        // Catch successful publications interrupted before cleanup was queued.
-        for id in runtime.store.completed_workspace_runs()? {
-            if runtime.store.cleanup_task(&id)?.is_none() {
-                let state = runtime.store.load(&id)?;
-                runtime.store.enqueue_cleanup(
-                    &id,
-                    &crate::cleanup::Manifest {
-                        targets: runtime.store.owned_cleanup_targets(&id)?,
-                        sequence: Some(state.events.last().map_or(0, |event| event.sequence)),
-                        ..Default::default()
-                    },
-                )?;
-            }
+fn enqueue_recovered_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
+    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.store.backfill_cleanup_sources()?;
+    for id in runtime.store.orphaned_cleanup_owners()? {
+        let manifest = crate::cleanup::Manifest {
+            targets: runtime.store.owned_cleanup_targets(&id)?,
+            ..Default::default()
+        };
+        runtime
+            .store
+            .delete_run_with_cleanup(&id, Some(&manifest))?;
+    }
+    // Catch successful publications interrupted before cleanup was queued.
+    for id in runtime.store.completed_workspace_runs()? {
+        if runtime.store.cleanup_task(&id)?.is_none() {
+            let state = runtime.store.load(&id)?;
+            runtime.store.enqueue_cleanup(
+                &id,
+                &crate::cleanup::Manifest {
+                    targets: runtime.store.owned_cleanup_targets(&id)?,
+                    sequence: Some(state.events.last().map_or(0, |event| event.sequence)),
+                    ..Default::default()
+                },
+            )?;
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
+    enqueue_recovered_cleanup_tasks(service)?;
     retry_cleanup_tasks(service)
 }
 
@@ -6683,8 +6687,36 @@ fn warm_selected_engines(service: &Arc<Service>) {
     }
 }
 
+#[cfg(not(feature = "fixture"))]
+fn warm_selected_engines_on_startup(service: &Arc<Service>, stop: &AtomicBool) {
+    // Yield briefly after port bind so Vite/browser initial asset fetches and
+    // bootstrap complete on uncontended CPU before spawning Node/Pi workers.
+    for _ in 0..3 {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    crate::provider_auth::warm();
+    let config = {
+        let Ok(runtime) = service.runtime.lock() else {
+            return;
+        };
+        let config = configured_prewarm_config(&runtime);
+        runtime.warm_completed_serial_node();
+        config
+    };
+    if let Some(config) = config {
+        crate::engine::warm_planning_engines_staggered(
+            config,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(150),
+        );
+    }
+}
+
 pub fn run() -> Result<(), String> {
-    use tiny_http::{Response, Server};
+    use tiny_http::Server;
     load_env_file();
     let configured_root = crate::workspace::data_root();
     // Resolve format admission and directory ownership before reading config,
@@ -6711,7 +6743,9 @@ pub fn run() -> Result<(), String> {
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&service)?;
-    recover_cleanup_tasks(&service)?;
+    // Enqueue pending cleanup metadata synchronously before binding, and run
+    // actual directory deletions in the background cleanup thread after bind.
+    enqueue_recovered_cleanup_tasks(&service)?;
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
         .parse()
@@ -6749,8 +6783,11 @@ pub fn run() -> Result<(), String> {
     let cleanup_stop = cleanup_stopped.clone();
     let cleanup_service = Arc::downgrade(&service);
     thread::spawn(move || {
+        let mut first_pass = true;
         while !cleanup_stop.load(Ordering::SeqCst) {
-            for _ in 0..300 {
+            let wait_ticks = if first_pass { 5 } else { 300 };
+            first_pass = false;
+            for _ in 0..wait_ticks {
                 if cleanup_stop.load(Ordering::SeqCst) {
                     return;
                 }
@@ -6770,6 +6807,8 @@ pub fn run() -> Result<(), String> {
     });
     let shutdown_service = service.clone();
     let shutdown_server = server.clone();
+    #[cfg(not(feature = "fixture"))]
+    let warm_stop = cleanup_stopped.clone();
     thread::spawn(move || {
         #[cfg(unix)]
         let stop = signals.forever().next().is_some();
@@ -6848,13 +6887,10 @@ pub fn run() -> Result<(), String> {
     // Do not scan the installation cwd or serialize history just to choose a warm key.
     #[cfg(not(feature = "fixture"))]
     {
-        // Credential-host imports need no configured project. Do not enumerate
-        // providers or refresh tokens merely to make the first catalog fast.
-        crate::provider_auth::warm();
         let warm_service = Arc::downgrade(&service);
         thread::spawn(move || {
             if let Some(service) = warm_service.upgrade() {
-                warm_selected_engines(&service);
+                warm_selected_engines_on_startup(&service, &warm_stop);
             }
         });
     }
@@ -6862,7 +6898,12 @@ pub fn run() -> Result<(), String> {
         match tx.try_send(request) {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(request)) => {
-                let _ = request.respond(Response::from_string("Server busy").with_status_code(503));
+                respond_closed(
+                    request,
+                    503,
+                    &[("Content-Type", "text/plain; charset=utf-8")],
+                    b"Server busy",
+                );
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
         }
@@ -6901,13 +6942,72 @@ mod http_file_tests;
 #[path = "sse_http_tests.rs"]
 mod sse_http_tests;
 
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        415 => "Unsupported Media Type",
+        503 => "Service Unavailable",
+        _ => "OK",
+    }
+}
+
+/// tiny_http 0.12's internal TaskPool checks `waiting_tasks == 0` without
+/// accounting for queued connections, so a burst of parallel keep-alive
+/// sockets (such as initial browser asset loads) can starve waiting sockets
+/// behind idle keep-alive readers for several seconds. `Response::add_header`
+/// also ignores `Connection`, so write `Connection: close` directly to let
+/// loopback clients release the connection immediately after each response.
+fn respond_closed(
+    request: tiny_http::Request,
+    status: u16,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) {
+    let head = request.method() == &tiny_http::Method::Head;
+    let version = if *request.http_version() >= tiny_http::HTTPVersion(1, 1) {
+        "HTTP/1.1"
+    } else {
+        "HTTP/1.0"
+    };
+    let mut writer = request.into_writer();
+    let inline_body = status != 204 && !head && body.len() <= 16 * 1024;
+    let mut buffer = Vec::with_capacity(256 + if inline_body { body.len() } else { 0 });
+    let _ = write!(
+        buffer,
+        "{version} {status} {}\r\nConnection: close\r\n",
+        status_reason(status)
+    );
+    if status != 204 {
+        let _ = write!(buffer, "Content-Length: {}\r\n", body.len());
+    }
+    for (name, value) in headers {
+        if !name.contains(['\r', '\n']) && !value.contains(['\r', '\n']) {
+            let _ = write!(buffer, "{name}: {value}\r\n");
+        }
+    }
+    buffer.extend_from_slice(b"\r\n");
+    if inline_body {
+        buffer.extend_from_slice(body);
+        let _ = writer.write_all(&buffer);
+    } else {
+        let _ = writer.write_all(&buffer);
+        if status != 204 && !head && !body.is_empty() {
+            let _ = writer.write_all(body);
+        }
+    }
+    let _ = writer.flush();
+}
+
 fn handle_http_request(
     mut request: tiny_http::Request,
     service: &Arc<Service>,
     web_root: &std::path::Path,
     port: u16,
 ) {
-    use tiny_http::{Header, Response};
     let req_origin = request
         .headers()
         .iter()
@@ -6930,35 +7030,23 @@ fn handle_http_request(
             .iter()
             .all(|h| is_trusted_origin(h.value.as_str(), port));
     if !trusted {
-        let _ = request.respond(Response::from_string("Untrusted origin").with_status_code(403));
+        respond_closed(
+            request,
+            403,
+            &[("Content-Type", "text/plain; charset=utf-8")],
+            b"Untrusted origin",
+        );
         return;
     }
     if request.method() == &tiny_http::Method::Options {
-        let mut response = Response::empty(204)
-            .with_header(
-                tiny_http::Header::from_bytes(
-                    &b"Access-Control-Allow-Methods"[..],
-                    &b"POST, OPTIONS"[..],
-                )
-                .unwrap(),
-            )
-            .with_header(
-                tiny_http::Header::from_bytes(
-                    &b"Access-Control-Allow-Headers"[..],
-                    &b"Content-Type"[..],
-                )
-                .unwrap(),
-            );
+        let mut headers = vec![
+            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type"),
+        ];
         if let Some(ref origin) = req_origin {
-            response = response.with_header(
-                tiny_http::Header::from_bytes(
-                    &b"Access-Control-Allow-Origin"[..],
-                    origin.as_bytes(),
-                )
-                .unwrap(),
-            );
+            headers.push(("Access-Control-Allow-Origin", origin.as_str()));
         }
-        let _ = request.respond(response);
+        respond_closed(request, 204, &headers, b"");
         return;
     }
     let url = request.url().split('?').next().unwrap_or("/").to_string();
@@ -6969,8 +7057,11 @@ fn handle_http_request(
                     && h.value.as_str().eq_ignore_ascii_case("cross-site")
             });
             if cross_site {
-                let _ = request.respond(
-                    Response::from_string("Cross-site SSE rejected").with_status_code(403),
+                respond_closed(
+                    request,
+                    403,
+                    &[("Content-Type", "text/plain; charset=utf-8")],
+                    b"Cross-site SSE rejected",
                 );
                 return;
             }
@@ -6989,8 +7080,12 @@ fn handle_http_request(
                     .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
         });
         if request.method() != &tiny_http::Method::Post || !is_json {
-            let _ =
-                request.respond(Response::from_string("JSON POST required").with_status_code(415));
+            respond_closed(
+                request,
+                415,
+                &[("Content-Type", "text/plain; charset=utf-8")],
+                b"JSON POST required",
+            );
             return;
         }
 
@@ -7043,36 +7138,23 @@ fn handle_http_request(
             }) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    let mut resp =
-                        Response::from_string(serde_json::json!({"error": err}).to_string())
-                            .with_status_code(400)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            );
+                    let payload = serde_json::json!({"error": err}).to_string();
+                    let mut headers = vec![("Content-Type", "application/json")];
                     if let Some(ref origin) = req_origin {
-                        if let Ok(hdr) =
-                            Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
-                        {
-                            resp = resp.with_header(hdr);
-                        }
+                        headers.push(("Access-Control-Allow-Origin", origin.as_str()));
                     }
-                    let _ = request.respond(resp);
+                    respond_closed(request, 400, &headers, payload.as_bytes());
                     return;
                 }
             };
 
             if let Err(err) = validate_planning_preflight(&config, plan_mode.as_deref()) {
-                let mut resp = Response::from_string(serde_json::json!({"error": err}).to_string())
-                    .with_status_code(400)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+                let payload = serde_json::json!({"error": err}).to_string();
+                let mut headers = vec![("Content-Type", "application/json")];
                 if let Some(ref origin) = req_origin {
-                    if let Ok(hdr) =
-                        Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
-                    {
-                        resp = resp.with_header(hdr);
-                    }
+                    headers.push(("Access-Control-Allow-Origin", origin.as_str()));
                 }
-                let _ = request.respond(resp);
+                respond_closed(request, 400, &headers, payload.as_bytes());
                 return;
             }
 
@@ -7084,12 +7166,12 @@ fn handle_http_request(
             let service_clone = match service_clone {
                 Ok(service) => service,
                 Err(error) => {
-                    let _ = request.respond(
-                        Response::from_string(serde_json::json!({"error": error}).to_string())
-                            .with_status_code(400)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            ),
+                    let payload = serde_json::json!({"error": error}).to_string();
+                    respond_closed(
+                        request,
+                        400,
+                        &[("Content-Type", "application/json")],
+                        payload.as_bytes(),
                     );
                     return;
                 }
@@ -7208,17 +7290,15 @@ fn handle_http_request(
                     400,
                 ),
             };
-            let mut response = Response::from_data(bytes)
-                .with_status_code(status)
-                .with_header(Header::from_bytes("Content-Type", mime).unwrap())
-                .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-                .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap());
+            let mut headers = vec![
+                ("Content-Type", mime),
+                ("Cache-Control", "no-store"),
+                ("X-Content-Type-Options", "nosniff"),
+            ];
             if let Some(ref origin) = req_origin {
-                response = response.with_header(
-                    Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()).unwrap(),
-                );
+                headers.push(("Access-Control-Allow-Origin", origin.as_str()));
             }
-            let _ = request.respond(response);
+            respond_closed(request, status, &headers, &bytes);
             return;
         }
         let result = parsed.and_then(|(scoped, body)| dispatch(&scoped, command, body));
@@ -7229,24 +7309,20 @@ fn handle_http_request(
                 None => (400, serde_json::json!({"error": error})),
             },
         };
-        let mut response = Response::from_string(body.to_string())
-            .with_status_code(status)
-            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-            .with_header(Header::from_bytes("X-Grapher-Events", "1").unwrap());
+        let payload = body.to_string();
+        let mut headers = vec![
+            ("Cache-Control", "no-store"),
+            ("Content-Type", "application/json"),
+            ("X-Grapher-Events", "1"),
+        ];
         if let Some(ref origin) = req_origin {
-            if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
-                response = response.with_header(hdr);
-            }
-            if let Ok(hdr) = Header::from_bytes("Access-Control-Expose-Headers", "X-Grapher-Events")
-            {
-                response = response.with_header(hdr);
-            }
+            headers.push(("Access-Control-Allow-Origin", origin.as_str()));
+            headers.push(("Access-Control-Expose-Headers", "X-Grapher-Events"));
         }
-        let _ = request.respond(response);
+        respond_closed(request, status, &headers, payload.as_bytes());
     } else {
         let Some(path) = static_asset_path(web_root, &url) else {
-            let _ = request.respond(Response::empty(404));
+            respond_closed(request, 404, &[], b"");
             return;
         };
         let mime = match path.extension().and_then(|s| s.to_str()) {
@@ -7256,17 +7332,26 @@ fn handle_http_request(
             Some("svg") => "image/svg+xml",
             _ => "application/octet-stream",
         };
+        let cache_control = if url.starts_with("/assets/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
         match fs::read(path) {
             Ok(bytes) => {
-                let _ = request.respond(
-                    Response::from_data(bytes)
-                        .with_header(Header::from_bytes("Content-Type", mime).unwrap()),
+                respond_closed(
+                    request,
+                    200,
+                    &[("Content-Type", mime), ("Cache-Control", cache_control)],
+                    &bytes,
                 );
             }
             Err(_) => {
-                let _ = request.respond(
-                    Response::from_string("Run npm run build to build the frontend")
-                        .with_status_code(404),
+                respond_closed(
+                    request,
+                    404,
+                    &[("Content-Type", "text/plain; charset=utf-8")],
+                    b"Run npm run build to build the frontend",
                 );
             }
         }
