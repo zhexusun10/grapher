@@ -433,12 +433,11 @@ impl Runtime {
     }
 
     pub(crate) fn validate_feedback_revision(&self, graph: &Graph) -> Result<(), String> {
-        let enabled = self.feedback_enabled(
-            self.state
-                .config
-                .as_ref()
-                .is_some_and(|config| config.feedback_enabled),
-        )?;
+        let enabled = self
+            .state
+            .config
+            .as_ref()
+            .is_some_and(|config| config.feedback_enabled);
         Self::validate_feedback_additions(graph, Some(&self.state.graph), enabled)
     }
 
@@ -1232,7 +1231,18 @@ impl Runtime {
             return Err("Pause and wait for the current executions to finish first".into());
         }
         let mut config = config;
-        config.feedback_enabled = self.feedback_enabled(config.feedback_enabled)?;
+        let completing_planning = self.state.phase == "planning"
+            && planning_id.is_some()
+            && self.state.planning_id == planning_id;
+        config.feedback_enabled = if completing_planning {
+            self.state
+                .config
+                .as_ref()
+                .map(|frozen| frozen.feedback_enabled)
+                .unwrap_or(config.feedback_enabled)
+        } else {
+            self.feedback_enabled(config.feedback_enabled)?
+        };
         Self::validate_feedback_additions(&graph, None, config.feedback_enabled)?;
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
@@ -1247,9 +1257,6 @@ impl Runtime {
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
             return Err("Test process command is required".into());
         }
-        let completing_planning = self.state.phase == "planning"
-            && planning_id.is_some()
-            && self.state.planning_id == planning_id;
         if !completing_planning {
             let run_id = if self.state.events.is_empty() && !self.state.run_id.is_empty() {
                 self.state.run_id.clone()
@@ -2132,13 +2139,13 @@ impl Runtime {
         {
             return Err("Only an unapproved graph draft can be edited in place".into());
         }
-        config.feedback_enabled = self.feedback_enabled(config.feedback_enabled)?;
+        let previous = self.state.config.as_ref().ok_or("Missing config")?;
+        config.feedback_enabled = previous.feedback_enabled;
         Self::validate_feedback_additions(
             &graph,
             Some(&self.state.graph),
             config.feedback_enabled,
         )?;
-        let previous = self.state.config.as_ref().ok_or("Missing config")?;
         if config.repository != previous.repository {
             return Err("Cannot move a draft to another repository".into());
         }
@@ -2287,13 +2294,12 @@ impl Runtime {
                     .into(),
             );
         }
-        // Settings gate new routes, not replay or delivery of committed work.
-        let feedback_enabled = self.feedback_enabled(
-            self.state
-                .config
-                .as_ref()
-                .is_some_and(|config| config.feedback_enabled),
-        )?;
+        // Existing Runs freeze their session-level Feedback setting.
+        let feedback_enabled = self
+            .state
+            .config
+            .as_ref()
+            .is_some_and(|config| config.feedback_enabled);
         if request.feedback && !feedback_enabled {
             return Err("Enable Feedback in Settings before adding a feedback edge".into());
         }

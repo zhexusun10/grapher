@@ -79,32 +79,28 @@ fn feedback_settings_gate_new_graphs_and_every_revision_entrypoint() {
 }
 
 #[test]
-fn feedback_settings_saved_opt_out_beats_stale_clients_without_rewriting_old_runs() {
+fn feedback_settings_saved_opt_out_applies_to_new_runs_without_mutating_existing_runs() {
     let (_temp, mut runtime, config) = setup(true);
     runtime.create(candidate(true), config.clone()).unwrap();
     let run_id = runtime.state.run_id.clone();
     let mut disabled = config.clone();
     disabled.feedback_enabled = false;
     runtime.save_default_config(&disabled).unwrap();
-    // A new Run cannot inherit routes merely because another Run used them.
+    // A new Run uses the updated global setting and cannot add feedback routes.
     assert!(runtime
         .create(candidate(true), config.clone())
         .unwrap_err()
         .contains("Enable Feedback"));
     assert_eq!(runtime.state.run_id, run_id);
     assert_eq!(runtime.state.graph, candidate(true));
-    // Editing the existing draft may retain its routes, but cannot retarget/add.
-    runtime
-        .edit_draft_graph(candidate(true), config.clone())
-        .unwrap();
-    assert!(!runtime.state.config.as_ref().unwrap().feedback_enabled);
+    // Editing the existing draft keeps its frozen Run opt-in even after global opt-out.
     let mut retargeted = candidate(true);
     retargeted.edges.last_mut().unwrap().to = "b".into();
-    assert!(runtime
-        .edit_draft_graph(retargeted, config)
-        .unwrap_err()
-        .contains("Enable Feedback"));
-    assert_eq!(runtime.store.load(&run_id).unwrap().graph, candidate(true));
+    runtime
+        .edit_draft_graph(retargeted.clone(), disabled)
+        .unwrap();
+    assert!(runtime.state.config.as_ref().unwrap().feedback_enabled);
+    assert_eq!(runtime.store.load(&run_id).unwrap().graph, retargeted);
     runtime.approve().unwrap();
     for expected in ["a", "b"] {
         let job = runtime.jobs().unwrap().remove(0);
@@ -122,7 +118,8 @@ fn feedback_settings_saved_opt_out_beats_stale_clients_without_rewriting_old_run
 }
 
 #[test]
-fn feedback_settings_allow_retaining_and_removing_old_routes_but_not_readding_them() {
+fn feedback_settings_revisions_respect_frozen_run_setting() {
+    // A Run created with feedback enabled retains permission to remove/re-add even after global opt-out.
     let (_temp, mut runtime, mut config) = setup(true);
     runtime.create(candidate(true), config.clone()).unwrap();
     runtime.set_route("graph").unwrap();
@@ -130,25 +127,29 @@ fn feedback_settings_allow_retaining_and_removing_old_routes_but_not_readding_th
     config.feedback_enabled = false;
     runtime.save_default_config(&config).unwrap();
     runtime
-        .revise_graph(candidate(true), PlanningSummary::default())
-        .unwrap();
-    runtime
         .revise_graph(candidate(false), PlanningSummary::default())
         .unwrap();
-    assert!(runtime
+    runtime
+        .revise_graph(candidate(true), PlanningSummary::default())
+        .unwrap();
+    assert_eq!(
+        runtime.store.load(&runtime.state.run_id).unwrap().graph,
+        candidate(true)
+    );
+
+    // Conversely, a Run created with feedback disabled stays disabled even after global opt-in.
+    let (_temp2, mut disabled_run, mut disabled_cfg) = setup(false);
+    disabled_run
+        .create(candidate(false), disabled_cfg.clone())
+        .unwrap();
+    disabled_run.set_route("graph").unwrap();
+    disabled_run.approve().unwrap();
+    disabled_cfg.feedback_enabled = true;
+    disabled_run.save_default_config(&disabled_cfg).unwrap();
+    assert!(disabled_run
         .revise_graph(candidate(true), PlanningSummary::default())
         .unwrap_err()
         .contains("Enable Feedback"));
-    assert_eq!(
-        runtime.store.load(&runtime.state.run_id).unwrap().graph,
-        candidate(false)
-    );
-    // Explicit re-enabling authorizes additions even to an older disabled Run.
-    config.feedback_enabled = true;
-    runtime.save_default_config(&config).unwrap();
-    runtime
-        .revise_graph(candidate(true), PlanningSummary::default())
-        .unwrap();
 }
 
 #[test]

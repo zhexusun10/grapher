@@ -190,7 +190,7 @@ fn manual_node_draft_validates_atomically_and_replays() {
 }
 
 #[test]
-fn manual_node_feedback_requires_opt_in_and_respects_saved_opt_out() {
+fn manual_node_feedback_respects_frozen_run_setting_over_global_settings() {
     let (_temp, _source, mut runtime) = setup(true, chain());
     let events = runtime.state.events.len();
     assert!(runtime
@@ -199,17 +199,18 @@ fn manual_node_feedback_requires_opt_in_and_respects_saved_opt_out() {
         .contains("Enable Feedback in Settings"));
     assert_eq!(runtime.state.events.len(), events);
     assert_eq!(runtime.state.graph, chain());
-    // The saved global toggle wins over the Run's original opt-in.
+    // Enabling the global toggle after the Run started does not unlock feedback for it.
     let mut saved = runtime.state.config.clone().unwrap();
-    saved.feedback_enabled = false;
+    saved.feedback_enabled = true;
     runtime.save_default_config(&saved).unwrap();
-    runtime.state.config.as_mut().unwrap().feedback_enabled = true;
     assert!(runtime
         .add_manual_node(request(Some("target"), Some("up"), true))
         .unwrap_err()
         .contains("Enable Feedback in Settings"));
-    saved.feedback_enabled = true;
+    // Conversely, a Run created with feedback enabled keeps it even after global opt-out.
+    saved.feedback_enabled = false;
     runtime.save_default_config(&saved).unwrap();
+    runtime.state.config.as_mut().unwrap().feedback_enabled = true;
     runtime
         .add_manual_node(request(Some("target"), Some("up"), true))
         .unwrap();
@@ -302,9 +303,7 @@ fn manual_node_after_review_awaits_approval_without_resetting_completed_work() {
 #[test]
 fn manual_node_feedback_warns_but_does_not_invalidate_until_verdict_and_keeps_pause() {
     let (_temp, _source, mut runtime) = completed_chain();
-    let mut config = runtime.state.config.clone().unwrap();
-    config.feedback_enabled = true;
-    runtime.save_default_config(&config).unwrap();
+    runtime.state.config.as_mut().unwrap().feedback_enabled = true;
     runtime.pause(true).unwrap();
     let mut add = request(Some("child"), Some("target"), true);
     assert!(runtime

@@ -2254,6 +2254,13 @@ fn plan_goal_internal_with_options(
                             return Err(("The graph changed after this Planner turn; its draft can no longer be resumed safely".into(), None));
                         }
                     }
+                    // Freeze session-level Planner settings on the Run so mid-session
+                    // Settings edits only apply to new sessions and never bust the KV cache.
+                    if let Some(frozen) = runtime.state.config.as_ref() {
+                        config.feedback_enabled = frozen.feedback_enabled;
+                        config.post_task_review = frozen.post_task_review;
+                        config.planner_write_tools = frozen.planner_write_tools;
+                    }
                     let initial = continue_planning_id.is_some()
                         && !runtime.state.events.iter().any(|event| {
                             matches!(
@@ -2269,6 +2276,13 @@ fn plan_goal_internal_with_options(
                             None,
                         ));
                     }
+                    // Bind the latest saved Feedback opt-in once when a new session starts.
+                    config.feedback_enabled = service
+                        .runtime
+                        .lock()
+                        .map_err(|error| (error.to_string(), None))?
+                        .feedback_enabled(config.feedback_enabled)
+                        .map_err(|error| (error, None))?;
                     (None, false)
                 };
                 let service = service.clone();
@@ -2735,11 +2749,6 @@ fn plan_goal_internal_with_options(
                                 },
                             )?;
                             planner_workspace_selected = true;
-                            config.feedback_enabled = service
-                                .runtime
-                                .lock()
-                                .map_err(|error| error.to_string())?
-                                .feedback_enabled(config.feedback_enabled)?;
                             let planner_model_cfg =
                                 PiModelConfig::resolve(PiRole::Planner, &config);
                             let planner_config = planner_model_cfg.effective_config(&config);

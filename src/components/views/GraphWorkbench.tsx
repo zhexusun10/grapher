@@ -2851,7 +2851,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
         {creatingNode && routeType === "graph" ? (
-          <CreateNodeForm key={state.runId} state={state} feedbackEnabled={config.feedbackEnabled ?? false} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
+          <CreateNodeForm key={state.runId} state={state} feedbackEnabled={state.config ? (state.config.feedbackEnabled ?? false) : (config.feedbackEnabled ?? false)} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
             onCancel={() => { creationRunRef.current = ""; setCreatingNode(false); }}
             onRequestConfirmation={onRequestConfirmation}
             onSave={async (request) => {

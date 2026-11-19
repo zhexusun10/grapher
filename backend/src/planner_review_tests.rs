@@ -111,14 +111,14 @@ if (process.env.GRAPHER_MODE === 'planner') {
 }
 
 #[test]
-fn planner_review_binds_latest_feedback_setting_instead_of_stale_run_config() {
-    for enabled in [true, false] {
+fn planner_review_freezes_run_feedback_setting_when_global_settings_change() {
+    for frozen_enabled in [true, false] {
         let (temp, repo, service) = setup(true, true);
         {
             let mut runtime = service.runtime.lock().unwrap();
-            runtime.state.config.as_mut().unwrap().feedback_enabled = !enabled;
+            runtime.state.config.as_mut().unwrap().feedback_enabled = frozen_enabled;
             let mut saved = runtime.state.config.clone().unwrap();
-            saved.feedback_enabled = enabled;
+            saved.feedback_enabled = !frozen_enabled;
             runtime.save_default_config(&saved).unwrap();
         }
         fs::write(repo.join("release-review"), "go").unwrap();
@@ -139,7 +139,7 @@ fn planner_review_binds_latest_feedback_setting_instead_of_stale_run_config() {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(bindings, vec![enabled.to_string(); 2]);
+        assert_eq!(bindings, vec![frozen_enabled.to_string(); 2]);
     }
 }
 
