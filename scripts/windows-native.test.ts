@@ -97,6 +97,10 @@ test('production Windows Planner/Graph: concurrent shared-source runs, dependenc
       backend.kill('SIGKILL');
       await exited;
     }
+    // A surviving descendant may inherit the stderr pipe; an open, ref'd pipe
+    // would keep this process alive after the test has passed.
+    backend?.stderr?.destroy();
+    backend?.unref();
   };
   try {
     await mkdir(agent);

@@ -154,7 +154,8 @@ export const suites = {
   },
   'windows-native': {
     description: 'Production backend build and Windows-only native acceptance.',
-    steps: [productionBuild, sourceTests('windows-native.test.ts')],
+    // Force exit: a leaked descendant holding a pipe must not hang CI after the test passes.
+    steps: [productionBuild, ['scripts/node-ts.mjs', '--test', '--test-force-exit', ...files(['windows-native.test.ts'])]],
   },
   'macos-browser': {
     description: 'Headless backend build and macOS-only acceptance; needs a browser.',
