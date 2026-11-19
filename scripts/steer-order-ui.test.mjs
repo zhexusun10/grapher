@@ -249,9 +249,9 @@ for (const mode of ["serial", "graph"]) {
       });
       assert.equal(metrics.inline, true);
       assert.equal(metrics.inTranscript, true);
-      // 46px margin + the 10px list gap keeps the same 56px above the turn as
-      // the 44px margin + 12px conversation gap used outside the transcript.
-      assert.equal(metrics.marginTop, "46px");
+      // 30px margin + the 10px list gap keeps the same 40px above the turn as
+      // the 28px margin + 12px conversation gap used outside the transcript.
+      assert.equal(metrics.marginTop, "30px");
       assert.equal(metrics.marginBottom, "10px");
       assert.equal(metrics.listGap, "10px");
       assert.deepEqual(errors, []);

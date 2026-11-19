@@ -3237,7 +3237,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             return (
                               <React.Fragment key={exec.id}>
                                 {/* Pending steers share the conversation column so they keep the
-                                    same 56px/20px rhythm as follow-up turns, whether they are
+                                    same 40px/20px rhythm as follow-up turns, whether they are
                                     waiting above or below the transcript they steer. */}
                                 {fallbackSteers.filter(item => item.position === "before").map(item => renderSteerBubble(item.steer))}
                                 <motion.div

@@ -648,9 +648,7 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
     fs::write(script, body).unwrap();
     {
         let mut runtime = service.runtime.lock().unwrap();
-        let mut settings = runtime.state.config.clone().unwrap();
-        settings.feedback_enabled = true;
-        runtime.save_default_config(&settings).unwrap();
+        runtime.state.config.as_mut().unwrap().feedback_enabled = true;
         runtime
             .revise_graph(
                 Graph {

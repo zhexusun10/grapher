@@ -1340,24 +1340,24 @@ button.transcript-error-toggle {
    Planner reply. The tighter 8px above still applies to non-Planner rows.
    Execution transcripts use the same rhythm for steers rendered inline; they
    are not inside .planner-transcript, so they need the equivalent scope. The
-   list gap is 10px, so 46px + 10px keeps the same 56px above and 20px below a
-   follow-up turn as the conversation column (44px + 12px gap). */
+   list gap is 10px, so 30px + 10px keeps the same 40px above and 20px below a
+   follow-up turn as the conversation column (28px + 12px gap). */
 .virtualized-transcript-container.transcript-compact .chat-message-row.user.planner-user-turn,
 .planning-activity .chat-message-row.user,
 .planner-transcript .chat-message-row.user.planner-user-turn {
-  margin-top: 46px;
+  margin-top: 30px;
   margin-bottom: 10px;
 }
 
 /* Follow-up turns rendered outside the Planner transcript (serial/node views
-   and the live Planner fallback) keep the same 56px total air, counting the
+   and the live Planner fallback) keep the same 40px total air, counting the
    shared column gap. A pending node steer that predates the parsed transcript
    stays under its execution header; unread steers after it, like serial pending
    steers, join the conversation column so they keep this rhythm too. */
 .serial-execution-panel>.chat-message-row.user.planner-follow-up,
 .chat-messages-stream>.chat-message-row.user.planner-follow-up,
 .serial-turns-container>.chat-message-row.user.planner-follow-up {
-  margin-top: 44px;
+  margin-top: 28px;
   margin-bottom: 8px;
 }
 
