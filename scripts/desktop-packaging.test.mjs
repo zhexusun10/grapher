@@ -14,7 +14,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { root } from './ensure-deps.mjs';
-import { assertVersionsSynced, MACOS_DMG_FORMAT } from './desktop-build.mjs';
+import {
+  assertVersionsSynced,
+  MACOS_DMG_FORMAT,
+  runHdiutilCreateWithRetry,
+} from './desktop-build.mjs';
 import {
   entitlementsForBinary,
   findMachOBinaries,
@@ -603,4 +607,60 @@ test('stageLeanPiRuntime omits .git, devDependencies, dist/test/docs/apps, and w
   assert.equal(tamperedReplies[0].ok, true);
   assert.equal(tamperedReplies[1].ok, false);
   assert.match(tamperedReplies[1].error, /Extraneous Pi dependency: node_modules\/typescript/);
+});
+
+test('runHdiutilCreateWithRetry retries transient Resource busy errors with exponential backoff and fails fast on fatal errors', async () => {
+  const sleeps = [];
+  const cleanups = [];
+  let attempts = 0;
+
+  const result = await runHdiutilCreateWithRetry(
+    ['create', '-format', 'ULMO', 'Grapher.dmg'],
+    '/tmp/Grapher.dmg',
+    {
+      maxAttempts: 4,
+      baseDelayMs: 100,
+      sleep: async ms => {
+        sleeps.push(ms);
+      },
+      cleanup: p => cleanups.push(p),
+      log: () => {},
+      run: () => {
+        attempts += 1;
+        if (attempts < 3) {
+          const err = new Error('Command failed');
+          err.stderr = 'hdiutil: create failed - Resource busy\n';
+          throw err;
+        }
+        return 'created: Grapher.dmg\n';
+      },
+    },
+  );
+
+  assert.equal(result, 'created: Grapher.dmg\n');
+  assert.equal(attempts, 3);
+  assert.deepEqual(sleeps, [100, 200]);
+  assert.equal(cleanups.length, 3);
+
+  // Non-transient errors must not retry.
+  let fatalAttempts = 0;
+  await assert.rejects(
+    runHdiutilCreateWithRetry(['create', 'bad.dmg'], '/tmp/bad.dmg', {
+      maxAttempts: 4,
+      baseDelayMs: 100,
+      sleep: async () => {
+        throw new Error('must not sleep on fatal hdiutil error');
+      },
+      cleanup: () => {},
+      log: () => {},
+      run: () => {
+        fatalAttempts += 1;
+        const err = new Error('Command failed');
+        err.stderr = 'hdiutil: create failed - No such file or directory\n';
+        throw err;
+      },
+    }),
+    /Command failed/,
+  );
+  assert.equal(fatalAttempts, 1);
 });

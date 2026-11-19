@@ -323,21 +323,83 @@ function tauriTargetBundleDir(target, env = process.env) {
 
 export const MACOS_DMG_FORMAT = 'ULMO';
 
+const TRANSIENT_HDIUTIL_ERROR_RE =
+  /resource busy|temporarily unavailable|couldn'?t unmount|device busy/i;
+
 function formatFileSizeMb(filePath) {
   return `${(statSync(filePath).size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function createSignedDmg(appPath, dmgPath, signingIdentity) {
+function defaultSleep(ms) {
+  return new Promise(resolveTimer => setTimeout(resolveTimer, ms));
+}
+
+function execHdiutil(args) {
+  const output = execFileSync('hdiutil', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (output) process.stdout.write(output);
+  return output;
+}
+
+/**
+ * Run `hdiutil create` with exponential backoff for transient macOS
+ * `Resource busy` / `diskimages-helper` / Spotlight contention on CI runners.
+ */
+export async function runHdiutilCreateWithRetry(
+  args,
+  dmgPath,
+  {
+    maxAttempts = 5,
+    baseDelayMs = 3000,
+    run = execHdiutil,
+    sleep = defaultSleep,
+    cleanup = targetPath => rmSync(targetPath, { force: true }),
+    log = message => console.warn(message),
+  } = {},
+) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    cleanup(dmgPath);
+    try {
+      return run(args);
+    } catch (error) {
+      const stderrText =
+        typeof error?.stderr === 'string'
+          ? error.stderr
+          : Buffer.isBuffer(error?.stderr)
+            ? error.stderr.toString('utf8')
+            : '';
+      const stdoutText =
+        typeof error?.stdout === 'string'
+          ? error.stdout
+          : Buffer.isBuffer(error?.stdout)
+            ? error.stdout.toString('utf8')
+            : '';
+      const combined = `${stderrText}\n${stdoutText}\n${error?.message ?? ''}`;
+      if (stderrText) process.stderr.write(stderrText);
+      const isTransient = TRANSIENT_HDIUTIL_ERROR_RE.test(combined);
+      if (!isTransient || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = baseDelayMs * 2 ** (attempt - 1);
+      log(
+        `[desktop:build] hdiutil create hit transient busy error (attempt ${attempt}/${maxAttempts}); retrying in ${delayMs}ms...`,
+      );
+      await sleep(delayMs);
+    }
+  }
+}
+
+async function createSignedDmg(appPath, dmgPath, signingIdentity) {
   const staging = mkdtempSync(join(tmpdir(), 'grapher-dmg-'));
   try {
     cpSync(appPath, join(staging, 'Grapher.app'), { recursive: true, verbatimSymlinks: true });
     symlinkSync('/Applications', join(staging, 'Applications'));
     mkdirSync(dirname(dmgPath), { recursive: true });
-    rmSync(dmgPath, { force: true });
-    execFileSync(
-      'hdiutil',
+    await runHdiutilCreateWithRetry(
       ['create', '-volname', 'Grapher', '-srcfolder', staging, '-ov', '-format', MACOS_DMG_FORMAT, dmgPath],
-      { stdio: 'inherit' },
+      dmgPath,
     );
     if (signingIdentity && signingIdentity !== '-') {
       execFileSync(
@@ -612,7 +674,7 @@ export async function buildDesktopBundle({
 
       const dmgPath = join(bundleDir, 'dmg', names.installerName);
       console.log(`[desktop:build] Creating macOS .dmg installer at ${dmgPath} (${MACOS_DMG_FORMAT})...`);
-      createSignedDmg(appPath, dmgPath, normalizedIdentity);
+      await createSignedDmg(appPath, dmgPath, normalizedIdentity);
       if (notarizationConfig) {
         notarizeAndStapleMacosDmg(dmgPath, notarizationConfig);
       }
