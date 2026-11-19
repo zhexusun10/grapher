@@ -326,15 +326,36 @@ jobs:
       - name: Prepare release notes
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          VERSION="${RELEASE_TAG#v}"
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           cat <<EOF > release-notes.md
           # Grapher ${RELEASE_TAG}
 
-          See CHANGELOG.md for changes.
+          ### Desktop App (Recommended)
 
-          - **Desktop installers**: Download the macOS Apple Silicon (\`aarch64.dmg\`), macOS Intel (\`x64.dmg\`), or Windows x64 (\`x64-setup.exe\`) installer (includes the bundled Rust backend, pinned Pi/engine runtime, and Node.js runtime).
-          - **Relocatable archives**: Download the \`grapher-*.tar.gz\` / \`grapher-*.zip\` archive for CLI/browser usage (requires Node.js 22.19+ and Git on \`PATH\`).
-          - Verify downloaded files with their accompanying \`.sha256\` checksums.
+          | Platform | Download |
+          | --- | --- |
+          | macOS (Apple Silicon) | [Grapher_${VERSION}_aarch64.dmg](${BASE_URL}/Grapher_${VERSION}_aarch64.dmg) |
+          | macOS (Intel) | [Grapher_${VERSION}_x64.dmg](${BASE_URL}/Grapher_${VERSION}_x64.dmg) |
+          | Windows (x64) | [Grapher_${VERSION}_x64-setup.exe](${BASE_URL}/Grapher_${VERSION}_x64-setup.exe) |
+
+          *(Includes the bundled Rust backend, pinned Pi/engine runtime, and Node.js runtime. Existing desktop installs can also update directly via **Settings → Software Update**.)*
+
+          ### CLI / Browser Archives
+
+          - **Linux (x64):** [grapher-linux-x64.tar.gz](${BASE_URL}/grapher-linux-x64.tar.gz)
+          - **macOS (Apple Silicon):** [grapher-macos-arm64.tar.gz](${BASE_URL}/grapher-macos-arm64.tar.gz)
+          - **macOS (Intel):** [grapher-macos-x64.tar.gz](${BASE_URL}/grapher-macos-x64.tar.gz)
+          - **Windows (x64):** [grapher-windows-x64.zip](${BASE_URL}/grapher-windows-x64.zip)
+
+          *(Requires Node.js 22.19+ and Git on \`PATH\`.)*
+
+          ### Checksums & Changelog
+
+          - Verify any downloaded file with [SHA256SUMS.txt](${BASE_URL}/SHA256SUMS.txt) (\`shasum -a 256 --ignore-missing -c SHA256SUMS.txt\`).
+          - See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/CHANGELOG.md) for the full list of changes.
           EOF
       - name: Generate and verify Tauri updater manifest (latest.json) when signed artifacts exist
         env:
@@ -361,6 +382,12 @@ jobs:
               --tag "$RELEASE_TAG" \
               --require-all
           fi
+      - name: Consolidate SHA256SUMS.txt and prune redundant .sha256 / .sig files
+        run: |
+          set -euo pipefail
+          node scripts/desktop-updater-manifest.mjs \
+            --finalize-assets \
+            --assets-dir release-assets
       - name: Create or refresh unpublished release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -135,7 +135,7 @@ Partitioner
 
 ### 方式一：下载原生桌面端安装包（推荐 — macOS 与 Windows）
 
-从 [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) 下载对应平台的原生安装包，并校验 `.sha256` 校验和：
+从 [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) 下载对应平台的原生安装包，并使用 `SHA256SUMS.txt` 校验文件完整性：
 
 - **macOS（Apple Silicon）：** `Grapher_<version>_aarch64.dmg`（将 `Grapher.app` 拖入「应用程序」）
 - **macOS（Intel）：** `Grapher_<version>_x64.dmg`（将 `Grapher.app` 拖入「应用程序」）
@@ -148,7 +148,7 @@ Partitioner
 
 ### 方式二：下载 CLI / 浏览器免编译发布包（macOS、Linux 与 Windows）
 
-下载最新可重定位[发布包（Release Archive）](https://github.com/zhexusun10/grapher/releases/latest)（`grapher-*.tar.gz` 或 `grapher-windows-x64.zip`），校验 `.sha256` 后解压运行：
+下载最新可重定位[发布包（Release Archive）](https://github.com/zhexusun10/grapher/releases/latest)（`grapher-*.tar.gz` 或 `grapher-windows-x64.zip`），使用 `SHA256SUMS.txt` 校验后解压运行：
 
 - **Windows：** 双击或运行 `start.bat`
 - **macOS / Linux：** 运行 `./start.sh`

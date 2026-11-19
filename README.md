@@ -135,7 +135,7 @@ Partitioner
 
 ### Option 1: Desktop App (Recommended — macOS & Windows)
 
-Download the latest native installer from [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) and verify its `.sha256` checksum:
+Download the latest native installer from [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) and verify its checksum against `SHA256SUMS.txt`:
 
 - **macOS (Apple Silicon):** `Grapher_<version>_aarch64.dmg` (drag `Grapher.app` to Applications)
 - **macOS (Intel):** `Grapher_<version>_x64.dmg` (drag `Grapher.app` to Applications)
@@ -148,7 +148,7 @@ The desktop app bundles the Rust backend, pinned Pi/engine runtime, and Node.js 
 
 ### Option 2: Prebuilt CLI / Browser Archive (macOS, Linux & Windows)
 
-Download the latest relocatable [release archive](https://github.com/zhexusun10/grapher/releases/latest) (`grapher-*.tar.gz` or `grapher-windows-x64.zip`), verify its `.sha256` checksum, extract it, and launch:
+Download the latest relocatable [release archive](https://github.com/zhexusun10/grapher/releases/latest) (`grapher-*.tar.gz` or `grapher-windows-x64.zip`), verify its checksum against `SHA256SUMS.txt`, extract it, and launch:
 
 - **Windows:** `start.bat`
 - **macOS / Linux:** `./start.sh`

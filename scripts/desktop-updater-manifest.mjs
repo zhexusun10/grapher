@@ -652,8 +652,69 @@ export function generateUpdaterManifest({
   };
 }
 
+/**
+ * Finalize a GitHub Release assets directory after `latest.json` generation
+ * and signature verification:
+ * - Removes redundant per-file `*.sha256` files and standalone `*.sig` files
+ *   (signatures are already embedded and verified in `latest.json`).
+ * - Generates one consolidated, sorted `SHA256SUMS.txt` covering every
+ *   downloadable installer and archive.
+ */
+export function consolidateReleaseAssets(
+  assetsDir,
+  {
+    checksumFile = 'SHA256SUMS.txt',
+    pruneSignatures = true,
+    log = message => console.log(message),
+  } = {},
+) {
+  const dir = resolve(assetsDir);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+    throw new Error(`Release assets directory does not exist: ${dir}`);
+  }
+  const entries = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => entry.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  const removed = [];
+  const hashedFiles = [];
+  for (const name of entries) {
+    const fullPath = join(dir, name);
+    if (name === checksumFile || name.endsWith('.sha256') || (pruneSignatures && name.endsWith('.sig'))) {
+      rmSync(fullPath, { force: true });
+      if (name !== checksumFile) removed.push(name);
+      continue;
+    }
+    if (name === 'latest.json') continue;
+    const digest = createHash('sha256').update(readFileSync(fullPath)).digest('hex');
+    hashedFiles.push({ name, digest });
+  }
+
+  if (hashedFiles.length === 0) {
+    throw new Error(`No downloadable release assets found in ${dir} to include in ${checksumFile}.`);
+  }
+
+  const checksumPath = join(dir, checksumFile);
+  const content = `${hashedFiles.map(item => `${item.digest}  ${item.name}`).join('\n')}\n`;
+  writeFileSync(checksumPath, content, 'utf8');
+  log(
+    `[desktop:updater-manifest] Wrote ${checksumFile} for ${hashedFiles.length} asset(s) and pruned ${removed.length} redundant .sha256/.sig file(s).`,
+  );
+  return {
+    checksumPath,
+    hashedFiles,
+    removed,
+    remainingFiles: readdirSync(dir, { withFileTypes: true })
+      .filter(entry => entry.isFile())
+      .map(entry => entry.name)
+      .sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 function parseCliArgs(argv) {
   const options = {
+    finalizeAssets: false,
     assetsDir: null,
     outputPath: null,
     tag: process.env.RELEASE_TAG || null,
@@ -672,7 +733,9 @@ function parseCliArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--assets-dir' && argv[i + 1]) {
+    if (arg === '--finalize-assets') {
+      options.finalizeAssets = true;
+    } else if (arg === '--assets-dir' && argv[i + 1]) {
       options.assetsDir = argv[++i];
     } else if (arg === '--output' && argv[i + 1]) {
       options.outputPath = argv[++i];
@@ -704,7 +767,9 @@ function parseCliArgs(argv) {
       options.requirePubkey = true;
     } else if (arg === '--help' || arg === '-h') {
       console.log(
-        'Usage: node scripts/desktop-updater-manifest.mjs --assets-dir <dir> --output <latest.json> --tag <vX.Y.Z> [--version <X.Y.Z>] [--repo <owner/repo>] [--notes <text>] [--notes-file <path>] [--changelog <CHANGELOG.md>] [--pub-date <rfc3339>] [--pubkey <base64>] [--tauri-conf <path>] [--allow-empty] [--require-all] [--require-all-when-signed] [--require-pubkey]',
+        'Usage:\n' +
+          '  node scripts/desktop-updater-manifest.mjs --assets-dir <dir> --output <latest.json> --tag <vX.Y.Z> [options]\n' +
+          '  node scripts/desktop-updater-manifest.mjs --finalize-assets --assets-dir <dir>',
       );
       process.exit(0);
     } else {
@@ -712,15 +777,21 @@ function parseCliArgs(argv) {
     }
   }
   if (!options.assetsDir) throw new Error('--assets-dir is required.');
-  if (!options.outputPath) throw new Error('--output is required.');
-  if (!options.tag) throw new Error('--tag is required.');
+  if (!options.finalizeAssets) {
+    if (!options.outputPath) throw new Error('--output is required.');
+    if (!options.tag) throw new Error('--tag is required.');
+  }
   return options;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const options = parseCliArgs(process.argv.slice(2));
-    generateUpdaterManifest(options);
+    if (options.finalizeAssets) {
+      consolidateReleaseAssets(options.assetsDir);
+    } else {
+      generateUpdaterManifest(options);
+    }
   } catch (error) {
     console.error(`[desktop:updater-manifest] ${error.message}`);
     process.exitCode = 1;

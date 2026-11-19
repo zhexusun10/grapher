@@ -43,7 +43,7 @@ Before building locally, install prerequisites for your host OS (Node.js 22.19+,
 - **Jobs:**
   1. `build-release` — builds and smoke-tests the relocatable archives (`grapher-linux-x64.tar.gz`, `grapher-macos-arm64.tar.gz`, `grapher-macos-x64.tar.gz`, `grapher-windows-x64.zip`) plus `.sha256` checksums.
   2. `build-desktop` — runs on separate native runners (`macos-15` for Apple Silicon `macos-arm64`, `macos-15-intel` for Intel `macos-x64`, and `windows-latest` for `windows-x64`). Each job runs [`scripts/desktop-build.mjs`](../../scripts/desktop-build.mjs), which stages the frontend `dist/`, release Rust `grapher` binary, verified pinned Pi/engine runtime, and pinned Node.js `22.19.0` binary (SHA-256 verified) via [`scripts/desktop-stage.mjs`](../../scripts/desktop-stage.mjs), builds the native installer, and optionally signs Tauri updater artifacts.
-  3. `create-release` — waits for both `build-release` and `build-desktop`, downloads all artifacts into `release-assets/`, runs [`scripts/desktop-updater-manifest.mjs`](../../scripts/desktop-updater-manifest.mjs) to build `latest.json` when signed updater artifacts are present, and creates or refreshes a **draft** GitHub Release.
+  3. `create-release` — waits for both `build-release` and `build-desktop`, downloads all artifacts into `release-assets/`, runs [`scripts/desktop-updater-manifest.mjs`](../../scripts/desktop-updater-manifest.mjs) to build and verify `latest.json` when signed updater artifacts are present, consolidates all asset checksums into a single `SHA256SUMS.txt` while pruning per-file `.sha256` and standalone `.sig` files (whose signatures are already embedded in `latest.json`), and creates or refreshes a **draft** GitHub Release.
 
 ## Pre-tag version checklist
 
@@ -68,13 +68,13 @@ Before creating a `v<X.Y.Z>` tag, keep all three desktop/package version fields 
 
 ## Release assets
 
-| Target | Installer / Archive | Updater artifact & signature (when `TAURI_SIGNING_PRIVATE_KEY` is set) | `latest.json` platform keys |
+| Target | Installer / Archive | Updater payload (when `TAURI_SIGNING_PRIVATE_KEY` is set) | `latest.json` platform keys |
 | --- | --- | --- | --- |
-| macOS Apple Silicon (`macos-arm64`) | `Grapher_<ver>_aarch64.dmg` (+ `.sha256`) | `Grapher_<ver>_aarch64.app.tar.gz` (+ `.sha256`, `.sig`) | `darwin-aarch64`, `darwin-aarch64-app` |
-| macOS Intel (`macos-x64`) | `Grapher_<ver>_x64.dmg` (+ `.sha256`) | `Grapher_<ver>_x64.app.tar.gz` (+ `.sha256`, `.sig`) | `darwin-x86_64`, `darwin-x86_64-app` |
-| Windows x64 (`windows-x64`) | `Grapher_<ver>_x64-setup.exe` (+ `.sha256`) | `Grapher_<ver>_x64-setup.exe.sig` (signs the NSIS `.exe` directly) | `windows-x86_64`, `windows-x86_64-nsis` |
-| Relocatable archives (all platforms) | `grapher-{linux-x64,macos-arm64,macos-x64}.tar.gz`, `grapher-windows-x64.zip` (+ `.sha256`) | — | — |
-| Aggregated updater feed | — | `latest.json` (uploaded only when signed updater artifacts exist) | — |
+| macOS Apple Silicon (`macos-arm64`) | `Grapher_<ver>_aarch64.dmg` | `Grapher_<ver>_aarch64.app.tar.gz` (signature embedded in `latest.json`) | `darwin-aarch64`, `darwin-aarch64-app` |
+| macOS Intel (`macos-x64`) | `Grapher_<ver>_x64.dmg` | `Grapher_<ver>_x64.app.tar.gz` (signature embedded in `latest.json`) | `darwin-x86_64`, `darwin-x86_64-app` |
+| Windows x64 (`windows-x64`) | `Grapher_<ver>_x64-setup.exe` | Reuses `Grapher_<ver>_x64-setup.exe` (signature embedded in `latest.json`) | `windows-x86_64`, `windows-x86_64-nsis` |
+| Relocatable archives (all platforms) | `grapher-{linux-x64,macos-arm64,macos-x64}.tar.gz`, `grapher-windows-x64.zip` | — | — |
+| Aggregated release metadata | `SHA256SUMS.txt` (single consolidated checksum file for all downloadable installers/archives) | `latest.json` (uploaded only when signed updater artifacts exist; standalone `.sig` files are verified and pruned before release upload) | — |
 
 ## Secrets, variables & the three independent signing concerns
 

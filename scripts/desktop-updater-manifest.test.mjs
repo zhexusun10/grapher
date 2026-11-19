@@ -17,6 +17,7 @@ import {
 import { DESKTOP_TARGETS } from './desktop-stage.mjs';
 import {
   buildReleaseDownloadUrl,
+  consolidateReleaseAssets,
   extractChangelogNotes,
   generateUpdaterManifest,
   normalizeVersion,
@@ -727,7 +728,54 @@ test('release workflow enforces least-privilege permissions, desktop + archive b
   assert.match(workflow, /--tauri-conf src-tauri\/tauri\.conf\.json/);
   assert.match(workflow, /--require-pubkey/);
   assert.match(workflow, /--require-all-when-signed/);
+  assert.match(workflow, /node scripts\/desktop-updater-manifest\.mjs \\\n\s+--finalize-assets/);
+  assert.match(workflow, /SHA256SUMS\.txt/);
   assert.match(workflow, /Refusing to modify a published release/);
   assert.match(workflow, /gh release create "\$RELEASE_TAG" --verify-tag --draft/);
   assert.match(workflow, /gh release upload "\$RELEASE_TAG" release-assets\/\* --clobber/);
+});
+
+test('consolidateReleaseAssets merges per-file checksums into SHA256SUMS.txt and prunes redundant .sig files', t => {
+  const dir = tempDir(t);
+  const assetsDir = join(dir, 'release-assets');
+  mkdirSync(assetsDir, { recursive: true });
+
+  const binaryAssets = [
+    'Grapher_1.9.10_aarch64.app.tar.gz',
+    'Grapher_1.9.10_aarch64.dmg',
+    'Grapher_1.9.10_x64-setup.exe',
+    'Grapher_1.9.10_x64.app.tar.gz',
+    'Grapher_1.9.10_x64.dmg',
+    'grapher-linux-x64.tar.gz',
+    'grapher-macos-arm64.tar.gz',
+    'grapher-macos-x64.tar.gz',
+    'grapher-windows-x64.zip',
+  ];
+  for (const name of binaryAssets) {
+    writeFileSync(join(assetsDir, name), `payload:${name}`);
+    writeFileSync(join(assetsDir, `${name}.sha256`), `old  ${name}\n`);
+  }
+  for (const sigTarget of [
+    'Grapher_1.9.10_aarch64.app.tar.gz',
+    'Grapher_1.9.10_x64.app.tar.gz',
+    'Grapher_1.9.10_x64-setup.exe',
+  ]) {
+    writeFileSync(join(assetsDir, `${sigTarget}.sig`), makeFakeSignature('1.9.10', sigTarget));
+  }
+  writeFileSync(join(assetsDir, 'latest.json'), '{"version":"1.9.10"}\n');
+
+  const result = consolidateReleaseAssets(assetsDir, { log: () => {} });
+  assert.equal(result.hashedFiles.length, 9);
+  assert.equal(result.removed.length, 12);
+  assert.deepEqual(result.remainingFiles, [
+    ...binaryAssets,
+    'SHA256SUMS.txt',
+    'latest.json',
+  ].sort((a, b) => a.localeCompare(b)));
+
+  const sums = readFileSync(join(assetsDir, 'SHA256SUMS.txt'), 'utf8').trim().split('\n');
+  assert.equal(sums.length, 9);
+  for (const line of sums) {
+    assert.match(line, /^[a-f0-9]{64}  [^\s]+$/);
+  }
 });
