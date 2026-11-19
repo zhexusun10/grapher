@@ -391,6 +391,16 @@ export async function runHdiutilCreateWithRetry(
   }
 }
 
+function detachStaleMacosVolume(volumeName) {
+  const mountPath = `/Volumes/${volumeName}`;
+  if (!existsSync(mountPath)) return;
+  try {
+    execFileSync('hdiutil', ['detach', mountPath, '-force'], { stdio: 'ignore' });
+  } catch {
+    // Best-effort cleanup before retrying hdiutil create.
+  }
+}
+
 async function createSignedDmg(appPath, dmgPath, signingIdentity) {
   const staging = mkdtempSync(join(tmpdir(), 'grapher-dmg-'));
   try {
@@ -400,6 +410,12 @@ async function createSignedDmg(appPath, dmgPath, signingIdentity) {
     await runHdiutilCreateWithRetry(
       ['create', '-volname', 'Grapher', '-srcfolder', staging, '-ov', '-format', MACOS_DMG_FORMAT, dmgPath],
       dmgPath,
+      {
+        cleanup: targetPath => {
+          rmSync(targetPath, { force: true });
+          detachStaleMacosVolume('Grapher');
+        },
+      },
     );
     if (signingIdentity && signingIdentity !== '-') {
       execFileSync(

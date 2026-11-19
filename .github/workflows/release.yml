@@ -251,6 +251,10 @@ jobs:
             Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_mode=unsigned"
             Write-Host "Optional Windows Authenticode secrets are not configured; continuing with unsigned NSIS installer (SmartScreen warnings expected)."
           }
+      - name: Disable Spotlight indexing on macOS runner before DMG creation
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: sudo mdutil -a -i off || true
       - name: Stage runtime and build Tauri desktop installer
         shell: bash
         env:
