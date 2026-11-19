@@ -132,7 +132,7 @@ Source Partitioner/Planner/Node roles prepare unbound processes without sessions
 
 Provider/Auth readiness loads code without constructing a credential runtime, checking credentials, or initiating login. A parked Serial shell must match the next turn's model and thinking settings; see [Process lifecycle](../architecture/filesystem-isolation.md#parked-serial-shells-and-held-planner-services). Private Graph nodes, private Planner turns, and Mergers cold-start through their platform launcher; an already-started source process cannot acquire that private sandbox later.
 
-[process_prewarm.rs](../../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../../engine/prepared-host.ts), and their tests own handshake/timing details. Shared engine copies contain code/dependencies, not Run state; cache ownership and reclamation belong to [Storage and cleanup](../architecture/storage.md#shared-pi-runtime-cache).
+[process_prewarm.rs](../../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../../engine/prepared-host.ts), and their tests own handshake/timing details. Within one backend lifecycle, the host issues a per-run verification context (`GRAPHER_BASELINE_CONTEXT`) so `verifyRuntimeBaseline` runs full Git baseline and `pi/node_modules` dependency verification once and reuses the fingerprint-checked stamp across Provider/Auth, Partitioner, Planner, and NodeAgent prewarm workers while enabling V8 compile caching and cached Pi source-alias resolution (`pi/packages/*/src`). Shared engine copies contain code/dependencies, not Run state; cache ownership and reclamation belong to [Storage and cleanup](../architecture/storage.md#shared-pi-runtime-cache).
 
 ## Upgrade procedure
 

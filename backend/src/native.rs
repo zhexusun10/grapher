@@ -12,7 +12,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Mutex, OnceLock,
     },
 };
 
@@ -96,7 +96,7 @@ struct RuntimeKeySession {
     tree: crate::process_control::ProcessTree,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
-    stderr: Arc<Mutex<String>>,
+    stderr_thread: Option<std::thread::JoinHandle<String>>,
     root_key: String,
 }
 
@@ -137,23 +137,19 @@ impl RuntimeKeySession {
                 .take()
                 .ok_or("Native runtime session stdout unavailable")?,
         );
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        if let Some(stderr) = child.stderr.take() {
-            let capture = stderr_buf.clone();
+        let stderr_thread = child.stderr.take().map(|stderr| {
             std::thread::spawn(move || {
                 let mut text = String::new();
                 let _ = stderr.take(64 * 1024).read_to_string(&mut text);
-                if let Ok(mut guard) = capture.lock() {
-                    *guard = text;
-                }
-            });
-        }
+                text
+            })
+        });
         let mut session = Self {
             child,
             tree,
             stdin: Some(stdin),
             stdout,
-            stderr: stderr_buf,
+            stderr_thread,
             root_key: String::new(),
         };
         session.root_key = session.read_key_reply()?;
@@ -173,9 +169,10 @@ impl RuntimeKeySession {
                 .map(|status| status.to_string())
                 .unwrap_or_else(|_| "unknown".into());
             let detail = self
-                .stderr
-                .lock()
-                .map(|guard| guard.trim().to_owned())
+                .stderr_thread
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .map(|text| text.trim().to_owned())
                 .unwrap_or_default();
             return Err(format!(
                 "Cannot prepare native Pi runtime (exit {status}): {detail}"
@@ -218,6 +215,9 @@ impl Drop for RuntimeKeySession {
             self.tree.terminate();
         }
         let _ = self.child.wait();
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -236,8 +236,9 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
     let runtime_parent = crate::workspace::native_runtime_parent();
-    let session = RefCell::new(RuntimeKeySession::start(&installation, &runtime_parent)?);
-    let key = session.borrow().root_key.clone();
+    let session = RuntimeKeySession::start(&installation, &runtime_parent)?;
+    let key = session.root_key.clone();
+    let session = RefCell::new(session);
     let runtime = crate::native_runtime_storage::get_or_prepare_verified(
         &runtime_parent,
         key.trim(),
@@ -654,9 +655,22 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.env_remove("GRAPHER_AGENT_KIND");
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
+    bind_baseline_context(&mut command);
     bind_source_case(&mut command, &repository);
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
+}
+
+/// Per-backend-lifecycle verification context token. Child engine hosts share
+/// this token to avoid repeating identical Git baseline and dependency scans
+/// across Provider/Auth, Partitioner, Planner, and NodeAgent prewarm workers.
+pub(crate) fn baseline_verification_context() -> &'static str {
+    static CONTEXT: OnceLock<String> = OnceLock::new();
+    CONTEXT.get_or_init(|| format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()))
+}
+
+pub(crate) fn bind_baseline_context(command: &mut Command) {
+    command.env("GRAPHER_BASELINE_CONTEXT", baseline_verification_context());
 }
 
 pub(crate) fn bind_source_case(command: &mut Command, source: &Path) {
@@ -860,6 +874,7 @@ pub(crate) fn execution_command_scoped(
             .env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_baseline_context(&mut command);
         bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
@@ -893,6 +908,7 @@ pub(crate) fn execution_command_scoped(
         command.env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_baseline_context(&mut command);
         bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
@@ -920,6 +936,7 @@ fn unsandboxed_command(engine: &Path, current: &Path) -> Result<Command, String>
         .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
+    bind_baseline_context(&mut command);
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
 }

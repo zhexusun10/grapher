@@ -1,64 +1,18 @@
 // Grapher-owned launcher. No global Pi fallback and no changes to upstream code.
-import { spawn, execFileSync } from "node:child_process";
-import { join } from "node:path";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { pathToFileURL } from "node:url";
-import { root, source, verifyBaseline } from "../scripts/pi-baseline.mjs";
-import { verifyPiDependencies } from "../scripts/pi-dependencies.mjs";
-import { configureAgentDir } from "./agent-dir.mjs";
+import { root, verifyRuntimeBaseline } from "../scripts/pi-baseline.mjs";
+import { applyDisabledProviders, configureAgentDir } from "./agent-dir.mjs";
 
-const KNOWN_PROVIDER_ENV_VARS = {
-  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"],
-  openai: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
-  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
-  deepseek: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"],
-  groq: ["GROQ_API_KEY"],
-  mistral: ["MISTRAL_API_KEY"],
-  together: ["TOGETHER_API_KEY"],
-  openrouter: ["OPENROUTER_API_KEY"],
-  "github-copilot": ["COPILOT_GITHUB_TOKEN"],
-  cohere: ["COHERE_API_KEY", "CO_API_KEY"],
-  perplexity: ["PERPLEXITY_API_KEY"],
-  xai: ["XAI_API_KEY"],
-};
-
+let verified = false;
 try {
   configureAgentDir();
-  verifyBaseline();
-  verifyPiDependencies(root);
-  const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent");
-  let disabled = [];
-  try {
-    disabled = JSON.parse(readFileSync(join(dir, "disabled-providers.json"), "utf8"));
-  } catch {}
-  const childEnv = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" };
-  if (Array.isArray(disabled)) {
-    for (const p of disabled) {
-      const vars = KNOWN_PROVIDER_ENV_VARS[p];
-      if (vars) {
-        for (const v of vars) delete childEnv[v];
-      }
-    }
-  }
-  const resolverUrl = pathToFileURL(join(source, "packages/coding-agent/src/experimental/source-resolver.ts")).href;
-  const child = spawn(process.execPath, [
-    "--import", resolverUrl,
-    join(root, "engine/execution-cli.ts"),
-    ...process.argv.slice(2),
-  ], { stdio: "inherit", env: childEnv });
-  // SIGHUP (closed terminal on macOS/Linux) would otherwise end this wrapper
-  // and orphan the engine child.
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => {
-    if (process.platform === "win32" && child.pid) {
-      try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
-    } else {
-      child.kill(signal);
-    }
-  });
-  child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
-  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143); });
+  verifyRuntimeBaseline({ installationRoot: root });
+  applyDisabledProviders(process.env);
+  verified = true;
 } catch (error) {
   console.error(`Execution Instance Engine unavailable: ${error.message}`);
   process.exitCode = 1;
+}
+
+if (verified) {
+  await import("./execution-cli.ts");
 }

@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,11 +9,26 @@ import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs
 import { toolchainEnv, prependPath } from './cargo.mjs';
 import { cleanStaleArtifacts } from './clean-stale-artifacts.mjs';
 
+const DEV_BUILD_STAMP = '.grapher-dev-build.json';
+
 function devDebugDir(installationRoot, env = process.env) {
   const targetBase = env.CARGO_TARGET_DIR
     ? resolve(installationRoot, env.CARGO_TARGET_DIR)
     : join(installationRoot, 'backend', 'target');
   return join(targetBase, 'debug');
+}
+
+export function recordDevBuildStamp(installationRoot, env = process.env) {
+  try {
+    const debugDir = devDebugDir(installationRoot, env);
+    const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
+    const stat = statSync(binary);
+    if (!stat.isFile() || stat.size === 0) return;
+    writeFileSync(
+      join(debugDir, DEV_BUILD_STAMP),
+      `${JSON.stringify({ version: 1, size: stat.size, mtimeMs: Math.trunc(stat.mtimeMs) })}\n`,
+    );
+  } catch {}
 }
 
 export function devBackendExecutable(installationRoot, env = process.env) {
@@ -54,6 +69,13 @@ export function backendBuildUpToDate(installationRoot, env = process.env) {
     const binStat = statSync(binary);
     if (!binStat.isFile() || binStat.size === 0) return false;
     if (!existsSync(join(debugDir, '.fingerprint'))) return false;
+    // Require a matching stamp written by `runDev`'s own default-feature build
+    // so a binary rebuilt with `--features fixture` (e.g. `test:concurrent`) is
+    // never reused in dev mode.
+    const stamp = JSON.parse(readFileSync(join(debugDir, DEV_BUILD_STAMP), 'utf8'));
+    if (stamp?.version !== 1 || stamp.size !== binStat.size || stamp.mtimeMs !== Math.trunc(binStat.mtimeMs)) {
+      return false;
+    }
     const binaryMtimeMs = binStat.mtimeMs;
 
     const isFresh = path => statSync(path).mtimeMs < binaryMtimeMs;
@@ -255,6 +277,7 @@ export async function runDev({
       log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
       await run(cargo, ['build', ...cargoArgs]);
       controller.signal.throwIfAborted();
+      recordDevBuildStamp(installationRoot, env);
       // Recheck after the potentially long build without killing a new listener.
       await assertPortAvailable(frontendPort);
       await assertPortAvailable(backendPort);
@@ -285,8 +308,9 @@ export async function runDev({
     const frontend = start(process.execPath, [join(installationRoot, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', String(frontendPort)]);
     watch(frontend, 'Frontend');
     // Stale Cargo artifact cleanup is housekeeping, not a startup prerequisite.
-    // Defer it until after Vite and the initial page load settle.
-    if (typeof cleanStale === 'function') {
+    // Defer it until after Vite and the initial page load settle, and only when
+    // a build actually ran in this launch.
+    if (!skipBuild && typeof cleanStale === 'function') {
       void delay(3000, undefined, { signal: controller.signal })
         .then(() => cleanStale({ installationRoot, env, silent: true, log, signal: controller.signal }))
         .catch(() => {});

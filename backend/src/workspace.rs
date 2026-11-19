@@ -436,32 +436,58 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
             Err(_) => return Ok(()),
         };
         for entry in entries.flatten() {
-            // `DirEntry::file_type` never follows symlinks and avoids `lstat`
-            // syscalls on Unix filesystems that populate `d_type`.
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                // Exclude .git and internal .grapher* directories.
-                if crate::path_identity::is_runtime_metadata_name(&entry.file_name()) {
-                    continue;
-                }
-                subdirs.push(entry.path());
-            } else if file_type.is_file() {
+            #[cfg(windows)]
+            {
+                // On Windows `FindNextFile` already populates metadata; check
+                // `is_link` so both symlinks and directory junctions are skipped.
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if metadata.file_type().is_symlink() {
+                if crate::workspace_symlinks::is_link(&metadata) {
                     continue;
                 }
-                *total = total.saturating_add(metadata.len());
-                if *total > max_bytes {
-                    return Err(WORKSPACE_SIZE_EXCEEDED_ERROR.to_string());
+                if metadata.is_dir() {
+                    if crate::path_identity::is_runtime_metadata_name(&entry.file_name()) {
+                        continue;
+                    }
+                    subdirs.push(entry.path());
+                } else if metadata.is_file() {
+                    *total = total.saturating_add(metadata.len());
+                    if *total > max_bytes {
+                        return Err(WORKSPACE_SIZE_EXCEEDED_ERROR.to_string());
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // `DirEntry::file_type` never follows symlinks and avoids `lstat`
+                // syscalls on Unix filesystems that populate `d_type`.
+                let file_type = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    // Exclude .git and internal .grapher* directories.
+                    if crate::path_identity::is_runtime_metadata_name(&entry.file_name()) {
+                        continue;
+                    }
+                    subdirs.push(entry.path());
+                } else if file_type.is_file() {
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    if metadata.file_type().is_symlink() {
+                        continue;
+                    }
+                    *total = total.saturating_add(metadata.len());
+                    if *total > max_bytes {
+                        return Err(WORKSPACE_SIZE_EXCEEDED_ERROR.to_string());
+                    }
                 }
             }
         }
@@ -1634,7 +1660,9 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
 }
 
 fn detect_git_metadata_fast(candidate: &Path) -> Option<(PathBuf, String, String)> {
-    let repo = git2::Repository::discover(candidate).ok()?;
+    // Use `open` (not `discover`) so a corrupt `.git` entry inside `candidate`
+    // never climbs into an unrelated parent repository.
+    let repo = git2::Repository::open(candidate).ok()?;
     let workdir = repo.workdir()?;
     let top_level = workdir
         .canonicalize()

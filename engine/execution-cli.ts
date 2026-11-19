@@ -3,7 +3,7 @@ import { configureExecutionRetries } from './retry-policy.ts';
 import { runPiCli } from './pi-compat.ts';
 import { executionResources } from './global-extensions.ts';
 import { applyLaunchBinding, managedLaunch, managedBusinessEnvironment } from './launch-binding.mjs';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 configureExecutionRetries();
 process.env.PYTHONDONTWRITEBYTECODE = '1';
@@ -20,9 +20,18 @@ if (args[0] === '--grapher-run-result') {
   const launch = managedLaunch();
   if (!launch) throw new Error('Result execution requires a Runtime launch binding');
   const child = spawn(launch.entry, args.slice(1), { cwd: process.cwd(), env: managedBusinessEnvironment(), stdio: 'inherit', windowsHide: true });
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.on(signal, () => {
+      if (process.platform === 'win32' && child.pid) {
+        try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else {
+        child.kill(signal);
+      }
+    });
+  }
   const code = await new Promise<number>((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', code => resolve(code ?? 1));
+    child.once('exit', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : signal ? 143 : 1)));
   });
   process.exit(code);
 }

@@ -1,7 +1,39 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { toHostInput } from './path-identity.mjs';
-import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, constants } from 'node:fs';
+import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, readFileSync, constants } from 'node:fs';
+
+const KNOWN_PROVIDER_ENV_VARS = {
+  anthropic: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'],
+  openai: ['OPENAI_API_KEY', 'OPENAI_BASE_URL'],
+  google: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
+  deepseek: ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL'],
+  groq: ['GROQ_API_KEY'],
+  mistral: ['MISTRAL_API_KEY'],
+  together: ['TOGETHER_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
+  'github-copilot': ['COPILOT_GITHUB_TOKEN'],
+  cohere: ['COHERE_API_KEY', 'CO_API_KEY'],
+  perplexity: ['PERPLEXITY_API_KEY'],
+  xai: ['XAI_API_KEY'],
+};
+
+export function applyDisabledProviders(env = process.env) {
+  const dir = env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent');
+  let disabled = [];
+  try {
+    disabled = JSON.parse(readFileSync(join(dir, 'disabled-providers.json'), 'utf8'));
+  } catch {}
+  env.PYTHONDONTWRITEBYTECODE = '1';
+  if (Array.isArray(disabled)) {
+    for (const p of disabled) {
+      const vars = KNOWN_PROVIDER_ENV_VARS[p];
+      if (vars) {
+        for (const v of vars) delete env[v];
+      }
+    }
+  }
+}
 
 // Reuse only Pi's known managed executables, not its configuration or plugins.
 // No downloads on the planning critical path and no replacement of local tools.

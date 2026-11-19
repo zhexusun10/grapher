@@ -77,6 +77,7 @@ test('prepared host loads the latest Pi overlay from the task binding', { timeou
         '--model', 'prepared-overlay/latest', '--session-dir', sessions],
       environment: { GRAPHER_MODE: 'partition', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, PI_CODING_AGENT_DIR: agent,
+        GRAPHER_BASELINE_CONTEXT: 'prepared-test-context', GRAPHER_VERIFIED_BASELINE: null,
         GRAPHER_UPSTREAM_PI_MODELS: upstream } });
     assert.equal(reply.success, true, reply.error);
     const state = await value.request({ type: 'get_state' });

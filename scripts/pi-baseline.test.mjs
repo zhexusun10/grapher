@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { verifyBaseline, verifyRootPiPins } from './pi-baseline.mjs';
+import { root as realRoot, verifyBaseline, verifyRootPiPins, verifyRuntimeBaseline } from './pi-baseline.mjs';
+import { corePackages, dependencyManifest, dependencyProfileHashes } from './pi-dependencies.mjs';
 
 const digest = content => createHash('sha256').update(content).digest('hex');
 const peers = ['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent'];
@@ -92,4 +93,66 @@ test('Pi verification rejects an uninitialized checkout', t => {
   const f = fixture(t);
   rmSync(join(f.pi, '.git'), { recursive: true, force: true });
   assert.throws(f.verify, /Cannot inspect Pi checkout/);
+});
+
+test('verifyRuntimeBaseline deduplicates Git/dependency scans per backend context and invalidates on context or input drift', t => {
+  const f = fixture(t);
+  const version = '1.5.0';
+  f.write('pi/.gitignore', 'dist/\nnode_modules/\npackages/ai/src/providers/data/\n');
+  f.write('pi/package.json', JSON.stringify({ devDependencies: { typescript: version, '@types/node': version } }));
+  for (const name of corePackages) {
+    f.write(`pi/packages/${name}/package.json`, JSON.stringify({ name: `@fixture/${name}`, version }));
+  }
+  f.git('add', '.');
+  f.git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'workspace-packages');
+  f.baseline.forkCommit = f.git('rev-parse', 'HEAD');
+  f.write('engine/pi-lock.json', JSON.stringify(f.baseline));
+  for (const name of corePackages) {
+    const metadata = JSON.stringify({ name: `@fixture/${name}`, version });
+    f.write(`pi/node_modules/@fixture/${name}/package.json`, metadata);
+  }
+  const manifest = dependencyManifest(f.root);
+  f.write('engine/pi-dependencies/package.json', JSON.stringify(manifest));
+  const packages = { '': { dependencies: manifest.dependencies } };
+  for (const [name, depVersion] of Object.entries(manifest.dependencies)) {
+    packages[`node_modules/${name}`] = { version: depVersion, resolved: `https://registry.npmjs.org/${name}`, integrity: 'sha512-AAAA' };
+    f.write(`pi/node_modules/${name}/package.json`, JSON.stringify({ name, version: depVersion }));
+  }
+  f.write('engine/pi-dependencies/package-lock.json', JSON.stringify({ name: manifest.name, version, lockfileVersion: 3, packages }));
+  f.write('pi/node_modules/.grapher-pi-dependencies.json', JSON.stringify(dependencyProfileHashes(f.root)));
+
+  const prevContext = process.env.GRAPHER_BASELINE_CONTEXT;
+  const prevVerified = process.env.GRAPHER_VERIFIED_BASELINE;
+  const prevGit = process.env.GRAPHER_TRUSTED_GIT;
+  t.after(() => {
+    if (prevContext === undefined) delete process.env.GRAPHER_BASELINE_CONTEXT;
+    else process.env.GRAPHER_BASELINE_CONTEXT = prevContext;
+    if (prevVerified === undefined) delete process.env.GRAPHER_VERIFIED_BASELINE;
+    else process.env.GRAPHER_VERIFIED_BASELINE = prevVerified;
+    if (prevGit === undefined) delete process.env.GRAPHER_TRUSTED_GIT;
+    else process.env.GRAPHER_TRUSTED_GIT = prevGit;
+    verifyRuntimeBaseline({ installationRoot: realRoot });
+  });
+
+  process.env.GRAPHER_BASELINE_CONTEXT = `test-ctx-1:${Date.now()}`;
+  delete process.env.GRAPHER_VERIFIED_BASELINE;
+
+  const first = verifyRuntimeBaseline({ installationRoot: f.root, baseline: f.baseline });
+  assert.deepEqual(first, { verified: true, cached: false });
+
+  // Subsequent prewarm workers in the same backend lifecycle reuse the verified stamp without spawning Git.
+  delete process.env.GRAPHER_VERIFIED_BASELINE;
+  process.env.GRAPHER_TRUSTED_GIT = join(f.root, 'missing-git-binary');
+  const second = verifyRuntimeBaseline({ installationRoot: f.root, baseline: f.baseline });
+  assert.deepEqual(second, { verified: true, cached: true });
+
+  // A new backend lifecycle context must re-run full verification (and therefore observe the missing Git binary).
+  process.env.GRAPHER_BASELINE_CONTEXT = `test-ctx-2:${Date.now()}`;
+  delete process.env.GRAPHER_VERIFIED_BASELINE;
+  assert.throws(() => verifyRuntimeBaseline({ installationRoot: f.root, baseline: f.baseline }), /Cannot inspect Pi checkout/);
+
+  // Without an explicit backend context, standalone runs never reuse a shared stamp.
+  delete process.env.GRAPHER_BASELINE_CONTEXT;
+  delete process.env.GRAPHER_VERIFIED_BASELINE;
+  assert.throws(() => verifyRuntimeBaseline({ installationRoot: f.root, baseline: f.baseline }), /Cannot inspect Pi checkout/);
 });

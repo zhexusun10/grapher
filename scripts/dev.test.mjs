@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { backendBuildUpToDate, devBackendExecutable, devPort, loadDevEnvironment, runDev } from './dev.mjs';
+import { backendBuildUpToDate, devBackendExecutable, devPort, loadDevEnvironment, recordDevBuildStamp, runDev } from './dev.mjs';
 
 async function freePort() {
   const server = createServer();
@@ -250,6 +250,9 @@ test('up-to-date backend binary skips cargo build until Rust inputs or HEAD chan
   const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
   writeFileSync(binary, 'compiled-binary');
 
+  // Unstamped binary (e.g. built externally with `--features fixture`) must rebuild.
+  assert.equal(backendBuildUpToDate(f.root, f.env), false);
+  recordDevBuildStamp(f.root, f.env);
   assert.equal(backendBuildUpToDate(f.root, f.env), true);
   assert.equal(backendBuildUpToDate(f.root, { ...f.env, GRAPHER_FORCE_BUILD: '1' }), false);
 
@@ -266,6 +269,12 @@ test('up-to-date backend binary skips cargo build until Rust inputs or HEAD chan
   assert.deepEqual(f.phases, ['binary', 'frontend']);
   await dev.stop();
   assert.equal(await dev.completed, 0);
+
+  // Replacing the binary (e.g. fixture build) invalidates the dev build stamp.
+  writeFileSync(binary, 'different-feature-binary');
+  assert.equal(backendBuildUpToDate(f.root, f.env), false);
+  recordDevBuildStamp(f.root, f.env);
+  assert.equal(backendBuildUpToDate(f.root, f.env), true);
 
   // Touching a Rust source or resource invalidates the fast path.
   utimesSync(join(f.root, 'backend/resources/planner.ts'), newerTime, newerTime);

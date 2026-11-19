@@ -1,5 +1,6 @@
 // One-use, source-project process preparation. Do not construct a Pi session
 // or run extension factories until Rust supplies the actual Run's binding.
+import { applyDisabledProviders } from './agent-dir.mjs';
 import { preparePiCli } from './pi-compat.ts';
 import { samePath } from './path-identity.mjs';
 
@@ -8,7 +9,7 @@ const bindingEnvironment = new Set([
   'GRAPHER_MODE', 'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_SOURCE_CASE_INSENSITIVE',
   'GRAPHER_WORKSPACE_ROOT', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES',
   'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_PLANNER_FOLLOWUP', 'GRAPHER_PLANNER_WORKSPACES', 'GRAPHER_PLANNER_WORKSPACES_FILE', 'GRAPHER_PLANNER_WRITE_TOOLS', 'GRAPHER_NODE_EXECUTION_ID',
-  'GRAPHER_COMPILER_PATH', 'PI_CODING_AGENT_DIR', 'GRAPHER_TRUSTED_GIT', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_UPSTREAM_PI_MODELS',
+  'GRAPHER_COMPILER_PATH', 'PI_CODING_AGENT_DIR', 'GRAPHER_TRUSTED_GIT', 'GRAPHER_BASELINE_CONTEXT', 'GRAPHER_VERIFIED_BASELINE', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_UPSTREAM_PI_MODELS',
   'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_FEEDBACK_SOURCE', 'GRAPHER_FEEDBACK_ENABLED', 'PYTHONDONTWRITEBYTECODE',
   'TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR',
 ]);
@@ -17,6 +18,7 @@ const clearedEnvironment = new Set([
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS', 'GIT_CEILING_DIRECTORIES', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_SOURCE_CASE_INSENSITIVE',
+  'GRAPHER_BASELINE_CONTEXT', 'GRAPHER_VERIFIED_BASELINE',
   'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_FEEDBACK_SOURCE', 'GRAPHER_FEEDBACK_ENABLED',
 ]);
 const valueArguments = new Set([
@@ -123,6 +125,7 @@ export async function bindPreparedHost(role: string): Promise<string[] | null> {
   for (const [key, entry] of Object.entries(binding.environment)) {
     if (entry === null) delete process.env[key]; else process.env[key] = entry;
   }
+  applyDisabledProviders(process.env);
   process.chdir(binding.cwd);
   process.argv = [process.argv[0], process.argv[1], ...binding.args];
   await respond(binding, true);

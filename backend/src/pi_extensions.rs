@@ -26,6 +26,7 @@ fn discovery_command(root: &Path, agent_dir: &Path) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::native::bind_baseline_context(&mut command);
     command
 }
 

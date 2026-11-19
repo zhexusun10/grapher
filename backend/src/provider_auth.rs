@@ -49,6 +49,7 @@ impl Bridge {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::native::bind_baseline_context(&mut command);
         Self::spawn(&mut command)
     }
 
