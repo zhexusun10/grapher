@@ -1,7 +1,9 @@
 // Host-only preparation. Backends cache this verified copy by content, shared
 // across projects and processes, including when Grapher hosts itself.
 import { createHash } from 'node:crypto';
-import { cpSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { cpSync, constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -12,28 +14,22 @@ import { bundledExtensionNames, verifyBundledExtensions } from './bundled-extens
 // Fail before the expensive Pi copy when an existing checkout needs npm ci.
 verifyBundledExtensions(root);
 verifyBaseline();
-verifyPiDependencies(root);
+const profileCache = {};
+verifyPiDependencies(root, { profileCache });
 
-// Hash runtime inputs, not project paths, credentials or session state. Pi's
-// external dependencies are pinned/verified above; hashing their lock and the
-// built core artifacts avoids reading another entire node_modules tree.
-if (process.argv[2] === '--cache-key') {
-  // Hash a cached copy using this installation's trusted verifier, never run
-  // verifier/adapter code from the cache before its inputs have been checked.
-  const input = process.argv[3] ? resolve(process.argv[3]) : root;
+async function computeCacheKey(input, { verifyCachedDeps = false } = {}) {
   // Dependency directories are deliberately omitted from the digest. Check the
   // copy's install metadata against the trusted source profile before admission.
-  if (process.argv[3]) {
+  if (verifyCachedDeps) {
     try {
-      verifyPiDependencies(root, { installationRoot: input });
+      verifyPiDependencies(root, { installationRoot: input, profileCache });
     } catch (error) {
       throw new Error(`Cached Pi dependency verification failed: ${error.message}`, { cause: error });
     }
   }
-  const hash = createHash('sha256').update(`grapher-native-runtime-v2:${process.platform}:${process.arch}:${process.versions.modules}\n`);
+  const items = [];
   const directories = new Set();
-  const add = (path, name, dirent) => {
-    hash.update(`${name}\0`);
+  const collect = (path, name, dirent) => {
     if (process.platform === 'win32') {
       // Windows copies dereference links. Hash the same bytes/shape that the
       // destination retains, not a junction spelling absent from that copy.
@@ -42,16 +38,18 @@ if (process.argv[2] === '--cache-key') {
         const physical = realpathSync.native(path);
         if (directories.has(physical)) throw new Error(`Cyclic native runtime input: ${name}`);
         directories.add(physical);
+        items.push({ type: 'dir', name });
         try {
           for (const child of readdirSync(path).sort()) {
-            if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) add(join(path, child), `${name}/${child}`);
+            if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) {
+              collect(join(path, child), `${name}/${child}`);
+            }
           }
         } finally {
           directories.delete(physical);
         }
       } else {
-        const content = readFileSync(path);
-        hash.update(String(content.length)).update('\0').update(content);
+        items.push({ type: 'file', name, path });
       }
       return;
     }
@@ -59,23 +57,74 @@ if (process.argv[2] === '--cache-key') {
       ? dirent
       : lstatSync(path);
     if (kind.isSymbolicLink()) {
-      hash.update(`link:${readlinkSync(path)}\0`);
+      items.push({ type: 'link', name, target: readlinkSync(path) });
     } else if (kind.isDirectory()) {
+      items.push({ type: 'dir', name });
       const children = readdirSync(path, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const child of children) {
         if (child.name !== 'node_modules' && child.name !== '.git' && !child.name.startsWith('.grapher-masks-')) {
-          add(join(path, child.name), `${name}/${child.name}`, child);
+          collect(join(path, child.name), `${name}/${child.name}`, child);
         }
       }
     } else {
-      const content = readFileSync(path);
-      hash.update(String(content.length)).update('\0').update(content);
+      items.push({ type: 'file', name, path });
     }
   };
-  for (const name of ['engine', 'package.json', 'package-lock.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) add(join(input, name), name);
-  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) add(join(input, 'scripts', script), `scripts/${script}`);
-  for (const name of bundledExtensionNames) add(join(input, 'node_modules', name), `node_modules/${name}`);
-  process.stdout.write(hash.digest('hex'));
+  for (const name of ['engine', 'package.json', 'package-lock.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) collect(join(input, name), name);
+  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) collect(join(input, 'scripts', script), `scripts/${script}`);
+  for (const name of bundledExtensionNames) collect(join(input, 'node_modules', name), `node_modules/${name}`);
+
+  const hash = createHash('sha256').update(`grapher-native-runtime-v2:${process.platform}:${process.arch}:${process.versions.modules}\n`);
+  const BATCH = 32;
+  for (let offset = 0; offset < items.length; offset += BATCH) {
+    const slice = items.slice(offset, offset + BATCH);
+    const buffers = await Promise.all(slice.map(item => (item.type === 'file' ? readFile(item.path) : null)));
+    for (let index = 0; index < slice.length; index++) {
+      const item = slice[index];
+      hash.update(`${item.name}\0`);
+      if (item.type === 'link') {
+        hash.update(`link:${item.target}\0`);
+      } else if (item.type === 'file') {
+        const content = buffers[index];
+        hash.update(String(content.length)).update('\0').update(content);
+      }
+    }
+  }
+  return hash.digest('hex');
+}
+
+// Hash runtime inputs, not project paths, credentials or session state. Pi's
+// external dependencies are pinned/verified above; hashing their lock and the
+// built core artifacts avoids reading another entire node_modules tree.
+if (process.argv[2] === '--cache-key') {
+  // Hash a cached copy using this installation's trusted verifier, never run
+  // verifier/adapter code from the cache before its inputs have been checked.
+  const input = process.argv[3] ? resolve(process.argv[3]) : root;
+  const key = await computeCacheKey(input, { verifyCachedDeps: Boolean(process.argv[3]) });
+  process.stdout.write(key);
+  process.exit(0);
+}
+
+// Single-process session used by the backend so baseline and root dependency
+// verification run once while cached candidates are verified under their lease.
+if (process.argv[2] === '--cache-key-session') {
+  const rootKey = await computeCacheKey(root, { verifyCachedDeps: false });
+  process.stdout.write(`${JSON.stringify({ ok: true, key: rootKey })}\n`);
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      const request = JSON.parse(line);
+      if (typeof request?.verify !== 'string' || !request.verify) {
+        throw new Error('Invalid cache verification request');
+      }
+      const key = await computeCacheKey(resolve(request.verify), { verifyCachedDeps: true });
+      process.stdout.write(`${JSON.stringify({ ok: true, key })}\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(`${JSON.stringify({ ok: false, error: message })}\n`);
+    }
+  }
   process.exit(0);
 }
 

@@ -79,9 +79,24 @@ export async function ensureDependencies({
   const childEnv = toolchainEnv(prependPath({ ...env }, dirname(cargoPath)));
   const options = { cwd: installationRoot, env: childEnv, stdio: 'inherit' };
   const checks = [['git', 'Git'], [cargoPath, 'Rust/Cargo']];
-  const checkResults = await Promise.allSettled(
-    checks.map(([command]) => Promise.resolve().then(() => run(command, ['--version'], { ...options, stdio: 'pipe' }))),
+  // Start host tool checks and async picomatch verification immediately so
+  // read-only local dependency checks overlap with the git/cargo subprocesses.
+  const toolChecksPromise = Promise.allSettled(
+    checks.map(([command]) => {
+      try { return Promise.resolve(run(command, ['--version'], { ...options, stdio: 'pipe' })); }
+      catch (error) { return Promise.reject(error); }
+    }),
   );
+  const picomatchPromise = verifyPicomatchPatch(installationRoot).catch(() => false);
+  const hasSubmodule = existsSync(join(installationRoot, 'pi/package.json'));
+  const rootReady = rootDependenciesReady(installationRoot);
+  let piAction = 'build';
+  let piReady = false;
+  if (hasSubmodule) {
+    try { verifyPiDependencies(installationRoot); } catch { piAction = 'setup'; }
+    if (piAction !== 'setup') piReady = piBuildReady(installationRoot);
+  }
+  const checkResults = await toolChecksPromise;
   for (let index = 0; index < checks.length; index++) {
     if (checkResults[index].status === 'rejected') {
       const name = checks[index][1];
@@ -102,22 +117,28 @@ export async function ensureDependencies({
     return run('npm', args, options);
   };
 
-  if (!existsSync(join(installationRoot, 'pi/package.json'))) {
+  if (!hasSubmodule) {
     log('[dev] Initializing the pinned Pi submodule...');
     await run('git', ['submodule', 'update', '--init', '--recursive'], options);
   }
-  if (!rootDependenciesReady(installationRoot)) {
+  if (!rootReady) {
     log('[dev] Installing locked Grapher dependencies (including development tools)...');
     try { await runNpm(['ci', '--ignore-scripts', '--include=dev']); }
     catch { throw new Error('Locked npm installation failed. Check the error above, network/proxy access and package-lock.json, then retry npm run dev. Startup does not fall back to npm install or rewrite the lockfile.'); }
     if (!rootDependenciesReady(installationRoot)) throw new Error('npm ci completed but required Grapher dependencies are still missing; check npm omit/optional settings and retry npm run dev.');
   }
-  if (!(await verifyPicomatchPatch(installationRoot))) {
+  const picomatchVerified = rootReady ? await picomatchPromise : await verifyPicomatchPatch(installationRoot);
+  if (!picomatchVerified) {
     await run(process.execPath, [join(installationRoot, 'scripts/patch-picomatch.mjs'), installationRoot], options);
   }
-  let action = 'build';
-  try { verifyPiDependencies(installationRoot); } catch { action = 'setup'; }
-  if (action === 'setup' || !piBuildReady(installationRoot)) {
+  let action = piAction;
+  let buildReady = piReady;
+  if (!hasSubmodule) {
+    action = 'build';
+    try { verifyPiDependencies(installationRoot); } catch { action = 'setup'; }
+    buildReady = action !== 'setup' && piBuildReady(installationRoot);
+  }
+  if (action === 'setup' || !buildReady) {
     log(`[dev] Preparing Pi (${action === 'setup' ? 'install, audit and build' : 'rebuild from local reviewed dependencies'})...`);
     await run(process.execPath, [join(installationRoot, 'scripts/pi-baseline.mjs'), action], options);
     verifyPiDependencies(installationRoot);

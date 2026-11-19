@@ -54,9 +54,11 @@ export function dependencyProfileHashes(root) {
 
 export function verifyDependencyProfile(root) {
   const profile = profileDirectory(root);
-  const manifest = json(join(profile, 'package.json'));
+  const manifestRaw = readFileSync(join(profile, 'package.json'));
+  const lockRaw = readFileSync(join(profile, 'package-lock.json'));
+  const manifest = JSON.parse(manifestRaw.toString('utf8'));
   if (JSON.stringify(manifest) !== JSON.stringify(dependencyManifest(root))) throw new Error('Pi dependency profile differs from the reviewed upstream dependencies; regenerate and review it');
-  const lock = json(join(profile, 'package-lock.json'));
+  const lock = JSON.parse(lockRaw.toString('utf8'));
   if (lock.lockfileVersion !== 3 || lock.name !== manifest.name || lock.version !== manifest.version ||
       JSON.stringify(lock.packages?.['']?.dependencies) !== JSON.stringify(manifest.dependencies)) {
     throw new Error('Pi dependency profile lock does not match its manifest');
@@ -74,24 +76,36 @@ export function verifyDependencyProfile(root) {
       throw new Error(`Pi dependency lacks registry integrity: ${path}`);
     }
   }
-  return { manifest, lock };
+  const hashes = {
+    packageJsonSha256: createHash('sha256').update(manifestRaw).digest('hex'),
+    packageLockSha256: createHash('sha256').update(lockRaw).digest('hex'),
+  };
+  return { manifest, lock, hashes };
 }
 
-export function verifyPiDependencies(root, { installationRoot = root } = {}) {
+export function verifyPiDependencies(root, { installationRoot = root, profileCache } = {}) {
   // The caller's trusted profile/workspace manifests define expected identity;
   // an inspected cache supplies only the installed dependency metadata.
-  const { manifest, lock } = verifyDependencyProfile(root);
+  const verifiedProfile = profileCache?.profile ?? verifyDependencyProfile(root);
+  if (profileCache) profileCache.profile = verifiedProfile;
+  const { manifest, lock } = verifiedProfile;
+  const expectedHashes = verifiedProfile.hashes ?? dependencyProfileHashes(root);
   const source = join(installationRoot, 'pi');
   const expectedSource = join(root, 'pi');
   const modules = join(source, 'node_modules');
   const markerPath = join(modules, '.grapher-pi-dependencies.json');
-  if (!existsSync(markerPath) || JSON.stringify(json(markerPath)) !== JSON.stringify(dependencyProfileHashes(root))) {
+  let markerRaw;
+  try { markerRaw = readFileSync(markerPath, 'utf8'); }
+  catch { throw new Error('Pi dependencies are missing or use an unreviewed install; run npm run pi:setup'); }
+  if (JSON.stringify(JSON.parse(markerRaw)) !== JSON.stringify(expectedHashes)) {
     throw new Error('Pi dependencies are missing or use an unreviewed install; run npm run pi:setup');
   }
-  const internal = new Map(corePackages.map(directory => {
-    const pkg = json(join(expectedSource, 'packages', directory, 'package.json'));
-    return [`node_modules/${pkg.name}`, directory];
+  const internal = verifiedProfile.internal ?? new Map(corePackages.map(directory => {
+    const raw = readFileSync(join(expectedSource, 'packages', directory, 'package.json'));
+    const pkg = JSON.parse(raw.toString('utf8'));
+    return [`node_modules/${pkg.name}`, createHash('sha256').update(raw).digest('hex')];
   }));
+  verifiedProfile.internal = internal;
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path) continue;
     const metadata = join(source, path, 'package.json');
@@ -120,7 +134,7 @@ export function verifyPiDependencies(root, { installationRoot = root } = {}) {
       const key = relative(source, path).replaceAll('\\', '/');
       const metadata = join(path, 'package.json');
       if (internal.has(key)) {
-        if (hash(metadata) !== hash(join(expectedSource, 'packages', internal.get(key), 'package.json'))) throw new Error(`Pi workspace binding mismatch: ${key}`);
+        if (hash(metadata) !== internal.get(key)) throw new Error(`Pi workspace binding mismatch: ${key}`);
       } else if (!lock.packages[key]) {
         throw new Error(`Extraneous Pi dependency: ${key}; run npm run pi:setup`);
       }

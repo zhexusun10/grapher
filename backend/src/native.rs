@@ -5,12 +5,14 @@ use crate::engine::PiRole;
 #[cfg(any(not(feature = "fixture"), test))]
 use std::thread;
 use std::{
+    cell::RefCell,
     fs,
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -89,6 +91,136 @@ pub fn require_graph_execution() -> Result<(), String> {
     }
 }
 
+struct RuntimeKeySession {
+    child: Child,
+    tree: crate::process_control::ProcessTree,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    stderr: Arc<Mutex<String>>,
+    root_key: String,
+}
+
+impl RuntimeKeySession {
+    fn start(installation: &Path, parent: &Path) -> Result<Self, String> {
+        let mut command = Command::new("node");
+        command
+            .arg(host_path(
+                &installation.join("scripts/prepare-native-runtime.mjs"),
+            ))
+            .arg("--cache-key-session")
+            .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(parent))
+            .env_remove("GRAPHER_NATIVE_RUNTIME_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::process_control::configure_command(&mut command);
+        let (mut child, tree) = crate::process_control::with_owner("native-runtime", || {
+            let mut child = command.spawn().map_err(|error| {
+                format!("Cannot start native runtime preparation with Node: {error}")
+            })?;
+            let tree = crate::process_control::track(&child).inspect_err(|_error| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
+            if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+                tree.terminate();
+            }
+            Ok::<_, String>((child, tree))
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("Native runtime session stdin unavailable")?;
+        let stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or("Native runtime session stdout unavailable")?,
+        );
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let capture = stderr_buf.clone();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stderr.take(64 * 1024).read_to_string(&mut text);
+                if let Ok(mut guard) = capture.lock() {
+                    *guard = text;
+                }
+            });
+        }
+        let mut session = Self {
+            child,
+            tree,
+            stdin: Some(stdin),
+            stdout,
+            stderr: stderr_buf,
+            root_key: String::new(),
+        };
+        session.root_key = session.read_key_reply()?;
+        Ok(session)
+    }
+
+    fn read_key_reply(&mut self) -> Result<String, String> {
+        let mut line = String::new();
+        let bytes = self
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            let status = self
+                .child
+                .wait()
+                .map(|status| status.to_string())
+                .unwrap_or_else(|_| "unknown".into());
+            let detail = self
+                .stderr
+                .lock()
+                .map(|guard| guard.trim().to_owned())
+                .unwrap_or_default();
+            return Err(format!(
+                "Cannot prepare native Pi runtime (exit {status}): {detail}"
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim())
+            .map_err(|error| format!("Invalid native runtime session reply: {error}"))?;
+        if value["ok"].as_bool() == Some(true) {
+            value["key"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "Missing native runtime cache key".into())
+        } else {
+            Err(value["error"]
+                .as_str()
+                .unwrap_or("Native runtime verification failed")
+                .to_owned())
+        }
+    }
+
+    fn verify(&mut self, directory: &Path) -> Result<String, String> {
+        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+            return Err("Backend is shutting down".into());
+        }
+        let payload = serde_json::json!({ "verify": host_path(directory) }).to_string();
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or("Native runtime session closed")?;
+        writeln!(stdin, "{payload}").map_err(|error| error.to_string())?;
+        stdin.flush().map_err(|error| error.to_string())?;
+        self.read_key_reply()
+    }
+}
+
+impl Drop for RuntimeKeySession {
+    fn drop(&mut self) {
+        self.stdin.take();
+        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+            self.tree.terminate();
+        }
+        let _ = self.child.wait();
+    }
+}
+
 pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     let mut cached = RUNTIME
         .get_or_init(|| Mutex::new(None))
@@ -104,14 +236,14 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
     let runtime_parent = crate::workspace::native_runtime_parent();
-    let key = run_runtime_preparation(&installation, &runtime_parent, None, None)?;
+    let session = RefCell::new(RuntimeKeySession::start(&installation, &runtime_parent)?);
+    let key = session.borrow().root_key.clone();
     let runtime = crate::native_runtime_storage::get_or_prepare_verified(
         &runtime_parent,
         key.trim(),
         || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst),
         |destination| {
-            let output =
-                run_runtime_preparation(&installation, &runtime_parent, Some(destination), None)?;
+            let output = run_runtime_preparation(&installation, &runtime_parent, destination)?;
             let returned = PathBuf::from(output.trim())
                 .canonicalize()
                 .map_err(|error| error.to_string())?;
@@ -120,12 +252,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
             }
             Ok(())
         },
-        |directory| match run_runtime_preparation(
-            &installation,
-            &runtime_parent,
-            None,
-            Some(directory),
-        ) {
+        |directory| match session.borrow_mut().verify(directory) {
             Ok(actual) => Ok(actual.trim() == key.trim()),
             Err(error) => {
                 eprintln!("[Grapher] Native runtime verification failed: {error}");
@@ -133,6 +260,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
             }
         },
     )?;
+    drop(session);
     let root = runtime.directory.clone();
     eprintln!(
         "[Grapher] Shared Graph runtime ready: {}",
@@ -145,8 +273,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
 fn run_runtime_preparation(
     installation: &Path,
     parent: &Path,
-    destination: Option<&Path>,
-    key_for: Option<&Path>,
+    destination: &Path,
 ) -> Result<String, String> {
     let mut command = Command::new("node");
     command
@@ -154,19 +281,10 @@ fn run_runtime_preparation(
             &installation.join("scripts/prepare-native-runtime.mjs"),
         ))
         .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(parent))
+        .env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(destination))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(destination) = destination {
-        command.env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(destination));
-    } else {
-        command
-            .arg("--cache-key")
-            .env_remove("GRAPHER_NATIVE_RUNTIME_DIR");
-        if let Some(directory) = key_for {
-            command.arg(host_path(directory));
-        }
-    }
     crate::process_control::configure_command(&mut command);
     // Shared preparation is backend-owned, not cancelled with one particular
     // Run. Track its copier/Git descendants so exit cannot leave them writing.

@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { devBackendExecutable, devPort, loadDevEnvironment, runDev } from './dev.mjs';
+import { backendBuildUpToDate, devBackendExecutable, devPort, loadDevEnvironment, runDev } from './dev.mjs';
 
 async function freePort() {
   const server = createServer();
@@ -223,4 +223,51 @@ test('built dev backend launches directly without a second cargo run and defers 
   assert.equal(spawnedCommands.some(([, args]) => args[0] === 'run'), false);
   await dev.stop();
   assert.equal(await dev.completed, 0);
+});
+
+test('up-to-date backend binary skips cargo build until Rust inputs or HEAD change', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const oldTime = new Date(Date.now() - 60_000);
+  const newerTime = new Date(Date.now() + 5_000);
+  const writeOld = (rel, content) => {
+    const full = join(f.root, rel);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, content);
+    utimesSync(full, oldTime, oldTime);
+  };
+  writeOld('backend/Cargo.toml', '[package]\nname = "grapher"\n');
+  writeOld('backend/Cargo.lock', '');
+  writeOld('backend/build.rs', 'fn main() {}\n');
+  writeOld('backend/src/main.rs', 'fn main() {}\n');
+  writeOld('backend/resources/planner.ts', 'export {};\n');
+  writeOld('.git/HEAD', 'ref: refs/heads/main\n');
+  writeOld('.git/refs/heads/main', '0'.repeat(40) + '\n');
+  for (const dir of ['backend/src', 'backend/resources']) {
+    utimesSync(join(f.root, dir), oldTime, oldTime);
+  }
+  const debugDir = join(f.root, 'backend', 'target', 'debug');
+  mkdirSync(join(debugDir, '.fingerprint'), { recursive: true });
+  const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
+  writeFileSync(binary, 'compiled-binary');
+
+  assert.equal(backendBuildUpToDate(f.root, f.env), true);
+  assert.equal(backendBuildUpToDate(f.root, { ...f.env, GRAPHER_FORCE_BUILD: '1' }), false);
+
+  const spawnProcess = (command, args, options) => {
+    if (command === binary) {
+      f.phases.push('binary');
+      const child = spawn(process.execPath, [join(f.root, 'child.mjs'), 'run'], { ...options, stdio: 'ignore' });
+      f.children.push(child);
+      return child;
+    }
+    return f.options.spawnProcess(command, args, options);
+  };
+  const dev = await f.start({ spawnProcess });
+  assert.deepEqual(f.phases, ['binary', 'frontend']);
+  await dev.stop();
+  assert.equal(await dev.completed, 0);
+
+  // Touching a Rust source or resource invalidates the fast path.
+  utimesSync(join(f.root, 'backend/resources/planner.ts'), newerTime, newerTime);
+  assert.equal(backendBuildUpToDate(f.root, f.env), false);
 });

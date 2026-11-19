@@ -230,6 +230,17 @@ export function verifyBaseline() {}
   const healthy = key(cached);
   assert.equal(healthy.status, 0, healthy.stderr);
   assert.equal(healthy.stdout, initial.stdout);
+  // Session mode verifies root once and accepts multiple cached-directory queries over stdin.
+  const sessionResult = spawnSync(process.execPath, [join(f.root, 'scripts/prepare-native-runtime.mjs'), '--cache-key-session'], {
+    cwd: f.root, encoding: 'utf8', timeout: 10000,
+    input: `${JSON.stringify({ verify: cached })}\n`,
+  });
+  assert.equal(sessionResult.status, 0, sessionResult.stderr);
+  const sessionReplies = sessionResult.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.deepEqual(sessionReplies, [
+    { ok: true, key: initial.stdout },
+    { ok: true, key: initial.stdout },
+  ]);
   const reject = pattern => {
     const result = key(cached);
     assert.notEqual(result.stdout, initial.stdout, 'damaged copied dependencies must not retain the healthy admission key');

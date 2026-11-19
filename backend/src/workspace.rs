@@ -363,6 +363,18 @@ mod workspace_guard_tests {
 
         // Still passes with 200 bytes of actual project files
         assert!(check_workspace_size(&project, 250).is_ok());
+
+        // Exercise the parallel multi-branch walk across nested subdirectories.
+        for branch in ["alpha", "beta", "gamma", "delta"] {
+            for leaf in ["one", "two"] {
+                let nested = project.join(branch).join(leaf);
+                fs::create_dir_all(&nested).unwrap();
+                fs::write(nested.join("data.bin"), vec![b'z'; 50]).unwrap();
+            }
+        }
+        // Total is now 200 + (4 * 2 * 50) = 600 bytes.
+        assert!(check_workspace_size(&project, 600).is_ok());
+        assert!(check_workspace_size(&project, 599).is_err());
     }
 }
 
@@ -413,14 +425,15 @@ fn is_desktop_workspace(
 
 pub const MAX_WORKSPACE_BYTES: u64 = 15 * 1024 * 1024 * 1024; // 15 GB
 
-pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
-    let mut total_bytes: u64 = 0;
-    let mut stack = vec![root.to_path_buf()];
+const WORKSPACE_SIZE_EXCEEDED_ERROR: &str = "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。";
 
-    while let Some(current_dir) = stack.pop() {
-        let entries = match fs::read_dir(&current_dir) {
+pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    let scan_dir = |dir: &Path, total: &mut u64, subdirs: &mut Vec<PathBuf>| -> Result<(), String> {
+        let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(_) => continue,
+            Err(_) => return Ok(()),
         };
         for entry in entries.flatten() {
             // `DirEntry::file_type` never follows symlinks and avoids `lstat`
@@ -437,7 +450,7 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
                 if crate::path_identity::is_runtime_metadata_name(&entry.file_name()) {
                     continue;
                 }
-                stack.push(entry.path());
+                subdirs.push(entry.path());
             } else if file_type.is_file() {
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
@@ -446,17 +459,92 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
                 if metadata.file_type().is_symlink() {
                     continue;
                 }
-                total_bytes = total_bytes.saturating_add(metadata.len());
-                if total_bytes > max_bytes {
-                    return Err(
-                        "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。"
-                            .to_string(),
-                    );
+                *total = total.saturating_add(metadata.len());
+                if *total > max_bytes {
+                    return Err(WORKSPACE_SIZE_EXCEEDED_ERROR.to_string());
                 }
             }
         }
+        Ok(())
+    };
+
+    let mut top_bytes: u64 = 0;
+    let mut depth1: Vec<PathBuf> = Vec::new();
+    scan_dir(root, &mut top_bytes, &mut depth1)?;
+    if depth1.is_empty() {
+        return Ok(());
     }
-    Ok(())
+
+    // Fan out depth-1 directories (e.g. `node_modules/*`, `pi/*`, `backend/*`)
+    // before spawning workers so all work units are ready for lock-free stealing.
+    let mut work_items: Vec<PathBuf> = Vec::new();
+    for dir in &depth1 {
+        scan_dir(dir, &mut top_bytes, &mut work_items)?;
+    }
+    if work_items.is_empty() {
+        return Ok(());
+    }
+
+    // Small single-branch trees walk inline without thread-spawn overhead.
+    if work_items.len() == 1 {
+        let mut total_bytes = top_bytes;
+        let mut stack = work_items;
+        while let Some(current_dir) = stack.pop() {
+            scan_dir(&current_dir, &mut total_bytes, &mut stack)?;
+        }
+        return Ok(());
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8)
+        .min(work_items.len())
+        .max(2);
+    let total = AtomicU64::new(top_bytes);
+    let exceeded = AtomicBool::new(false);
+    let next_index = AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                let mut local_stack: Vec<PathBuf> = Vec::new();
+                while !exceeded.load(Ordering::Relaxed) {
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    let Some(seed) = work_items.get(index) else {
+                        return;
+                    };
+                    local_stack.push(seed.clone());
+                    while let Some(current_dir) = local_stack.pop() {
+                        if exceeded.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let mut dir_bytes: u64 = 0;
+                        if scan_dir(&current_dir, &mut dir_bytes, &mut local_stack).is_err() {
+                            exceeded.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        if dir_bytes > 0 {
+                            let prev = total
+                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                                    Some(cur.saturating_add(dir_bytes))
+                                })
+                                .unwrap_or(u64::MAX);
+                            if prev.saturating_add(dir_bytes) > max_bytes {
+                                exceeded.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if exceeded.load(Ordering::Relaxed) {
+        Err(WORKSPACE_SIZE_EXCEEDED_ERROR.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn cached_check_workspace_size(root: &Path) -> Result<(), String> {
@@ -1545,6 +1633,32 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     detect_with_size_check(target, cached_check_workspace_size)
 }
 
+fn detect_git_metadata_fast(candidate: &Path) -> Option<(PathBuf, String, String)> {
+    let repo = git2::Repository::discover(candidate).ok()?;
+    let workdir = repo.workdir()?;
+    let top_level = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.components().collect());
+    let (branch, head) = match repo.head() {
+        Ok(reference) => {
+            let branch = if repo.head_detached().unwrap_or(false) {
+                "HEAD".to_string()
+            } else {
+                reference.shorthand().unwrap_or("HEAD").to_string()
+            };
+            let head = reference
+                .peel_to_commit()
+                .ok()
+                .and_then(|commit| commit.as_object().short_id().ok())
+                .and_then(|buf| buf.as_str().ok().map(str::to_owned))
+                .unwrap_or_default();
+            (branch, head)
+        }
+        Err(_) => ("HEAD".to_string(), String::new()),
+    };
+    Some((top_level, branch, head))
+}
+
 /// Metadata refreshes for an already-running workspace may defer size policy;
 /// picker/new-binding callers use `detect` and always enforce admission.
 pub(crate) fn detect_with_size_check(
@@ -1569,9 +1683,18 @@ pub(crate) fn detect_with_size_check(
     check_size(&candidate)?;
 
     if is_standard_git(&candidate) {
-        let top_level = match git(&candidate, &["rev-parse", "--show-toplevel"]) {
-            Ok(top) => PathBuf::from(top),
-            Err(_) => return Ok(None),
+        let (top_level, branch, head) = match detect_git_metadata_fast(&candidate) {
+            Some(metadata) => metadata,
+            None => {
+                let top_level = match git(&candidate, &["rev-parse", "--show-toplevel"]) {
+                    Ok(top) => PathBuf::from(top),
+                    Err(_) => return Ok(None),
+                };
+                let branch = git(&top_level, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .unwrap_or_else(|_| "HEAD".into());
+                let head = git(&top_level, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+                (top_level, branch, head)
+            }
         };
         #[cfg(target_os = "macos")]
         let top_level = crate::path_identity::actual_path(&top_level).unwrap_or(top_level);
@@ -1580,9 +1703,6 @@ pub(crate) fn detect_with_size_check(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
-        let branch = git(&top_level, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .unwrap_or_else(|_| "HEAD".into());
-        let head = git(&top_level, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
         // 避免在添加/检测工作区时全量递归扫描大仓库的 untracked 状态导致 CPU 与 I/O 过载；
         // 前端仅消费分支与提交元信息，初始 clean 状态默认为 true。
         let clean = true;

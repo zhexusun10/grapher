@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,11 +9,15 @@ import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs
 import { toolchainEnv, prependPath } from './cargo.mjs';
 import { cleanStaleArtifacts } from './clean-stale-artifacts.mjs';
 
-export function devBackendExecutable(installationRoot, env = process.env) {
+function devDebugDir(installationRoot, env = process.env) {
   const targetBase = env.CARGO_TARGET_DIR
     ? resolve(installationRoot, env.CARGO_TARGET_DIR)
     : join(installationRoot, 'backend', 'target');
-  const debugDir = join(targetBase, 'debug');
+  return join(targetBase, 'debug');
+}
+
+export function devBackendExecutable(installationRoot, env = process.env) {
+  const debugDir = devDebugDir(installationRoot, env);
   const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
   // On macOS, even a no-op `cargo build` unlinks and re-clones `target/debug/grapher`
   // with a fresh inode, invalidating AMFI/XProtect binary trust caching (~500ms per launch).
@@ -35,6 +39,77 @@ export function devBackendExecutable(installationRoot, env = process.env) {
     } catch {}
   }
   return binary;
+}
+
+export function backendBuildUpToDate(installationRoot, env = process.env) {
+  if (env.GRAPHER_FORCE_BUILD === '1' || env.RUSTFLAGS || env.CARGO_ENCODED_RUSTFLAGS) {
+    return false;
+  }
+  if (Object.keys(env).some(key => key.startsWith('CARGO_PROFILE_DEV_'))) {
+    return false;
+  }
+  try {
+    const debugDir = devDebugDir(installationRoot, env);
+    const binary = join(debugDir, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
+    const binStat = statSync(binary);
+    if (!binStat.isFile() || binStat.size === 0) return false;
+    if (!existsSync(join(debugDir, '.fingerprint'))) return false;
+    const binaryMtimeMs = binStat.mtimeMs;
+
+    const isFresh = path => statSync(path).mtimeMs < binaryMtimeMs;
+    for (const file of ['backend/Cargo.toml', 'backend/Cargo.lock', 'backend/build.rs']) {
+      if (!isFresh(join(installationRoot, file))) return false;
+    }
+    for (const optional of ['.cargo/config.toml', 'backend/.cargo/config.toml']) {
+      const path = join(installationRoot, optional);
+      if (existsSync(path) && !isFresh(path)) return false;
+    }
+
+    // Check both directory mtimes (catches deletions/renames) and file mtimes.
+    const treeFresh = directory => {
+      if (!isFresh(directory)) return false;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const child = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (!treeFresh(child)) return false;
+        } else if (!isFresh(child)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    for (const dir of ['backend/src', 'backend/resources']) {
+      if (!treeFresh(join(installationRoot, dir))) return false;
+    }
+
+    // Debug `build.rs` embeds HEAD commit; rebuild if HEAD moved.
+    const dotGit = join(installationRoot, '.git');
+    if (existsSync(dotGit)) {
+      let gitDir = dotGit;
+      const dotGitStat = statSync(dotGit);
+      if (dotGitStat.isFile()) {
+        if (!isFresh(dotGit)) return false;
+        const pointer = readFileSync(dotGit, 'utf8').trim();
+        if (!pointer.startsWith('gitdir:')) return false;
+        gitDir = resolve(installationRoot, pointer.slice(7).trim());
+      }
+      const headPath = join(gitDir, 'HEAD');
+      if (existsSync(headPath)) {
+        if (!isFresh(headPath)) return false;
+        const head = readFileSync(headPath, 'utf8').trim();
+        if (head.startsWith('ref:')) {
+          const refRel = head.slice(4).trim();
+          const refPath = join(gitDir, refRel);
+          if (existsSync(refPath) && !isFresh(refPath)) return false;
+          const packedRefs = join(gitDir, 'packed-refs');
+          if (existsSync(packedRefs) && !isFresh(packedRefs)) return false;
+        }
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function loadDevEnvironment(installationRoot, base = process.env) {
@@ -175,12 +250,15 @@ export async function runDev({
     // Keep Cargo's versioned progress lines out of startup; warnings and errors
     // still inherit the terminal, alongside our version-independent status.
     const cargoArgs = ['--quiet', '--locked', '--manifest-path', 'backend/Cargo.toml', '--bin', 'grapher'];
-    log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
-    await run(cargo, ['build', ...cargoArgs]);
-    controller.signal.throwIfAborted();
-    // Recheck after the potentially long build without killing a new listener.
-    await assertPortAvailable(frontendPort);
-    await assertPortAvailable(backendPort);
+    const skipBuild = backendBuildUpToDate(installationRoot, env);
+    if (!skipBuild) {
+      log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
+      await run(cargo, ['build', ...cargoArgs]);
+      controller.signal.throwIfAborted();
+      // Recheck after the potentially long build without killing a new listener.
+      await assertPortAvailable(frontendPort);
+      await assertPortAvailable(backendPort);
+    }
     const watch = (child, label) => {
       child.once('error', error => {
         if (!stopping) { logError(`[dev] Cannot start ${label}: ${error.message}`); void stop(1); }
