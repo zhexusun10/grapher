@@ -1327,7 +1327,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (recoverLayoutScroll) resumeFollowingAfterLayoutScroll();
     if (!shouldFollowOutput()) return;
     const height = el.scrollHeight;
-    if (height - el.scrollTop - el.clientHeight <= 2) return;
+    if (height - el.scrollTop - el.clientHeight <= 0.5) return;
     el.scrollTop = height;
     lastScrollTopRef.current = el.scrollTop;
     prevScrollHeightRef.current = height;
@@ -2121,7 +2121,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const viewportResized = previousViewport !== null &&
         (previousViewport.width !== viewport.width || previousViewport.height !== viewport.height);
       prevViewportRef.current = viewport;
-      const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
+      const heightGrew = currentScrollHeight > prevScrollHeightRef.current;
       const heightShrankWhilePreparing = isPreparingConversationRef.current &&
         currentScrollHeight < prevScrollHeightRef.current - 2;
       prevScrollHeightRef.current = currentScrollHeight;

@@ -29,9 +29,13 @@ function copyFallback(text: string, onSuccess: () => void) {
 export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
   ({ content, isStreaming }) => {
     const smoothText = useSmoothStreamText(content, isStreaming);
+    const stillTyping = isStreaming || smoothText.length < content.length;
     const bubbleRef = useRef<HTMLDivElement>(null);
     const previousTextRef = useRef(smoothText);
-    useEffect(() => {
+    // Pin synchronously before paint (after MarkdownRenderer's child layout
+    // effect updates the DOM) so line wraps never paint one frame unpinned and
+    // pull the footer back up on the next frame.
+    useLayoutEffect(() => {
       const textChanged = smoothText !== previousTextRef.current;
       previousTextRef.current = smoothText;
       if (!smoothText && !isStreaming) return;
@@ -42,7 +46,7 @@ export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: 
       else notifyTranscriptContentGrowth(bubbleRef.current);
     }, [smoothText, isStreaming]);
     return <div ref={bubbleRef} style={{ display: "contents" }}>
-      <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />
+      <MarkdownRenderer content={smoothText} isStreaming={stillTyping} />
     </div>;
   }
 );

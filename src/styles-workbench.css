@@ -861,7 +861,9 @@
   box-shadow: none;
   color: var(--text-primary);
   font-size: 14.5px;
-  line-height: 1.68;
+  /* Integer pixel line-height avoids fractional-pixel scrollHeight rounding
+     that would bounce the bottom-pinned footer up and down on line wraps. */
+  line-height: 24px;
   display: block;
   word-break: break-word;
 }
@@ -876,7 +878,7 @@
 .chat-bubble-assistant .markdown-content,
 .chat-message-assistant .markdown-content {
   font-size: 14.5px;
-  line-height: 1.68;
+  line-height: 24px;
   color: var(--text-primary);
 }
 
@@ -898,6 +900,7 @@
 .chat-bubble-assistant .markdown-content pre code,
 .chat-message-assistant .markdown-content pre code {
   font-size: 13px;
+  line-height: 20px;
 }
 
 /* 单节点串行执行内容（无多余卡片包裹，直接在页面里靠左展示） */

@@ -377,7 +377,7 @@
 .thinking-card-body {
   padding: 10px 14px;
   font-size: 12.5px;
-  line-height: 1.65;
+  line-height: 21px;
   color: var(--text-primary);
   max-height: 420px;
   overflow-y: auto;
@@ -992,7 +992,7 @@ button.transcript-error-toggle {
 .markdown-content {
   color: var(--text-primary);
   font-size: 13.5px;
-  line-height: 1.65;
+  line-height: 22px;
   word-break: break-word;
 }
 
@@ -1058,14 +1058,21 @@ button.transcript-error-toggle {
 
 .markdown-content h1 {
   font-size: 1.25rem;
+  line-height: 28px;
 }
 
 .markdown-content h2 {
   font-size: 1.15rem;
+  line-height: 26px;
 }
 
 .markdown-content h3 {
   font-size: 1.05rem;
+  line-height: 24px;
+}
+
+.markdown-content h4 {
+  line-height: 24px;
 }
 
 .markdown-content ul,
@@ -1322,12 +1329,12 @@ button.transcript-error-toggle {
   text-align: left;
   color: var(--text-primary);
   font-size: 14.5px;
-  line-height: 1.68;
+  line-height: 24px;
 }
 
 .transcript-message-bubble .markdown-content {
   font-size: 14.5px;
-  line-height: 1.68;
+  line-height: 24px;
 }
 
 .transcript-row.text-row.user {
