@@ -1,21 +1,59 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 /** Give a just-presented card its height progressively instead of in one frame.
  *
  * The entrance of a card that arrives with real content (a reasoning block from
  * a live chunk, a tool call whose result is already known) used to reserve its
  * whole height before its first paint. In a bottom-following transcript that
- * snapped every older row up by the card's full height in a single frame. A grid
- * track that grows from `0fr` to `1fr` moves the same layout box over the
- * entrance window, so the rows above glide away from the new card while the
- * card's own clipped content is revealed from its header down.
+ * snapped every older row up by the card's full height in a single frame.
  *
- * The tracker is a wrapper rather than the card itself: the card must stay a
- * single grid item so its width, wrapping and measured row height match the
- * settled geometry exactly. `min-height: 0` on that item lets the track squash
- * it during the animation; the card's existing `overflow: hidden` does the
- * clipping, so box-shadows and glows keep painting outside it.
+ * Quantizing the animated grid track to integer pixels via CSS `round()` keeps
+ * the same smooth upward glide for older rows without fractional-pixel
+ * `scrollHeight` rounding bouncing the bottom-pinned footer on every frame.
  */
 export function CardReveal({ animate, children }: { animate: boolean; children: ReactNode }) {
-  return <div className={`card-reveal${animate ? " entering" : ""}`}>{children}</div>;
+  const ref = useRef<HTMLDivElement>(null);
+  const [settled, setSettled] = useState(!animate);
+  const entering = animate && !settled;
+
+  useLayoutEffect(() => {
+    const reveal = ref.current;
+    if (!reveal || !entering) return;
+    const child = reveal.firstElementChild as HTMLElement | null;
+    if (!child) return;
+
+    const measure = () => {
+      // `scrollHeight` excludes borders while `offsetHeight - clientHeight`
+      // recovers the exact vertical border thickness even while squashed to 0fr.
+      const height = Math.round(child.scrollHeight + (child.offsetHeight - child.clientHeight));
+      if (height > 0) {
+        reveal.style.setProperty("--card-reveal-height", `${height}px`);
+        reveal.dataset.revealMeasured = "true";
+      }
+    };
+    measure();
+
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    for (const part of child.children) observer.observe(part);
+    return () => {
+      observer.disconnect();
+      reveal.style.removeProperty("--card-reveal-height");
+      delete reveal.dataset.revealMeasured;
+    };
+  }, [entering]);
+
+  return (
+    <div
+      ref={ref}
+      className={`card-reveal${entering ? " entering" : ""}`}
+      onAnimationEnd={(event) => {
+        if (event.target === event.currentTarget && event.animationName === "transcript-card-reveal") {
+          setSettled(true);
+        }
+      }}
+    >
+      {children}
+    </div>
+  );
 }

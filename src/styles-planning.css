@@ -93,6 +93,7 @@
 
 .initial-query-scroll.conversation-preparing .thinking-card,
 .initial-query-scroll.conversation-preparing .card-reveal.entering {
+  grid-template-rows: 1fr;
   animation: none !important;
   transform: none !important;
 }
@@ -154,10 +155,18 @@
   animation: transcript-card-appear 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+@property --card-reveal-progress {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
 /* A presented card takes its height over the same window, so the rows above it
    are pushed up smoothly instead of jumping by the card's full height at once.
    The track carries the growth; the card stays one stretched grid item, keeps its
-   final width and wrapping, and clips its own content while it is squashed. */
+   final width and wrapping, and clips its own content while it is squashed.
+   Quantizing to integer pixels avoids fractional scrollHeight rounding that
+   would bounce the bottom-pinned footer during entrance. */
 .card-reveal {
   display: grid;
   grid-template-rows: 1fr;
@@ -166,7 +175,12 @@
 .card-reveal.entering {
   /* Slower and gentler than the fade: a long layout push that snaps at the end
      reads as a jump, which is exactly what this replaces. */
+  grid-template-rows: round(nearest, calc(var(--card-reveal-height) * var(--card-reveal-progress)), 1px);
   animation: transcript-card-reveal 0.34s cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+
+.card-reveal.entering:not([data-reveal-measured]) {
+  grid-template-rows: 0fr;
 }
 
 .card-reveal>.tool-call-card,
@@ -176,11 +190,11 @@
 
 @keyframes transcript-card-reveal {
   from {
-    grid-template-rows: 0fr;
+    --card-reveal-progress: 0;
   }
 
   to {
-    grid-template-rows: 1fr;
+    --card-reveal-progress: 1;
   }
 }
 
@@ -192,6 +206,7 @@
   }
 
   .card-reveal.entering {
+    grid-template-rows: 1fr;
     animation: none;
   }
 }
@@ -962,7 +977,7 @@ button.transcript-error-toggle {
 .tool-result-code {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 19px;
   background: #0f141c;
   color: #e2e8f0;
   padding: 8px 10px;
