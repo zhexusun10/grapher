@@ -102,7 +102,7 @@ struct RuntimeKeySession {
 
 impl RuntimeKeySession {
     fn start(installation: &Path, parent: &Path) -> Result<Self, String> {
-        let mut command = Command::new("node");
+        let mut command = Command::new(trusted_node()?);
         command
             .arg(host_path(
                 &installation.join("scripts/prepare-native-runtime.mjs"),
@@ -113,6 +113,7 @@ impl RuntimeKeySession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        bind_trusted_git(&mut command)?;
         crate::process_control::configure_command(&mut command);
         let (mut child, tree) = crate::process_control::with_owner("native-runtime", || {
             let mut child = command.spawn().map_err(|error| {
@@ -276,7 +277,7 @@ fn run_runtime_preparation(
     parent: &Path,
     destination: &Path,
 ) -> Result<String, String> {
-    let mut command = Command::new("node");
+    let mut command = Command::new(trusted_node()?);
     command
         .arg(host_path(
             &installation.join("scripts/prepare-native-runtime.mjs"),
@@ -286,6 +287,7 @@ fn run_runtime_preparation(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    bind_trusted_git(&mut command)?;
     crate::process_control::configure_command(&mut command);
     // Shared preparation is backend-owned, not cancelled with one particular
     // Run. Track its copier/Git descendants so exit cannot leave them writing.
@@ -312,7 +314,20 @@ fn run_runtime_preparation(
     String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
-fn installation_root_for(executable: Option<&Path>, source_root: &Path) -> PathBuf {
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    environment_path(name).filter(|path| !path.to_string_lossy().trim().is_empty())
+}
+
+fn installation_root_for(
+    override_root: Option<&Path>,
+    executable: Option<&Path>,
+    source_root: &Path,
+) -> PathBuf {
+    // Desktop sidecars resolve bundled engine/, pi/, dist/, and scripts/ from
+    // an explicit resource root when executables and resources are not siblings.
+    if let Some(root) = override_root.filter(|path| !path.to_string_lossy().trim().is_empty()) {
+        return root.to_path_buf();
+    }
     // Distributions are relocatable; never use the CI checkout embedded by Cargo
     // when the executable has its own runtime alongside it. Dev/test binaries
     // under backend/target still use the source checkout.
@@ -325,7 +340,9 @@ fn installation_root_for(executable: Option<&Path>, source_root: &Path) -> PathB
 }
 
 pub fn installation_root() -> PathBuf {
+    let override_root = non_empty_env_path("GRAPHER_INSTALLATION_ROOT");
     installation_root_for(
+        override_root.as_deref(),
         std::env::current_exe().ok().as_deref(),
         &Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),
     )
@@ -591,51 +608,334 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
     Ok(())
 }
 
+fn configure_probe_command(command: &mut Command) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+}
+
+fn validate_executable_file(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "Configured {label} executable is unavailable ({}): {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Configured {label} executable is not a regular file: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "Configured {label} executable is not executable: {}",
+                path.display()
+            ));
+        }
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "Cannot resolve {label} executable ({}): {error}",
+            path.display()
+        )
+    })?;
+    Ok(host_path(&canonical))
+}
+
+fn resolve_trusted_node(override_path: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = override_path.filter(|path| !path.to_string_lossy().trim().is_empty()) {
+        return validate_executable_file(path, "Node");
+    }
+    let mut command = Command::new("node");
+    configure_probe_command(&mut command);
+    let output = command
+        .args(["-p", "process.execPath"])
+        // Discovery itself is an engine bootstrap, not a business child.
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .output()
+        .map_err(|error| {
+            format!(
+                "Node.js 22.19+ is required by Grapher but could not be started: {error}. \
+                 Install Node.js from https://nodejs.org/ or set GRAPHER_TRUSTED_NODE."
+            )
+        })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            "Cannot resolve trusted native Node executable; ensure Node.js 22.19+ is installed or set GRAPHER_TRUSTED_NODE".into()
+        } else {
+            format!("Cannot resolve trusted native Node executable: {detail}")
+        });
+    }
+    let path = PathBuf::from(
+        String::from_utf8(output.stdout)
+            .map_err(|e| e.to_string())?
+            .trim(),
+    );
+    if !path.is_absolute() || !path.is_file() {
+        return Err("Invalid trusted native Node executable".into());
+    }
+    Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
+}
+
 /// Resolve the engine before applying business PATH. Never let an environment
 /// replace the pinned Pi's Node executable with an arbitrary workspace binary.
 pub(crate) fn trusted_node() -> Result<PathBuf, String> {
-    static NODE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    NODE.get_or_init(|| {
-        let output = Command::new("node")
-            .args(["-p", "process.execPath"])
-            // Discovery itself is an engine bootstrap, not a business child.
-            .env_remove("NODE_OPTIONS")
-            .env_remove("NODE_PATH")
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !output.status.success() {
-            return Err("Cannot resolve trusted native Node".into());
-        }
-        let path = PathBuf::from(
-            String::from_utf8(output.stdout)
-                .map_err(|e| e.to_string())?
-                .trim(),
+    static NODE: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = NODE.get() {
+        return Ok(path.clone());
+    }
+    let override_path = non_empty_env_path("GRAPHER_TRUSTED_NODE")
+        .or_else(|| non_empty_env_path("GRAPHER_NODE_PATH"));
+    let resolved = resolve_trusted_node(override_path.as_deref())?;
+    let _ = NODE.set(resolved.clone());
+    Ok(resolved)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostPreflight {
+    pub git_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_error: Option<String>,
+    pub xcode_clt_missing: bool,
+    pub platform: &'static str,
+}
+
+fn current_platform_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+fn git_install_guidance() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Install Xcode Command Line Tools (`xcode-select --install`) or Git \
+         (https://git-scm.com/download/mac), or set GRAPHER_TRUSTED_GIT to a valid git executable."
+    }
+    #[cfg(windows)]
+    {
+        "Install Git for Windows (https://git-scm.com/download/win), \
+         or set GRAPHER_TRUSTED_GIT to a valid git.exe path."
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        "Install git using your system package manager (https://git-scm.com/downloads), \
+         or set GRAPHER_TRUSTED_GIT to a valid git executable."
+    }
+}
+
+fn git_unavailable_error() -> String {
+    let binary = if cfg!(windows) { "git.exe" } else { "git" };
+    format!(
+        "Git is required by Grapher, but no working {binary} executable was found. {}",
+        git_install_guidance()
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_clt_installed() -> bool {
+    let mut command = Command::new("/usr/bin/xcode-select");
+    configure_probe_command(&mut command);
+    command
+        .arg("-p")
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_clt_installed() -> bool {
+    true
+}
+
+fn verify_git_executable(candidate: &Path) -> Result<PathBuf, String> {
+    let resolved = validate_executable_file(candidate, "Git")?;
+    #[cfg(target_os = "macos")]
+    if (candidate == Path::new("/usr/bin/git") || resolved == Path::new("/usr/bin/git"))
+        && !macos_clt_installed()
+    {
+        return Err(
+            "macOS /usr/bin/git is an uninstalled Xcode Command Line Tools shim; \
+             run `xcode-select --install` or install Git from https://git-scm.com/download/mac"
+                .into(),
         );
-        if !path.is_absolute() || !path.is_file() {
-            return Err("Invalid trusted native Node executable".into());
+    }
+    let mut command = Command::new(&resolved);
+    configure_probe_command(&mut command);
+    clear_git_environment(&mut command);
+    let output = command
+        .arg("--version")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| {
+            format!(
+                "Cannot execute Git at {}: {error}",
+                resolved.display()
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() || !stdout.to_ascii_lowercase().contains("git version") {
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!(
+                "Git executable at {} failed verification (--version exited with {})",
+                resolved.display(),
+                output.status
+            )
+        } else {
+            format!(
+                "Git executable at {} failed verification ({}): {detail}",
+                resolved.display(),
+                output.status
+            )
+        });
+    }
+    Ok(resolved)
+}
+
+fn standard_git_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        for path in [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+            "/Library/Developer/CommandLineTools/usr/bin/git",
+        ] {
+            candidates.push(PathBuf::from(path));
         }
-        Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
-    })
-    .clone()
+    }
+    #[cfg(windows)]
+    {
+        for (env_var, suffix) in [
+            ("ProgramFiles", r"Git\cmd\git.exe"),
+            ("ProgramFiles(x86)", r"Git\cmd\git.exe"),
+            ("LOCALAPPDATA", r"Programs\Git\cmd\git.exe"),
+        ] {
+            if let Some(base) = non_empty_env_path(env_var) {
+                candidates.push(base.join(suffix));
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        for path in ["/usr/bin/git", "/usr/local/bin/git"] {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+    if let Some(managed) = non_empty_env_path("GRAPHER_MANAGED_GIT_PATH") {
+        if !candidates.contains(&managed) {
+            candidates.push(managed);
+        }
+    }
+    candidates
+}
+
+fn resolve_trusted_git(
+    override_path: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+    standard_candidates: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if let Some(path) = override_path.filter(|path| !path.to_string_lossy().trim().is_empty()) {
+        return verify_git_executable(path).map_err(|error| {
+            format!("{error}. {}", git_install_guidance())
+        });
+    }
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    let mut candidates = Vec::new();
+    if let Some(value) = path_var {
+        for directory in std::env::split_paths(value) {
+            let candidate = directory.join(name);
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    for candidate in standard_candidates {
+        if !candidates.contains(candidate) {
+            candidates.push(candidate.clone());
+        }
+    }
+    let mut clt_shim_error: Option<String> = None;
+    for candidate in candidates {
+        if candidate.is_file() {
+            match verify_git_executable(&candidate) {
+                Ok(verified) => return Ok(verified),
+                Err(error) => {
+                    if clt_shim_error.is_none()
+                        && error.contains("Xcode Command Line Tools shim")
+                    {
+                        clt_shim_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(shim_error) = clt_shim_error {
+        return Err(format!(
+            "Git is required by Grapher, but {shim_error}. Or set GRAPHER_TRUSTED_GIT to a valid git executable."
+        ));
+    }
+    Err(git_unavailable_error())
+}
+
+/// Probe host Git availability for first-launch diagnostics and UI re-checks.
+/// Re-probes cleanly whenever Git was previously absent because `trusted_git()`
+/// only caches verified executables.
+pub fn host_preflight() -> HostPreflight {
+    match trusted_git() {
+        Ok(path) => HostPreflight {
+            git_available: true,
+            git_path: Some(host_path(&path).to_string_lossy().into_owned()),
+            git_error: None,
+            xcode_clt_missing: false,
+            platform: current_platform_name(),
+        },
+        Err(error) => HostPreflight {
+            git_available: false,
+            git_path: None,
+            git_error: Some(error),
+            xcode_clt_missing: cfg!(target_os = "macos") && !macos_clt_installed(),
+            platform: current_platform_name(),
+        },
+    }
 }
 
 /// Resolve the bootstrap Git before applying business PATH. The Grapher-owned
 /// entrypoint verifies the pinned Pi baseline with the host's Git; a business
 /// environment may keep a deliberately minimal PATH and must not choose it.
 pub(crate) fn trusted_git() -> Result<PathBuf, String> {
-    static GIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    GIT.get_or_init(|| {
-        let name = if cfg!(windows) { "git.exe" } else { "git" };
-        let path = std::env::var_os("PATH")
-            .and_then(|value| {
-                std::env::split_paths(&value)
-                    .map(|directory| directory.join(name))
-                    .find(|candidate| candidate.is_file())
-            })
-            .ok_or("Native Git is unavailable for pinned baseline verification")?;
-        Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
-    })
-    .clone()
+    static GIT: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = GIT.get() {
+        return Ok(path.clone());
+    }
+    let override_path = non_empty_env_path("GRAPHER_TRUSTED_GIT");
+    let path_var = std::env::var_os("PATH");
+    let standard = standard_git_candidates();
+    let resolved = resolve_trusted_git(override_path.as_deref(), path_var.as_deref(), &standard)?;
+    let _ = GIT.set(resolved.clone());
+    Ok(resolved)
 }
 
 pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, String> {
@@ -687,7 +987,7 @@ pub(crate) fn bind_source_case(command: &mut Command, source: &Path) {
 /// The business launch binding replaces PATH before Pi/extension factories.
 /// The bootstrap needs host Git even when that PATH omits it; the protected
 /// GRAPHER_ namespace keeps business variables from forging the value.
-fn bind_trusted_git(command: &mut Command) -> Result<(), String> {
+pub(crate) fn bind_trusted_git(command: &mut Command) -> Result<(), String> {
     command.env("GRAPHER_TRUSTED_GIT", host_path(&trusted_git()?));
     Ok(())
 }
@@ -1196,16 +1496,162 @@ mod tests {
     }
 
     #[test]
-    fn installation_root_prefers_relocated_package_and_retains_dev_fallback() {
+    fn installation_root_prefers_override_then_relocated_package_and_retains_dev_fallback() {
         let temp = tempfile::tempdir().unwrap();
+        let bundled = temp.path().join("Tauri Resources");
         let packaged = temp.path().join("Grapher 安装 # %");
         let source = temp.path().join("source");
         let executable = packaged.join("grapher");
-        assert_eq!(installation_root_for(Some(&executable), &source), source);
+        assert_eq!(
+            installation_root_for(None, Some(&executable), &source),
+            source
+        );
+        assert_eq!(
+            installation_root_for(Some(Path::new("   ")), Some(&executable), &source),
+            source
+        );
         fs::create_dir_all(packaged.join("engine")).unwrap();
         fs::write(packaged.join("engine/entrypoint.mjs"), "").unwrap();
-        assert_eq!(installation_root_for(Some(&executable), &source), packaged);
-        assert_eq!(installation_root_for(None, &source), source);
+        assert_eq!(
+            installation_root_for(None, Some(&executable), &source),
+            packaged
+        );
+        assert_eq!(
+            installation_root_for(Some(&bundled), Some(&executable), &source),
+            bundled
+        );
+        assert_eq!(installation_root_for(None, None, &source), source);
+    }
+
+    #[test]
+    fn trusted_node_override_resolves_configured_file_and_rejects_invalid_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = temp
+            .path()
+            .join(if cfg!(windows) { "node.exe" } else { "node" });
+        fs::write(&node, b"stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o644)).unwrap();
+            let err = resolve_trusted_node(Some(&node)).unwrap_err();
+            assert!(err.contains("not executable"), "{err}");
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let resolved = resolve_trusted_node(Some(&node)).unwrap();
+        assert_eq!(resolved, host_path(&node.canonicalize().unwrap()));
+        let missing = temp.path().join("missing-node");
+        let err = resolve_trusted_node(Some(&missing)).unwrap_err();
+        assert!(err.contains("unavailable"), "{err}");
+        let err = resolve_trusted_node(Some(temp.path())).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        // Unset or blank override falls back to ambient Node resolution.
+        assert!(resolve_trusted_node(None).unwrap().is_file());
+        assert!(resolve_trusted_node(Some(Path::new("  "))).unwrap().is_file());
+    }
+
+    #[test]
+    fn trusted_git_override_and_fallback_skip_broken_candidates_and_report_actionable_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_git = trusted_git().unwrap();
+        let override_ok = resolve_trusted_git(Some(&real_git), None, &[]).unwrap();
+        assert_eq!(override_ok, real_git);
+
+        let missing = temp.path().join("missing-git");
+        let err = resolve_trusted_git(Some(&missing), None, &[]).unwrap_err();
+        assert!(err.contains("GRAPHER_TRUSTED_GIT"), "{err}");
+
+        let broken_dir = temp.path().join("broken-bin");
+        fs::create_dir_all(&broken_dir).unwrap();
+        let broken_git = broken_dir.join(if cfg!(windows) { "git.exe" } else { "git" });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&broken_git, "#!/bin/sh\necho 'not git' >&2\nexit 1\n").unwrap();
+            fs::set_permissions(&broken_git, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            fs::write(&broken_git, b"not-a-valid-pe").unwrap();
+        }
+        let err = resolve_trusted_git(Some(&broken_git), None, &[]).unwrap_err();
+        assert!(err.contains("GRAPHER_TRUSTED_GIT"), "{err}");
+
+        // Broken candidate on PATH is skipped in favor of standard fallback.
+        let path_with_broken = std::env::join_paths([&broken_dir]).unwrap();
+        let recovered =
+            resolve_trusted_git(None, Some(&path_with_broken), &[real_git.clone()]).unwrap();
+        assert_eq!(recovered, real_git);
+
+        // When no working Git exists on PATH or standard locations, produce an actionable error.
+        let unavailable = resolve_trusted_git(None, Some(&path_with_broken), &[]).unwrap_err();
+        assert!(
+            unavailable.contains("Git is required by Grapher")
+                && unavailable.contains("GRAPHER_TRUSTED_GIT"),
+            "{unavailable}"
+        );
+    }
+
+    #[test]
+    fn desktop_env_overrides_control_installation_root_and_trusted_executables() {
+        const CHILD: &str = "GRAPHER_TEST_DESKTOP_OVERRIDES_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "installationRoot": host_path(&installation_root()).to_string_lossy(),
+                    "node": host_path(&trusted_node().unwrap()).to_string_lossy(),
+                    "git": host_path(&trusted_git().unwrap()).to_string_lossy(),
+                })
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("Contents/Resources");
+        fs::create_dir_all(&resources).unwrap();
+        let fake_node = temp
+            .path()
+            .join(if cfg!(windows) { "bundled-node.exe" } else { "bundled-node" });
+        fs::write(&fake_node, b"stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let real_git = trusted_git().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native::tests::desktop_env_overrides_control_installation_root_and_trusted_executables",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("GRAPHER_INSTALLATION_ROOT", &resources)
+            .env("GRAPHER_TRUSTED_NODE", &fake_node)
+            .env("GRAPHER_TRUSTED_GIT", &real_git)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .expect("missing JSON probe output")
+            .to_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            Path::new(parsed["installationRoot"].as_str().unwrap()),
+            host_path(&resources)
+        );
+        assert_eq!(
+            Path::new(parsed["node"].as_str().unwrap()),
+            host_path(&fake_node.canonicalize().unwrap())
+        );
+        assert_eq!(Path::new(parsed["git"].as_str().unwrap()), real_git);
     }
 
     #[test]

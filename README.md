@@ -133,16 +133,29 @@ Partitioner
 
 ## Quick start
 
-### Option 1: Prebuilt Release (Fastest — No Rust or npm required)
+### Option 1: Desktop App (Recommended — macOS & Windows)
 
-Download the latest [release archive](https://github.com/zhexusun10/grapher/releases/latest), verify its `.sha256` checksum, extract it, and launch:
+Download the latest native installer from [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) and verify its `.sha256` checksum:
+
+- **macOS (Apple Silicon):** `Grapher_<version>_aarch64.dmg` (drag `Grapher.app` to Applications)
+- **macOS (Intel):** `Grapher_<version>_x64.dmg` (drag `Grapher.app` to Applications)
+- **Windows (x64):** `Grapher_<version>_x64-setup.exe` (per-user NSIS installer)
+
+The desktop app bundles the Rust backend, pinned Pi/engine runtime, and Node.js `22.19.0` runtime—no separate Node.js, npm, Rust, or manual Git installation is required (if no working Git is present on the machine, the app automatically downloads a verified portable copy on first launch).
+
+- **Data & migration:** Desktop runtime data lives in your OS application data directory (`~/Library/Application Support/io.github.zhexusun10.grapher/data` on macOS; `%APPDATA%\io.github.zhexusun10.grapher\data` on Windows), while provider logins stay shared in `~/.grapher/pi-agent`. On first launch, if an existing `.grapher` store is found (or specified via `GRAPHER_LEGACY_DATA_DIR`), Grapher copies it atomically under exclusive lock while preserving the original legacy directory intact.
+- **Updates:** Signed releases support cryptographically verified in-app updates under **Settings → Software Update** (macOS swaps `Grapher.app` in place and relaunches; Windows hands off to the signed NSIS installer, which updates and restarts Grapher automatically). Unsigned local or CI builds start normally and direct you to GitHub Releases for manual installer downloads. See the [capability matrix](docs/development/desktop-releases.md#updater--install-capability-matrix) for signing details.
+
+### Option 2: Prebuilt CLI / Browser Archive (macOS, Linux & Windows)
+
+Download the latest relocatable [release archive](https://github.com/zhexusun10/grapher/releases/latest) (`grapher-*.tar.gz` or `grapher-windows-x64.zip`), verify its `.sha256` checksum, extract it, and launch:
 
 - **Windows:** `start.bat`
 - **macOS / Linux:** `./start.sh`
 
-*(Requires Node.js 22.19+ and Git at runtime.)*
+*(Requires Node.js 22.19+ and Git on `PATH`.)*
 
-### Option 2: Run from Source
+### Option 3: Run or Build from Source
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -152,7 +165,9 @@ npm run dev
 
 `npm run dev` checks prerequisites, initializes the pinned `pi/` submodule, installs locked dependencies, and compiles the Rust backend (for manual step-by-step setup, run `npm ci --ignore-scripts` then `npm run pi:setup`). For an existing clone, run `git submodule update --init --recursive` first.
 
-Open **<http://127.0.0.1:1420>** (first launch compiles the Rust backend). For local production mode, run `npm run build && npm start` and open <http://127.0.0.1:1421>.
+- **Browser mode:** Open **<http://127.0.0.1:1420>** during `npm run dev`, or run `npm run build && npm start` and open <http://127.0.0.1:1421>.
+- **Desktop dev mode (Tauri v2):** Run `npm run desktop:dev`.
+- **Build native desktop installers:** Run `npm run desktop:build` (supports `--target macos-arm64`, `macos-x64`, or `windows-x64` on the matching OS). See [Desktop Releases & Secrets](docs/development/desktop-releases.md) for tag checklists, code-signing/notarization, and updater signing secrets.
 
 ### Your First Run
 
@@ -161,17 +176,17 @@ Open **<http://127.0.0.1:1420>** (first launch compiles the Rust backend). For l
 3. **Watch or steer** — Graph runs start automatically by default (turn off **Auto Approve** before submitting to review and approve plans manually). Inspect live node logs and diffs, pause/resume nodes, or send mid-flight instructions at any time.
 4. **Verify delivery** — Shared-source runs edit your project live; isolated Graph batches publish verified results back to your codebase upon completion (preserving state for inspection or retry if publication fails).
 
-**System requirements:** Node.js 22.19+, stable Rust (for source builds), Git, npm, network access, and provider authentication. Windows requires Git for Windows Bash; macOS requires Xcode Command Line Tools (for Rust linking), uses the built-in Seatbelt sandbox for private Graph workspaces, and keeps the system awake while the backend runs, including when idle (`GRAPHER_KEEP_AWAKE=0` to disable); Linux private Graph workspaces require `bubblewrap` with unprivileged user/mount/PID namespaces enabled.
-
-> [!IMPORTANT]
-> **Security & Project Boundaries — Use trusted projects; start with a disposable one.**
-> Planner Bash commands run directly in your source repository before approval, and rejecting or cancelling a plan does **not** roll back those writes. Git snapshots force-collect project files (including `.gitignore` matches) except Runtime/managed-environment internals. Windows workspaces are not filesystem sandboxes. Read [Before you approve](docs/user-guide.md#before-you-approve) and [Filesystem boundaries](docs/architecture/filesystem-isolation.md) before running on important repositories.
+**System requirements:**
+- **Desktop installers:** Network access and model provider authentication. Node.js 22.19.0 and the pinned Pi runtime are bundled, and Git is downloaded automatically on first launch if absent on the host.
+- **Archives & source builds:** Node.js 22.19+, Git, npm, plus stable Rust and native compiler/linker tools for source builds (macOS Xcode Command Line Tools; Windows MSVC Build Tools).
+- **Platform notes:** macOS uses the built-in Seatbelt sandbox for private Graph workspaces and keeps the system awake while the backend runs, including when idle (`GRAPHER_KEEP_AWAKE=0` to disable); Linux private Graph workspaces require `bubblewrap` with unprivileged user/mount/PID namespaces enabled; Windows workspaces are not filesystem sandboxes.
 
 ## Documentation & Resources
 
 | Guide | What it covers |
 | --- | --- |
-| **[User Guide](docs/user-guide.md)** | Everyday workflow, steering controls, workspace modes, recovery, and safety |
+| **[User Guide](docs/user-guide.md)** | Everyday workflow, steering controls, workspace modes, data migration, recovery, and safety |
+| **[Desktop Releases & Secrets](docs/development/desktop-releases.md)** | Tauri v2 desktop builds, installers, updater signing keys, macOS signing/notarization, and CI release workflow |
 | **[Architecture Contracts](docs/architecture/overview.md)** | System boundaries, compiler rules, deterministic runtime, and Git workspace handoffs |
 | **[Benchmarks](docs/benchmarks/harbor.md)** | Harbor evaluation harness and benchmark methodology |
 | **[Contributing Guide](CONTRIBUTING.md)** & **[Testing](docs/development/testing.md)** | Development setup, ownership boundaries, and targeted test suites |

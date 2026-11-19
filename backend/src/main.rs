@@ -124,12 +124,28 @@ fn main() {
         return;
     }
 
-    if let Some(argument) = std::env::args().nth(1) {
-        eprintln!("Unknown Grapher argument: {argument}");
-        std::process::exit(1);
+    let mut options = grapher::server::ServerOptions::from_env();
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--desktop-sidecar" => {
+                options.emit_ready = true;
+                options.shutdown_on_stdin_eof = true;
+                options.allow_desktop_origins = true;
+            }
+            "--ready-protocol" => {
+                options.emit_ready = true;
+            }
+            "--stdin-shutdown" => {
+                options.shutdown_on_stdin_eof = true;
+            }
+            _ => {
+                eprintln!("Unknown Grapher argument: {argument}");
+                std::process::exit(1);
+            }
+        }
     }
 
-    if let Err(error) = grapher::server::run() {
+    if let Err(error) = grapher::server::run_with_options(options) {
         eprintln!("{error}");
         std::process::exit(1);
     }

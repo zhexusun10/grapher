@@ -329,6 +329,7 @@ interface SidebarProps {
   onNewConversation: () => void;
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
+  hasUpdateAvailable?: boolean;
   runLabels?: Record<string, string>;
   runCardKeys?: Record<string, string>;
   initialRunIds?: readonly string[];
@@ -354,6 +355,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onNewConversation,
   onOpenSettings,
   isSettingsOpen,
+  hasUpdateAvailable = false,
   runLabels = {},
   runCardKeys = {},
   initialRunIds = [],
@@ -662,6 +664,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         >
           <Settings2 size={18} />
           <span>Settings</span>
+          {hasUpdateAvailable && (
+            <i className="sidebar-update-dot" aria-hidden="true" title={t("发现新版本")} />
+          )}
         </button>
       </div>
 

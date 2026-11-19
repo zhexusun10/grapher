@@ -6,6 +6,7 @@ const nodeTests = (...names) => ['--test', ...files(names)];
 const sourceTests = (...names) => ['scripts/node-ts.mjs', '--test', ...files(names)];
 const tsxTests = (...names) => ['--import', 'tsx', '--test', ...files(names)];
 const cargo = (command, ...args) => ['scripts/cargo.mjs', command, '--manifest-path', 'backend/Cargo.toml', ...args];
+const desktopCargo = (command, ...args) => ['scripts/cargo.mjs', command, '--manifest-path', 'src-tauri/Cargo.toml', ...args];
 const productionBuild = cargo('build', '--bin', 'grapher');
 const headlessBuild = cargo('build', '--no-default-features', '--bin', 'grapher');
 const verifyPi = ['scripts/pi-baseline.mjs', 'verify'];
@@ -30,13 +31,14 @@ export const suites = {
         'workbench-split-ratio.test.ts', 'workspace-conversations.test.ts',
         'workspace-path-display.test.ts', 'runtime-completions.test.ts',
         'request-timeout.test.ts', 'extension-settings.test.ts',
+        'desktop-api-transport.test.ts',
       ),
       tsxTests(
         'model-settings.test.ts', 'transcript-cache.test.ts', 'thinking-transcript.test.ts',
         'markdown-code-copy.test.ts', 'math-markdown.test.ts', 'markdown-safety.test.ts',
         'transcript-coalescing.test.ts', 'transcript-compaction.test.ts', 'transcript-settle.test.ts',
         'attachment-card.test.ts', 'frontend-performance.test.ts', 'execution-time-took.test.ts',
-        'session-token-usage.test.ts',
+        'session-token-usage.test.ts', 'updater.test.ts', 'autostart.test.ts',
       ),
     ],
   },
@@ -49,6 +51,7 @@ export const suites = {
       'steer-order-ui.test.mjs', 'composer-continuation-ui.test.mjs', 'composer-commands-ui.test.mjs',
       'planner-handoff-ui.test.mjs', 'graph-switching.test.mjs', 'graph-planning-fit.test.mjs',
       'responsive-layout.test.mjs', 'workbench-details-ui.test.mjs', 'frontend-performance-ui.test.mjs',
+      'desktop-transport-ui.test.mjs',
     )],
   },
   'ui-polish': {
@@ -175,8 +178,15 @@ export const suites = {
     steps: [nodeTests('temporary-target.test.mjs')],
   },
   release: {
-    description: 'Release launcher/packaging contracts; no archive build.',
-    steps: [nodeTests('release-launchers.test.mjs')],
+    description: 'Release launcher, updater manifest, signing, and workflow contracts; no archive build.',
+    steps: [nodeTests('release-launchers.test.mjs', 'desktop-updater-manifest.test.mjs', 'desktop-signing.test.mjs')],
+  },
+  desktop: {
+    description: 'Tauri v2 desktop shell tests, legacy migration, sidecar lifecycle, signing, and packaging contracts.',
+    steps: [
+      nodeTests('desktop-packaging.test.mjs', 'desktop-updater-manifest.test.mjs', 'desktop-signing.test.mjs'),
+      desktopCargo('test'),
+    ],
   },
 };
 

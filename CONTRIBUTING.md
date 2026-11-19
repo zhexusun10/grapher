@@ -20,12 +20,15 @@ For separate terminals, use `npm run frontend` and `npm run backend`, exporting 
 
 After dependency setup, `npm run build` followed by `npm start` serves the production UI at `http://127.0.0.1:1421` (or the configured backend port), without Vite.
 
+For the Tauri v2 desktop shell, use `npm run desktop:dev` during development, `npm run desktop:build` to stage resources and build a native installer (`.dmg` on macOS, NSIS `.exe` on Windows), and `npm run test:desktop` to run desktop shell and packaging tests. See [Desktop Releases & Secrets](docs/development/desktop-releases.md) for signing, notarization, and release secrets.
+
 ## Code ownership
 
 | Area | Responsibility |
 | --- | --- |
 | `backend/src/` | Compiler, event-driven runtime, workspaces, publication, storage, local API |
-| `src/` | UI, graph projection, conversation navigation, transcript loading |
+| `src/` | UI, graph projection, conversation navigation, transcript loading, desktop transport/updater UI |
+| `src-tauri/` | Tauri v2 desktop shell, sidecar supervision, preserve-first legacy data migration, capabilities & updater wiring |
 | `engine/` | Pi compatibility/launcher, provider bridge, Graph tool/path adaptation |
 | `backend/resources/` | Production prompts and Planner graph-tool contracts |
 | `scripts/`, `backend/tests/` | Setup, maintenance, and regression harnesses |

@@ -1,3 +1,5 @@
+import { fetchApi } from './apiBase';
+
 export interface PiExtension {
   id: string;
   name: string;
@@ -9,12 +11,12 @@ export interface PiExtension {
 }
 export interface ExtensionCatalog { globalDirectory: string; extensions: PiExtension[] }
 async function call(operation: string, fields: Record<string, unknown> = {}): Promise<ExtensionCatalog> {
-  const response = await fetch('/api/pi_extensions', {
+  const response = await fetchApi('/api/pi_extensions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
     body: JSON.stringify({ version: 1, operation, ...fields }),
   });
-  const body = await response.json();
-  if (!response.ok || body.error) throw new Error(body.error || 'Pi extension operation failed');
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || body.error) throw new Error(body?.error || 'Pi extension operation failed');
   return body.result;
 }
 // Settings unmounts while it is closed, so every reopen started from a one-line

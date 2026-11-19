@@ -1,8 +1,9 @@
 import { t } from "../i18n";
+import { DesktopBackendError, fetchApi, isTauriDesktop, probeDesktopBackendError } from "./apiBase";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, FileChangeSummary, Graph, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, FileChangeSummary, Graph, HostPreflight, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -19,7 +20,7 @@ const snapshotMutations = new Set([
 // long-running mutations. A client timeout never claims that a server-side
 // write was rolled back.
 const boundedCommands = new Set([
-  "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config", "composer_models", "composer_rename",
+  "bootstrap", "host_preflight", "history", "snapshot", "snapshot_if_changed", "save_config", "composer_models", "composer_rename",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
   "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
   "open_workspace_file",
@@ -76,7 +77,7 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
   if (mutatesSnapshot) historyRequests.clear();
   let response: Response;
   try {
-    response = await fetch(`/api/${command}`, {
+    response = await fetchApi(`/api/${command}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...body, compact: true, detail: "metadata" }),
@@ -85,6 +86,7 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
   } catch (error) {
     if (mutatesSnapshot) historyRequests.clear();
     if (signal?.aborted) throw error;
+    if (error instanceof DesktopBackendError) throw error;
     throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
   }
   if (response.headers?.get("x-grapher-events") === "1") {
@@ -92,7 +94,9 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
   }
   const data = await response.json().catch(() => {
     if (mutatesSnapshot) historyRequests.clear();
-    throw new Error(t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
+    throw new Error(isTauriDesktop()
+      ? t("桌面后端未返回有效响应 ({0})，请重试或重启应用。", response.status)
+      : t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
   });
   if (mutatesSnapshot) historyRequests.clear();
   if (!response.ok || data.error) {
@@ -115,6 +119,12 @@ export const runtimeService = {
       } catch (err) {
         // Three stalled bootstrap attempts must not multiply the wait budget.
         if (err instanceof RequestTimeoutError) throw err;
+        if (
+          err instanceof DesktopBackendError &&
+          (err.kind === "closed" || err.kind === "ipc_unavailable" || err.kind === "invalid_url")
+        ) {
+          throw err;
+        }
         retries--;
         if (retries === 0) throw err;
         await new Promise((resolve) => setTimeout(resolve, 600));
@@ -122,6 +132,7 @@ export const runtimeService = {
     }
     return request<Bootstrap>("bootstrap");
   },
+  hostPreflight: (signal?: AbortSignal) => request<HostPreflight>("host_preflight", {}, signal),
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
     request<{ repository: string; valid: boolean; error: string | null; missing?: boolean; sizeLimitExceeded?: boolean }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
@@ -176,7 +187,7 @@ export const runtimeService = {
     continuePlanningId?: string
   ): Promise<Snapshot> {
     historyRequests.clear();
-    const response = await fetch("/api/plan_goal_stream", {
+    const response = await fetchApi("/api/plan_goal_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ goal, config, mode, images, revisionRunId, continuePlanningId }),
@@ -207,7 +218,17 @@ export const runtimeService = {
     let dataLines: string[] = [];
     try {
       while (true) {
-        const { done: completed, value } = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await reader.read();
+        } catch (readError) {
+          if (!signal?.aborted && isTauriDesktop()) {
+            const desktopError = await probeDesktopBackendError(readError, signal);
+            if (desktopError) throw desktopError;
+          }
+          throw readError;
+        }
+        const { done: completed, value } = chunk;
         if (completed) break;
         let text = decoder.decode(value, { stream: true });
         if (!text) continue;
@@ -264,6 +285,10 @@ export const runtimeService = {
           }
         }
       }
+      if (!signal?.aborted && isTauriDesktop()) {
+        const desktopError = await probeDesktopBackendError(undefined, signal);
+        if (desktopError) throw desktopError;
+      }
       throw new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。"));
     } finally {
       void reader.cancel().catch(() => { });
@@ -305,7 +330,7 @@ export const runtimeService = {
     request<{ path: string }>("open_workspace_file", { ...input }),
   getWorkspaceImage: (runId: string, path: string, executionId?: string, signal?: AbortSignal): Promise<Blob> =>
     withRequestTimeout(async deadline => {
-      const response = await fetch("/api/get_workspace_image", {
+      const response = await fetchApi("/api/get_workspace_image", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runId, path, ...(executionId ? { executionId } : {}) }), signal: deadline,
       });

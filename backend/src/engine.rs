@@ -1081,7 +1081,7 @@ fn run_pi_with_timeout(
         let executable = if config.pi_command == "/bin/sh" {
             // Fixture shell scripts need Git for Windows' sh.exe. The POSIX
             // /bin/sh path is not a Windows executable path, even in Git Bash.
-            let output = Command::new("git")
+            let output = Command::new(crate::native::trusted_git()?)
                 .arg("--exec-path")
                 .output()
                 .map_err(|error| format!("Cannot locate Git for Windows shell: {error}"))?;
@@ -1172,7 +1172,17 @@ fn run_pi_with_timeout(
             if request.role != PiRole::Planner {
                 return Err("Only the Grapher-owned Planner extension may be injected".into());
             }
-            crate::native::installation_root().join("backend/resources/planner.ts")
+            let bundled = crate::native::installation_root().join("backend/resources/planner.ts");
+            if bundled.is_file() {
+                bundled
+            } else {
+                // Packaged/desktop distributions embed planner.ts in the binary
+                // when backend/resources is not shipped alongside resources.
+                let session_extension = request.session_dir.join("grapher-planner.ts");
+                fs::write(&session_extension, include_str!("../resources/planner.ts"))
+                    .map_err(|error| error.to_string())?;
+                session_extension
+            }
         };
         #[cfg(not(feature = "fixture"))]
         let extension = extension_path

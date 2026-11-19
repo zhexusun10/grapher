@@ -1,6 +1,6 @@
 .modal-backdrop.scoped-models-backdrop { z-index: 1500; }
 .role-model-settings > .scoped-models-button { justify-self: start; margin-top: 8px; }
-.modal.scoped-models-modal { width: min(680px, calc(100vw - 32px)); max-height: min(720px, calc(100dvh - 48px)); display: flex; flex-direction: column; gap: 12px; padding: 22px; }
+.modal.scoped-models-modal { width: min(680px, calc(100vw - 32px)); max-height: min(720px, calc(100dvh - var(--desktop-titlebar-inset, 0px) - 48px)); display: flex; flex-direction: column; gap: 12px; padding: 22px; }
 .scoped-models-modal header, .scoped-models-modal footer { display: flex; align-items: center; gap: 12px; }
 .scoped-models-modal header { justify-content: space-between; }
 .scoped-models-modal h2, .scoped-models-modal p { margin: 0; }

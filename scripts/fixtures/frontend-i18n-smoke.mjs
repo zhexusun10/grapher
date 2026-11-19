@@ -100,6 +100,8 @@ try {
       assert.ok(html.includes(`>${locale === "en" ? "Model configuration" : "模型配置"}</h4>`));
       assert.ok(html.includes(`>${locale === "en" ? "Harness settings" : "Harness设置"}</h4>`));
       assert.ok(html.includes(`>${locale === "en" ? "UI settings" : "UI设置"}</h4>`));
+      assert.ok(html.includes(`>${locale === "en" ? "Desktop settings" : "桌面设置"}</h4>`));
+      assert.ok(html.includes(t("登录时自动启动仅在 Grapher 桌面端（macOS / Windows）中可用。浏览器模式不会修改系统启动项。")));
       assert.ok(html.includes(t("界面语言")));
       assert.ok(html.includes(`value="${preference}" selected=""`));
       assert.ok(!html.includes('role="alertdialog"'), "confirmation is not shown before a language change");

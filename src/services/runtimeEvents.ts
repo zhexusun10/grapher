@@ -1,3 +1,5 @@
+import { getCachedApiUrl, invalidateBackendBaseUrl, isTauriDesktop, resolveApiUrl } from "./apiBase";
+
 export interface SnapshotChangedEvent {
   runId: string;
   version: string;
@@ -27,6 +29,8 @@ export interface RuntimeEventsStatus {
 let enabled = false;
 let connected = false;
 let hadConnectionOrError = false;
+let connecting = false;
+let connectionGeneration = 0;
 let source: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -61,6 +65,8 @@ function scheduleRetry(): void {
 }
 
 function closeConnection(): void {
+  connectionGeneration++;
+  connecting = false;
   connected = false;
   clearRetry();
   if (source) {
@@ -69,12 +75,9 @@ function closeConnection(): void {
   }
 }
 
-function ensureConnection(): void {
-  if (!enabled || source || !hasSubscribers() || typeof EventSource === "undefined") {
-    return;
-  }
+function openEventSource(url: string): void {
   try {
-    const es = new EventSource("/api/events");
+    const es = new EventSource(url);
     source = es;
     es.onopen = () => {
       if (source !== es) return;
@@ -90,7 +93,15 @@ function ensureConnection(): void {
       connected = false;
       // Pollers suspend while connected; a failed push channel must resume them.
       notifyStatus({ connected: false, reconnected: false });
-      if (es.readyState === EventSource.CLOSED) {
+      if (isTauriDesktop()) {
+        // In Tauri desktop mode, the dynamic sidecar may have exited or rotated
+        // ports. Close this EventSource, invalidate the cached URL, and re-check
+        // `backend_url` on retry rather than polling a dead port forever.
+        source = null;
+        es.close();
+        invalidateBackendBaseUrl();
+        scheduleRetry();
+      } else if (es.readyState === EventSource.CLOSED) {
         source = null;
         scheduleRetry();
       }
@@ -125,8 +136,46 @@ function ensureConnection(): void {
       } catch {}
     });
   } catch {
-    closeConnection();
+    if (isTauriDesktop()) {
+      source = null;
+      hadConnectionOrError = true;
+      connected = false;
+      invalidateBackendBaseUrl();
+      notifyStatus({ connected: false, reconnected: false });
+      scheduleRetry();
+    } else {
+      closeConnection();
+    }
   }
+}
+
+function ensureConnection(): void {
+  if (!enabled || source || connecting || !hasSubscribers() || typeof EventSource === "undefined") {
+    return;
+  }
+  const syncUrl = getCachedApiUrl("/api/events");
+  if (syncUrl !== null) {
+    openEventSource(syncUrl);
+    return;
+  }
+  connecting = true;
+  const generation = ++connectionGeneration;
+  void resolveApiUrl("/api/events").then(
+    url => {
+      if (generation !== connectionGeneration) return;
+      connecting = false;
+      if (!enabled || source || !hasSubscribers() || typeof EventSource === "undefined") return;
+      openEventSource(url);
+    },
+    () => {
+      if (generation !== connectionGeneration) return;
+      connecting = false;
+      hadConnectionOrError = true;
+      connected = false;
+      notifyStatus({ connected: false, reconnected: false });
+      scheduleRetry();
+    },
+  );
 }
 
 /** Enable the live SSE notification stream once the Rust backend advertises support. */

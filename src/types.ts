@@ -222,6 +222,14 @@ export interface ConversationSummary {
   hasActiveExecutions?: boolean;
 }
 
+export interface HostPreflight {
+  gitAvailable: boolean;
+  gitPath?: string | null;
+  gitError?: string | null;
+  xcodeCltMissing?: boolean;
+  platform?: string;
+}
+
 export interface Bootstrap {
   /** Omitted on settings saves or when the index is unavailable. */
   conversations?: ConversationSummary[];
@@ -233,6 +241,7 @@ export interface Bootstrap {
   repositoryInfo?: RepositoryInfo | null;
   effectiveRoleModels?: Record<string, string>;
   envOverrides?: Record<string, string>;
+  hostPreflight?: HostPreflight | null;
 }
 
 export const MIN_MAX_PARALLEL = 2;

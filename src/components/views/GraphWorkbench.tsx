@@ -26,6 +26,7 @@ import { NodeTaskCard } from "./NodeTaskCard";
 import { CreateNodeForm } from "./CreateNodeForm";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
+import { getDesktopTitlebarInset } from "../../services/apiBase";
 import { deduceRouteType, shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, localMessagesAfterEdit, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
@@ -3631,8 +3632,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
       {graphMenu && createPortal(
         <div className="context-menu" role="menu" style={{
-          left: Math.max(0, Math.min(graphMenu.x, window.innerWidth - 180)),
-          top: Math.max(0, Math.min(graphMenu.y, window.innerHeight - 50)),
+          left: Math.max(8, Math.min(graphMenu.x, window.innerWidth - 180)),
+          top: Math.max(getDesktopTitlebarInset() + 8, Math.min(graphMenu.y, window.innerHeight - 50)),
         }} onClick={event => event.stopPropagation()}>
           <button type="button" role="menuitem" className="context-menu-item"
             disabled={!state.runId || state.runId.startsWith("pending-") || locked || isPlanning || publishing || publicationFailed

@@ -100,15 +100,17 @@ pub(super) fn resolve_repo_path(
         return PathBuf::from(repo.path);
     }
     // 当进程在子目录（如 backend/）执行时，通过 git rev-parse 向上查找仓库根目录
-    if let Ok(output) = std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .output()
-    {
-        if output.status.success() {
-            let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !toplevel.is_empty() {
-                return PathBuf::from(toplevel);
+    if let Ok(git) = crate::native::trusted_git() {
+        if let Ok(output) = std::process::Command::new(git)
+            .arg("rev-parse")
+            .arg("--show-toplevel")
+            .output()
+        {
+            if output.status.success() {
+                let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !toplevel.is_empty() {
+                    return PathBuf::from(toplevel);
+                }
             }
         }
     }
@@ -166,26 +168,28 @@ pub(super) fn collect_files_from_dir(dir: &Path) -> Vec<String> {
     let mut files = Vec::new();
     let is_git = dir.join(".git").exists() || crate::workspace::is_standard_git(dir);
     if is_git {
-        let mut command = std::process::Command::new("git");
-        crate::native::clear_git_environment(&mut command);
-        #[cfg(target_os = "macos")]
-        command.args(["-c", "core.precomposeunicode=false"]);
-        if let Ok(output) = command
-            .arg("ls-files")
-            .arg("-z")
-            .arg("--cached")
-            .arg("--others")
-            .arg("--exclude-standard")
-            .current_dir(dir)
-            .output()
-        {
-            if output.status.success() {
-                for entry in output.stdout.split(|byte| *byte == 0) {
-                    let Ok(path) = std::str::from_utf8(entry) else {
-                        continue;
-                    };
-                    if !path.is_empty() && !is_excluded_project_path(path) {
-                        files.push(path.to_string());
+        if let Ok(git) = crate::native::trusted_git() {
+            let mut command = std::process::Command::new(git);
+            crate::native::clear_git_environment(&mut command);
+            #[cfg(target_os = "macos")]
+            command.args(["-c", "core.precomposeunicode=false"]);
+            if let Ok(output) = command
+                .arg("ls-files")
+                .arg("-z")
+                .arg("--cached")
+                .arg("--others")
+                .arg("--exclude-standard")
+                .current_dir(dir)
+                .output()
+            {
+                if output.status.success() {
+                    for entry in output.stdout.split(|byte| *byte == 0) {
+                        let Ok(path) = std::str::from_utf8(entry) else {
+                            continue;
+                        };
+                        if !path.is_empty() && !is_excluded_project_path(path) {
+                            files.push(path.to_string());
+                        }
                     }
                 }
             }

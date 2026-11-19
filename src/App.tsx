@@ -1,11 +1,11 @@
 import { t, localizeError } from "./i18n";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot, normalizeMaxFeedback, normalizeMaxParallel,
-  type Config, type Graph, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
+  type Config, type Graph, type HostPreflight, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType,
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
@@ -15,6 +15,20 @@ import {
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
 import { RunNotFoundError, runtimeService } from "./services/runtime";
+import {
+  getGitBootstrapStatus,
+  retryGitBootstrap,
+  type GitBootstrapStatus,
+} from "./services/gitBootstrap";
+import {
+  DesktopBackendError,
+  getDesktopBackendState,
+  invalidateBackendBaseUrl,
+  resolveBackendBaseUrl,
+  subscribeDesktopBackendState,
+} from "./services/apiBase";
+import { DesktopTitlebar, useDesktopTitlebar } from "./components/layout/DesktopTitlebar";
+import { enableRuntimeEvents } from "./services/runtimeEvents";
 import { invalidateTranscriptCaches } from "./services/transcriptCache";
 import { providerAuth } from "./services/providerAuth";
 import { ComposerModels, type ComposerScope } from "./services/composerCommands";
@@ -52,7 +66,9 @@ import { ComposerDrafts } from "./services/composerDrafts";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
+import { useAppUpdater } from "./hooks/useAppUpdater";
 import { Sidebar } from "./components/layout/Sidebar";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { bindRunToWorkspace, normalizeWorkspacePath, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
@@ -157,6 +173,15 @@ export default function App() {
   }, [selected]);
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
+  const [hostPreflight, setHostPreflight] = useState<HostPreflight | null>(null);
+  const [recheckingHostPreflight, setRecheckingHostPreflight] = useState(false);
+  const [gitBootstrap, setGitBootstrap] = useState<GitBootstrapStatus | null>(null);
+  const desktopBackend = useSyncExternalStore(
+    subscribeDesktopBackendState,
+    getDesktopBackendState,
+    getDesktopBackendState,
+  );
+  const updater = useAppUpdater({ scheduleStartupCheck: true });
   // The backend withholds size warnings until every active Run in this
   // workspace has drained, including background conversations/publication.
   // Depend on the warning value, not each poll, so dismissing it stays dismissed.
@@ -805,6 +830,7 @@ export default function App() {
     }
     if (!planningRecovery.current(scope)) return;
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
+    if (data.hostPreflight !== undefined) setHostPreflight(data.hostPreflight ?? null);
 
     const rawProjects = readStorageJson(STORAGE_KEYS.projects);
     const storedProjects = Array.isArray(rawProjects)
@@ -2619,12 +2645,74 @@ export default function App() {
     try {
       await load();
     } catch (err) {
-      setError(String(err));
+      setError(err instanceof DesktopBackendError ? err.message : String(err));
     } finally {
       setIsSidebarReady(true);
     }
   }, [load]);
   useEffect(() => { void initialize(); }, [initialize]);
+
+  const retryDesktopBackend = useCallback(async () => {
+    invalidateBackendBaseUrl();
+    setError("");
+    if (!isBootstrapReady) {
+      await initialize();
+      return;
+    }
+    try {
+      await resolveBackendBaseUrl({ forceRefresh: true });
+      enableRuntimeEvents();
+    } catch (err) {
+      setError(err instanceof DesktopBackendError ? err.message : String(err));
+    }
+  }, [initialize, isBootstrapReady]);
+
+  const recheckHostPreflight = useCallback(async () => {
+    setRecheckingHostPreflight(true);
+    try {
+      const next = await runtimeService.hostPreflight();
+      setHostPreflight(next);
+    } catch (err) {
+      setError(err instanceof DesktopBackendError ? err.message : String(err));
+    } finally {
+      setRecheckingHostPreflight(false);
+    }
+  }, []);
+
+  const handleRetryGitBootstrap = useCallback(async () => {
+    const next = await retryGitBootstrap();
+    if (next) {
+      setGitBootstrap(next);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!desktopBackend.isDesktop || !hostPreflight || hostPreflight.gitAvailable) {
+      setGitBootstrap(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      const status = await getGitBootstrapStatus();
+      if (cancelled || !status) return;
+      setGitBootstrap(status);
+      if (status.phase === "ready") {
+        await recheckHostPreflight();
+        return;
+      }
+      if (status.phase === "downloading") {
+        timer = setTimeout(() => {
+          void poll();
+        }, 1500);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [desktopBackend.isDesktop, hostPreflight?.gitAvailable, recheckHostPreflight]);
 
   const hasCurrentPlan = hasCurrentPlanningRun(state, config.repository);
 
@@ -3024,16 +3112,29 @@ export default function App() {
     })();
   });
 
+  const desktopTitlebar = useDesktopTitlebar();
+  const isMacosDesktop = desktopTitlebar.platform === "macos";
+  const isWindowsDesktop = desktopTitlebar.platform === "windows";
+
   return (
     <ComposerModels.Provider value={{ config, snapshot: state, envOverrides, save: saveComposerModels, rename: renameComposerConversation }}>
-    <div className={`app-background-root ${showLandingView ? "landing-active" : ""}`}>
+    <div className={`app-background-root ${showLandingView ? "landing-active" : ""}${desktopTitlebar.visible ? " has-desktop-titlebar" : ""}`}>
+      {desktopTitlebar.visible && desktopTitlebar.platform && (
+        <DesktopTitlebar
+          platform={desktopTitlebar.platform}
+          isMaximized={desktopTitlebar.isMaximized}
+          onMinimize={desktopTitlebar.onMinimize}
+          onToggleMaximize={desktopTitlebar.onToggleMaximize}
+          onClose={desktopTitlebar.onClose}
+        />
+      )}
       <FloatingPathsBackground
         className="aspect-16/9 flex items-center justify-center"
         position={-1}
         active={showLandingView && !modal && !confirmModal}
         background={landingBackground}
       >
-        <div className={`app-shell ${showLandingView ? "landing-active" : ""} ${landingBackground === "dots" ? "dots-active" : ""}`}>
+        <div className={`app-shell ${showLandingView ? "landing-active" : ""} ${landingBackground === "dots" ? "dots-active" : ""}${isMacosDesktop ? " is-tauri-macos" : ""}${isWindowsDesktop ? " is-tauri-windows" : ""}`}>
           <Sidebar
             projects={projects}
             activeRepo={config.repository}
@@ -3057,11 +3158,73 @@ export default function App() {
             onNewConversation={actions.newConversation}
             onOpenSettings={actions.openSettings}
             isSettingsOpen={modal === "settings"}
+            hasUpdateAvailable={
+              updater.snapshot.supported &&
+              (updater.snapshot.status === "available" ||
+                updater.snapshot.status === "ready-to-restart")
+            }
           />
 
           <main className="main">
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
+              {desktopBackend.isDesktop && modal !== "settings" && (desktopBackend.phase === "connecting" || desktopBackend.phase === "error") && (
+                <div
+                  className={`workbench-module-status desktop-backend-status${desktopBackend.phase === "error" ? " is-error" : ""}`}
+                  role={desktopBackend.phase === "error" ? "alert" : "status"}
+                  data-testid="desktop-backend-status"
+                  data-phase={desktopBackend.phase}
+                >
+                  <span className="desktop-backend-status-text">
+                    {desktopBackend.phase === "error"
+                      ? localizeError(desktopBackend.error || t("无法连接桌面后端服务，请重试或重启应用。"))
+                      : t("正在连接桌面后端…")}
+                  </span>
+                  {desktopBackend.phase === "error" && (
+                    <button
+                      type="button"
+                      className="desktop-backend-retry"
+                      onClick={() => void retryDesktopBackend()}
+                    >
+                      {t("重试")}
+                    </button>
+                  )}
+                </div>
+              )}
+              {hostPreflight && !hostPreflight.gitAvailable && modal !== "settings" && (
+                <div
+                  className={`workbench-module-status desktop-backend-status${gitBootstrap?.phase === "downloading" ? "" : " is-error"}`}
+                  role={gitBootstrap?.phase === "downloading" ? "status" : "alert"}
+                  data-testid="host-preflight-status"
+                >
+                  <span className="desktop-backend-status-text">
+                    {gitBootstrap?.phase === "downloading"
+                      ? t("正在自动下载并配置 Git 运行时，请稍候…")
+                      : gitBootstrap?.phase === "failed"
+                        ? t("自动下载 Git 失败：{0}。请检查网络后重试，或手动安装 Git 后重新检查。", gitBootstrap.error || t("未知错误"))
+                        : (hostPreflight.gitError || t("未检测到可用的 Git，请先安装 Git 或 Xcode Command Line Tools（macOS：`xcode-select --install`）后重新检查。"))}
+                  </span>
+                  {gitBootstrap?.phase === "failed" && (
+                    <button
+                      type="button"
+                      className="desktop-backend-retry"
+                      onClick={() => void handleRetryGitBootstrap()}
+                    >
+                      {t("重试下载")}
+                    </button>
+                  )}
+                  {gitBootstrap?.phase !== "downloading" && (
+                    <button
+                      type="button"
+                      className="desktop-backend-retry"
+                      disabled={recheckingHostPreflight}
+                      onClick={() => void recheckHostPreflight()}
+                    >
+                      {recheckingHostPreflight ? t("正在检查…") : t("重新检查")}
+                    </button>
+                  )}
+                </div>
+              )}
               {waitingForConversation && showWorkbenchLoadStatus && modal !== "settings" && (
                 <div className={`workbench-module-status${workbenchLoadFailed ? " is-error" : ""}`}
                   role={workbenchLoadFailed ? "alert" : "status"}>
@@ -3070,10 +3233,24 @@ export default function App() {
                     : t("正在加载对话界面…")}</span>
                 </div>
               )}
+              <UpdateBanner
+                snapshot={updater.snapshot}
+                hidden={modal === "settings"}
+                onOpenSettings={actions.openSettings}
+                onInstallAndRestart={() => void updater.installAndRestart()}
+                onCancelDownload={updater.cancelDownload}
+                onRestart={() => void updater.restartApp()}
+                onDismiss={updater.dismissBanner}
+              />
               <AnimatePresence>
                 {/* Settings owns its own save/language/auth errors; unrelated
                     application failures must not float over the modal. */}
-                {error && modal !== "settings" && (
+                {error && modal !== "settings" && !(
+                  desktopBackend.isDesktop &&
+                  desktopBackend.phase === "error" &&
+                  desktopBackend.error &&
+                  (error === desktopBackend.error || error === `Error: ${desktopBackend.error}` || error === `DesktopBackendError: ${desktopBackend.error}`)
+                ) && (
                   <motion.div
                     key="floating-error-banner"
                     className="floating-error-banner"

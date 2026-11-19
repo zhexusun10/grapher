@@ -155,17 +155,89 @@ h3 {
   background: transparent;
 }
 
+/* Independent desktop titlebar strip (macOS overlay & Windows borderless):
+   sits above the background/app-shell in flex flow so the landing background
+   starts cleanly below it rather than being clipped or covered, and collapses
+   automatically in fullscreen. Browser mode is unaffected. */
+.desktop-titlebar {
+  flex: 0 0 var(--desktop-titlebar-inset, 30px);
+  height: var(--desktop-titlebar-inset, 30px);
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-canvas);
+  border: 0;
+  position: relative;
+  z-index: 15;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.desktop-titlebar-drag-region {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+  border: 0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.desktop-window-controls {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  height: 100%;
+}
+
+.desktop-window-control {
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.desktop-window-control:hover {
+  filter: none;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-primary);
+}
+
+.desktop-window-control:active {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.desktop-window-control.is-close:hover {
+  background: #E81123;
+  color: #FFFFFF;
+}
+
+.desktop-window-control.is-close:active {
+  background: #C50F1F;
+  color: #FFFFFF;
+}
+
 .app-background-root {
   width: 100%;
   height: 100dvh;
   min-height: 0;
   overflow: clip;
-  background: #FFFFFF;
+  background: var(--bg-canvas);
+  display: flex;
+  flex-direction: column;
 }
 
 .app-background-root>.w-full {
   width: 100%;
-  height: 100%;
+  flex: 1 1 0%;
+  min-height: 0;
 }
 
 .app-background-root>.relative {
@@ -666,10 +738,6 @@ h3 {
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
 }
 
-.project-workspace-item.active .proj-name-row strong {
-  font-weight: 600;
-}
-
 .proj-icon {
   display: flex;
   align-items: center;
@@ -748,7 +816,7 @@ h3 {
   box-sizing: border-box;
   min-width: min(150px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
-  max-height: calc(100dvh - 16px);
+  max-height: calc(100dvh - var(--desktop-titlebar-inset, 0px) - 16px);
   overflow: auto;
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
@@ -838,7 +906,7 @@ h3 {
   background: var(--bg-overlay, rgba(15, 23, 42, 0.45));
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  padding: 24px;
+  padding: max(24px, calc(var(--desktop-titlebar-inset, 0px) + 16px)) 24px 24px;
 }
 
 .confirm-dialog {
@@ -846,7 +914,7 @@ h3 {
   transform: translateZ(0);
   width: 480px;
   max-width: 100%;
-  max-height: calc(100dvh - 48px);
+  max-height: calc(100dvh - var(--desktop-titlebar-inset, 0px) - 48px);
   overflow: auto;
   overscroll-behavior: contain;
   background: var(--bg-canvas);
@@ -1273,7 +1341,6 @@ h3 {
 
 .run-item.chosen .run-title-text {
   color: var(--text-primary);
-  font-weight: 600;
 }
 
 .run-title-text {
@@ -1439,6 +1506,27 @@ h3 {
 
 .sidebar-bottom-btn svg {
   flex-shrink: 0;
+}
+
+.sidebar-update-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--brand-default);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sidebar.is-collapsed .sidebar-bottom-btn {
+  position: relative;
+}
+
+.sidebar.is-collapsed .sidebar-update-dot {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  margin-left: 0;
 }
 
 .sidebar-bottom>p {

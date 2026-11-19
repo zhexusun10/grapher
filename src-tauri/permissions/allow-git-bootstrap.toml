@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-git-bootstrap"
+description = "Allows the main window to query and retry automatic on-demand Git setup."
+commands.allow = ["git_bootstrap_status", "retry_git_bootstrap"]

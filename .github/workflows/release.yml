@@ -6,12 +6,13 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-release:
-    name: Build and smoke-test release
+    name: Build and smoke-test release archive (${{ matrix.platform }}-${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +53,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           node scripts/patch-picomatch.mjs
-      - name: Verify release launcher scripts
+      - name: Verify release launcher and manifest contracts
         run: npm run test:release
       - name: Install and build Pi
         run: npm run pi:setup
@@ -72,13 +73,238 @@ jobs:
           path: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
+          if-no-files-found: error
+
+  build-desktop:
+    name: Build desktop installer (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos
+            target: macos-arm64
+          - os: macos-15-intel
+            platform: macos
+            target: macos-x64
+          - os: windows-latest
+            platform: windows
+            target: windows-x64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.platform == 'windows' && 'stable-x86_64-pc-windows-msvc' || 'stable' }}
+      - name: Install Node dependencies
+        run: |
+          npm ci --ignore-scripts
+          node scripts/patch-picomatch.mjs
+      - name: Verify desktop packaging, signing, and updater manifest contracts
+        run: node --test scripts/desktop-packaging.test.mjs scripts/desktop-updater-manifest.test.mjs scripts/desktop-signing.test.mjs
+      - name: Preflight desktop signing configuration
+        shell: bash
+        env:
+          DESKTOP_TARGET: ${{ matrix.target }}
+          GRAPHER_UPDATER_PUBKEY: ${{ vars.GRAPHER_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          node scripts/desktop-signing.mjs check \
+            --target "$DESKTOP_TARGET" \
+            --tauri-conf src-tauri/tauri.conf.json
+      - name: Verify Tauri desktop shell unit tests
+        run: node scripts/cargo.mjs test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Install and build Pi
+        run: npm run pi:setup
+      - name: Configure optional macOS signing and notarization credentials
+        id: macos-signing
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            CERT_PATH="${RUNNER_TEMP}/grapher-signing-cert.p12"
+            KEYCHAIN_PATH="${RUNNER_TEMP}/grapher-signing.keychain-db"
+            KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+            CERT_PATH="$CERT_PATH" node --input-type=module -e "
+              import { writeFileSync } from 'node:fs';
+              const raw = (process.env.APPLE_CERTIFICATE || '').replace(/\s+/g, '');
+              writeFileSync(process.env.CERT_PATH, Buffer.from(raw, 'base64'), { mode: 0o600 });
+            "
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            existing_keychains=()
+            while IFS= read -r kc; do
+              kc="${kc#"${kc%%[![:space:]]*}"}"
+              kc="${kc%\"}"
+              kc="${kc#\"}"
+              [ -n "$kc" ] && existing_keychains+=("$kc")
+            done < <(security list-keychains -d user)
+            security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing_keychains[@]}"
+            rm -f "$CERT_PATH"
+            echo "GRAPHER_MACOS_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+            echo "signing_ready=true" >> "$GITHUB_OUTPUT"
+            echo "Configured temporary macOS signing keychain for Developer ID signing."
+          else
+            echo "signing_ready=false" >> "$GITHUB_OUTPUT"
+            echo "Optional macOS Developer ID certificate secrets are not configured; continuing with ad-hoc inside-out signing."
+          fi
+
+          if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_P8:-}" ]; then
+            NOTARY_KEY_PATH="${RUNNER_TEMP}/apple-notary-key.p8"
+            NOTARY_KEY_PATH="$NOTARY_KEY_PATH" node --input-type=module -e "
+              import { writeFileSync } from 'node:fs';
+              const raw = (process.env.APPLE_API_KEY_P8 || '').trim();
+              const bytes = raw.includes('-----BEGIN')
+                ? Buffer.from(raw + '\n', 'utf8')
+                : Buffer.from(raw.replace(/\s+/g, ''), 'base64');
+              writeFileSync(process.env.NOTARY_KEY_PATH, bytes, { mode: 0o600 });
+            "
+            echo "APPLE_API_KEY_PATH=$NOTARY_KEY_PATH" >> "$GITHUB_ENV"
+            echo "Configured temporary App Store Connect API key for macOS notarization."
+          fi
+      - name: Configure optional Windows Authenticode signing credentials
+        id: windows-signing
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_SIGN_COMMAND -and $env:WINDOWS_SIGN_COMMAND.Trim()) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_ready=true"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_mode=sign-command"
+            Write-Host "Configured optional Windows Authenticode signing via custom WINDOWS_SIGN_COMMAND."
+          } elseif ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE.Trim() -and $env:WINDOWS_CERTIFICATE_PASSWORD -and $env:WINDOWS_CERTIFICATE_PASSWORD.Trim()) {
+            $pfxPath = Join-Path $env:RUNNER_TEMP "grapher-signing-cert.pfx"
+            try {
+              $raw = ($env:WINDOWS_CERTIFICATE -replace '\s+', '')
+              [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($raw))
+              $securePw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+              $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+              $thumbprint = $cert.Thumbprint.ToUpperInvariant()
+              Add-Content -Path $env:GITHUB_ENV -Value "WINDOWS_CERTIFICATE_THUMBPRINT=$thumbprint"
+              Add-Content -Path $env:GITHUB_ENV -Value "GRAPHER_IMPORTED_WINDOWS_CERT_THUMBPRINT=$thumbprint"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_ready=true"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_mode=pfx"
+              $preview = "$($thumbprint.Substring(0, 8))...$($thumbprint.Substring($thumbprint.Length - 4))"
+              Write-Host "Imported temporary Windows Authenticode certificate into CurrentUser\My ($preview)."
+            } finally {
+              if (Test-Path $pfxPath) { Remove-Item -Force $pfxPath }
+            }
+          } elseif ($env:WINDOWS_CERTIFICATE_THUMBPRINT -and $env:WINDOWS_CERTIFICATE_THUMBPRINT.Trim()) {
+            $thumbprint = ($env:WINDOWS_CERTIFICATE_THUMBPRINT -replace '[\s:]+', '').ToUpperInvariant()
+            Add-Content -Path $env:GITHUB_ENV -Value "WINDOWS_CERTIFICATE_THUMBPRINT=$thumbprint"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_ready=true"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_mode=thumbprint"
+            Write-Host "Using configured WINDOWS_CERTIFICATE_THUMBPRINT for Windows Authenticode signing."
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_ready=false"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signing_mode=unsigned"
+            Write-Host "Optional Windows Authenticode secrets are not configured; continuing with unsigned NSIS installer (SmartScreen warnings expected)."
+          }
+      - name: Stage runtime and build Tauri desktop installer
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          DESKTOP_TARGET: ${{ matrix.target }}
+          GRAPHER_UPDATER_PUBKEY: ${{ vars.GRAPHER_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.macos-signing.outputs.signing_ready == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_SIGN_COMMAND: ${{ steps.windows-signing.outputs.signing_mode == 'sign-command' && secrets.WINDOWS_SIGN_COMMAND || '' }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          node scripts/desktop-build.mjs \
+            --target "$DESKTOP_TARGET" \
+            --verify-tag "$RELEASE_TAG" \
+            --output-dir desktop-dist
+      - name: Clean up temporary macOS signing material
+        if: always() && matrix.platform == 'macos'
+        shell: bash
+        run: |
+          if [ -n "${GRAPHER_MACOS_KEYCHAIN:-}" ]; then
+            security delete-keychain "$GRAPHER_MACOS_KEYCHAIN" 2>/dev/null || true
+          fi
+          rm -f "${RUNNER_TEMP}/grapher-signing-cert.p12" "${RUNNER_TEMP}/apple-notary-key.p8"
+      - name: Clean up temporary Windows signing material
+        if: always() && matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "grapher-signing-cert.pfx"
+          if (Test-Path $pfxPath) {
+            Remove-Item -Force $pfxPath -ErrorAction SilentlyContinue
+          }
+          if ($env:GRAPHER_IMPORTED_WINDOWS_CERT_THUMBPRINT) {
+            $certPath = "Cert:\CurrentUser\My\$($env:GRAPHER_IMPORTED_WINDOWS_CERT_THUMBPRINT)"
+            if (Test-Path $certPath) {
+              Remove-Item -Force $certPath -ErrorAction SilentlyContinue
+            }
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: desktop-${{ matrix.target }}
+          path: desktop-dist/*
+          if-no-files-found: error
 
   create-release:
     name: Create GitHub Release draft
-    needs: build-release
+    needs:
+      - build-release
+      - build-desktop
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
       - uses: actions/download-artifact@v7
         with:
           path: release-assets
@@ -87,7 +313,40 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          printf '# Grapher %s\n\nSee CHANGELOG.md for changes. Download the archive for your platform and verify its SHA256 checksum.\n' "$RELEASE_TAG" > release-notes.md
+          cat <<EOF > release-notes.md
+          # Grapher ${RELEASE_TAG}
+
+          See CHANGELOG.md for changes.
+
+          - **Desktop installers**: Download the macOS Apple Silicon (\`aarch64.dmg\`), macOS Intel (\`x64.dmg\`), or Windows x64 (\`x64-setup.exe\`) installer (includes the bundled Rust backend, pinned Pi/engine runtime, and Node.js runtime).
+          - **Relocatable archives**: Download the \`grapher-*.tar.gz\` / \`grapher-*.zip\` archive for CLI/browser usage (requires Node.js 22.19+ and Git on \`PATH\`).
+          - Verify downloaded files with their accompanying \`.sha256\` checksums.
+          EOF
+      - name: Generate and verify Tauri updater manifest (latest.json) when signed artifacts exist
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GRAPHER_UPDATER_PUBKEY: ${{ vars.GRAPHER_UPDATER_PUBKEY }}
+        run: |
+          set -euo pipefail
+          node scripts/desktop-updater-manifest.mjs \
+            --assets-dir release-assets \
+            --output release-assets/latest.json \
+            --tag "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --tauri-conf src-tauri/tauri.conf.json \
+            --require-pubkey \
+            --require-all-when-signed \
+            --changelog CHANGELOG.md \
+            --notes-file release-notes.md
+          if [ -f release-assets/latest.json ]; then
+            node scripts/desktop-signing.mjs verify-manifest \
+              --manifest release-assets/latest.json \
+              --assets-dir release-assets \
+              --tauri-conf src-tauri/tauri.conf.json \
+              --tag "$RELEASE_TAG" \
+              --require-all
+          fi
       - name: Create or refresh unpublished release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

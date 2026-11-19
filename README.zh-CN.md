@@ -133,16 +133,29 @@ Partitioner
 
 ## 快速开始
 
-### 方式一：下载免编译发布包（最快 — 无需安装 Rust 和 npm）
+### 方式一：下载原生桌面端安装包（推荐 — macOS 与 Windows）
 
-直接下载最新[发布包（Release Archive）](https://github.com/zhexusun10/grapher/releases/latest)，校验 `.sha256` 后解压运行：
+从 [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) 下载对应平台的原生安装包，并校验 `.sha256` 校验和：
+
+- **macOS（Apple Silicon）：** `Grapher_<version>_aarch64.dmg`（将 `Grapher.app` 拖入「应用程序」）
+- **macOS（Intel）：** `Grapher_<version>_x64.dmg`（将 `Grapher.app` 拖入「应用程序」）
+- **Windows（x64）：** `Grapher_<version>_x64-setup.exe`（当前用户 NSIS 安装程序）
+
+桌面端已内置编译好的 Rust 后端、锁定的 Pi/Engine 运行时以及私有 Node.js `22.19.0`，无需单独安装 Node.js、npm、Rust 或手动安装 Git（若本机未检测到可用 Git，首次启动会自动按需下载校验后的便携版 Git）。
+
+- **数据目录与迁移：** 桌面端持久化数据默认保存在系统应用数据目录（macOS 为 `~/Library/Application Support/io.github.zhexusun10.grapher/data`，Windows 为 `%APPDATA%\io.github.zhexusun10.grapher\data`），模型服务商登录凭据继续共享 `~/.grapher/pi-agent`。首次启动且目标目录尚不存在时，若检测到旧版 `.grapher` 数据（或通过 `GRAPHER_LEGACY_DATA_DIR` 指定），会在独占锁保护下原子复制，且**完整保留**旧版源目录。
+- **应用内更新：** 已签名的发布版本可在 **设置 → 应用更新** 中进行签名校验后的自动更新（macOS 原地替换 `Grapher.app` 并自动重启；Windows 交由已签名的 NSIS 安装程序自动完成更新与重启）。未签名的本地/CI 构建可正常启动并引导前往 GitHub Releases 手动下载安装包；完整能力矩阵与密钥说明见[桌面端发布与密钥指南](docs/development/desktop-releases.md#updater--install-capability-matrix)。
+
+### 方式二：下载 CLI / 浏览器免编译发布包（macOS、Linux 与 Windows）
+
+下载最新可重定位[发布包（Release Archive）](https://github.com/zhexusun10/grapher/releases/latest)（`grapher-*.tar.gz` 或 `grapher-windows-x64.zip`），校验 `.sha256` 后解压运行：
 
 - **Windows：** 双击或运行 `start.bat`
 - **macOS / Linux：** 运行 `./start.sh`
 
-*（运行时仅需 Node.js 22.19+ 与 Git。）*
+*（运行时需在 `PATH` 中具备 Node.js 22.19+ 与 Git。）*
 
-### 方式二：从源码运行
+### 方式三：从源码运行或构建桌面端
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -152,7 +165,9 @@ npm run dev
 
 `npm run dev` 会自动检查环境工具、初始化锁定的 `pi/` 子模块、安装依赖并编译 Rust 后端（如需分步执行，可运行 `npm ci --ignore-scripts` 与 `npm run pi:setup`）。已有克隆仓库请先运行 `git submodule update --init --recursive`。
 
-打开 **<http://127.0.0.1:1420>**（首次启动需等待 Cargo 完成编译）。如需本机生产模式，可执行 `npm run build && npm start` 并访问 <http://127.0.0.1:1421>。
+- **浏览器模式：** `npm run dev` 启动后访问 **<http://127.0.0.1:1420>**；本机生产模式可执行 `npm run build && npm start` 并访问 <http://127.0.0.1:1421>。
+- **桌面端开发模式（Tauri v2）：** 运行 `npm run desktop:dev`。
+- **构建桌面端安装包：** 运行 `npm run desktop:build`（支持按平台指定 `--target macos-arm64`、`macos-x64` 或 `windows-x64`）。发布流程、签名密钥与公私钥配置见 [桌面端发布与密钥指南](docs/development/desktop-releases.md)。
 
 ### 四步跑通你的第一个任务
 
@@ -161,17 +176,17 @@ npm run dev
 3. **观察与实时干预** — Graph 默认自动批准并启动执行（如需先审阅计划，请在提交前关闭 **Auto Approve**）。执行中可随时查看节点日志与文件变更、暂停/继续节点，或直接向节点发送引导指令。
 4. **确认结果写回** — 共享源目录模式直接修改源项目；独立工作区批次在全部成功后自动将有效结果发布回代码库（若发布冲突或失败，会完整保留状态供检查与重试）。
 
-**环境依赖：** Node.js 22.19+、稳定版 Rust（仅源码构建需要）、Git、npm、网络与模型服务商认证。Windows 需安装 Git for Windows Bash；macOS 需安装 Xcode Command Line Tools（用于 Rust 链接），其 Graph 独立工作区使用系统内置 Seatbelt 沙箱，且后端运行期间（包括空闲时）默认保持系统唤醒（可通过 `GRAPHER_KEEP_AWAKE=0` 关闭）；Linux Graph 独立工作区需安装 `bubblewrap` 并开启非特权 user/mount/PID namespace。
-
-> [!IMPORTANT]
-> **安全与项目边界 — 请在可信项目上使用，首次体验建议先用可丢弃的测试项目。**
-> Planner 的 Bash 命令会在计划审批前直接在源项目中执行，拒绝或取消计划**不会**回滚这些写入；Git 快照会强制收集除 Runtime/托管环境内部目录以外的项目文件（包括匹配 `.gitignore` 的路径）。Windows 工作区不是文件系统沙箱。在重要代码库上运行前，请阅读[审批前须知](docs/user-guide.md#before-you-approve)与[文件系统边界](docs/architecture/filesystem-isolation.md)。
+**环境依赖：**
+- **桌面端安装包：** 网络与模型服务商认证。Node.js 22.19.0 与锁定的 Pi 运行时已随安装包内置；若本机缺少 Git，首次启动会自动按需下载。
+- **发布包与源码构建：** Node.js 22.19+、Git、npm；源码构建另需稳定版 Rust 与本机编译链接工具（macOS 需 Xcode Command Line Tools；Windows 需 MSVC Build Tools）。
+- **平台说明：** macOS Graph 独立工作区使用系统内置 Seatbelt 沙箱，且后端运行期间（包括空闲时）默认保持系统唤醒（可通过 `GRAPHER_KEEP_AWAKE=0` 关闭）；Linux Graph 独立工作区需安装 `bubblewrap` 并开启非特权 user/mount/PID namespace；Windows 工作区不是文件系统沙箱。
 
 ## 文档与资源
 
 | 文档 | 内容概览 |
 | --- | --- |
-| **[使用指南（User Guide）](docs/user-guide.md)** | 日常操作流程、节点干预、工作区模式、异常恢复与安全须知 |
+| **[使用指南（User Guide）](docs/user-guide.md)** | 日常操作流程、节点干预、工作区模式、数据迁移、异常恢复与安全须知 |
+| **[桌面端发布与密钥指南](docs/development/desktop-releases.md)** | Tauri v2 桌面端构建、安装包、更新签名密钥、macOS 签名公证与 CI 发布流水线 |
 | **[架构契约（Architecture Contracts）](docs/architecture/overview.md)** | 系统组件边界、编译器规则、确定性 Runtime 与 Git 工作区交接机制 |
 | **[基准评测（Benchmarks）](docs/benchmarks/harbor.md)** | Harbor 评测框架接入与基准测试方法 |
 | **[贡献指南](CONTRIBUTING.md)** 与 **[测试指南](docs/development/testing.md)** | 开发环境搭建、模块归属边界与按需验证测试套件 |

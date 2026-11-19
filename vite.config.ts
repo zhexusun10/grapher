@@ -3,8 +3,13 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
+const isDesktopDev = Boolean(
+  process.env.TAURI_ENV_PLATFORM || process.env.GRAPHER_DESKTOP_DEV === "1",
+);
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -28,9 +33,9 @@ export default defineConfig({
     },
   },
   server: {
-    host: "127.0.0.1",
+    host: process.env.TAURI_DEV_HOST || "127.0.0.1",
     port: 1420,
-    open: true,
+    open: !isDesktopDev,
     strictPort: true,
     watch: {
       // Editors may truncate before rewriting. Do not cache that temporary
@@ -38,6 +43,7 @@ export default defineConfig({
       awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 20 },
       ignored: [
         "**/backend/**",
+        "**/src-tauri/**",
         "**/target/**",
         "**/.grapher/**",
         "**/.pi/**",

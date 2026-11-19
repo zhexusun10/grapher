@@ -1,6 +1,7 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStableCallback } from "../../hooks/useStableCallback";
+import { getDesktopTitlebarInset } from "../../services/apiBase";
 
 export interface ContextMenuAnchor {
   x: number;
@@ -44,9 +45,10 @@ export function ContextMenu({ anchor, label, onClose, children }: ContextMenuPro
     const place = () => {
       // Measure the layout box, not the scaled entrance animation. Labels and
       // font sizes can make the menu wider than its minimum width.
+      const minTop = getDesktopTitlebarInset() + 8;
       setPosition({
         left: Math.max(8, Math.min(anchor.x, window.innerWidth - menu.offsetWidth - 8)),
-        top: Math.max(8, Math.min(anchor.y, window.innerHeight - menu.offsetHeight - 8)),
+        top: Math.max(minTop, Math.min(anchor.y, window.innerHeight - menu.offsetHeight - 8)),
       });
     };
     place();

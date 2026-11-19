@@ -11,8 +11,8 @@ use std::{
 
 static REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
-fn discovery_command(root: &Path, agent_dir: &Path) -> Command {
-    let mut command = Command::new("node");
+fn discovery_command(root: &Path, agent_dir: &Path) -> Result<Command, String> {
+    let mut command = Command::new(crate::native::trusted_node()?);
     command
         .arg("--import")
         // --import expects a module specifier, not a Windows C:\\ filesystem path.
@@ -26,8 +26,9 @@ fn discovery_command(root: &Path, agent_dir: &Path) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::native::bind_trusted_git(&mut command)?;
     crate::native::bind_baseline_context(&mut command);
-    command
+    Ok(command)
 }
 
 pub fn request(body: Value) -> Result<Value, String> {
@@ -45,7 +46,7 @@ pub fn request(body: Value) -> Result<Value, String> {
         .lock()
         .map_err(|_| "Pi extension lock unavailable")?;
     let root = crate::native::installation_root();
-    let mut command = discovery_command(&root, &crate::native::agent_dir()?);
+    let mut command = discovery_command(&root, &crate::native::agent_dir()?)?;
     crate::process_control::configure_command(&mut command);
     let mut child = command
         .spawn()
@@ -97,6 +98,7 @@ mod tests {
 
     fn run_discovery(root: &Path, own: &Path, global: &Path, body: Value) -> std::process::Output {
         let mut child = discovery_command(root, own)
+            .unwrap()
             .env("GRAPHER_GLOBAL_PI_AGENT_DIR", global)
             .env("GRAPHER_ISOLATED_PI_MODELS", "1")
             .spawn()

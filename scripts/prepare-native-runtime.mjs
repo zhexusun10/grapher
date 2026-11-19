@@ -163,10 +163,11 @@ try {
     filter: process.platform === 'win32' ? () => true : undefined,
   };
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const gitExecutable = process.env.GRAPHER_TRUSTED_GIT || 'git';
   // Independent metadata; never retain the submodule's pointer into source/.git.
   // AppData and Unicode profiles can push Git metadata past MAX_PATH. Enable
   // long paths for the clone itself and persist it for later verification.
-  execFileSync('git', ['-c', 'core.longpaths=true', 'clone', '--config', 'core.longpaths=true', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  execFileSync(gitExecutable, ['-c', 'core.longpaths=true', 'clone', '--config', 'core.longpaths=true', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
   cpSync(join(root, 'engine'), join(destination, 'engine'), {
     ...options,
@@ -185,7 +186,7 @@ try {
   for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
   }
-  execFileSync('git', ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  execFileSync(gitExecutable, ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   execFileSync(process.execPath, [gitPath(join(destination, 'scripts/pi-baseline.mjs')), 'verify'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   process.stdout.write(destination);
 } catch (error) {

@@ -498,6 +498,8 @@ pub struct Bootstrap {
     repository_info: Option<crate::workspace::RepositoryInfo>,
     pub effective_role_models: std::collections::HashMap<String, String>,
     pub env_overrides: std::collections::HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_preflight: Option<crate::native::HostPreflight>,
 }
 
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
@@ -868,6 +870,7 @@ fn bootstrap_projection(
     } else {
         (None, Vec::new())
     };
+    let host_preflight = include_conversations.then(crate::native::host_preflight);
     Ok(Bootstrap {
         snapshot,
         config,
@@ -878,6 +881,7 @@ fn bootstrap_projection(
         repository_info,
         effective_role_models,
         env_overrides,
+        host_preflight,
     })
 }
 
@@ -6195,6 +6199,7 @@ pub fn dispatch(
             to_value(result)
         }
         "environment_capabilities" => to_value(crate::environment::capabilities()),
+        "host_preflight" => to_value(crate::native::host_preflight()),
         "cancel_result" => {
             let run: String = argument(&body, "runId")?;
             Uuid::parse_str(&run).map_err(|_| "Invalid result Run ID")?;
@@ -6634,17 +6639,122 @@ fn api_service(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerOptions {
+    pub emit_ready: bool,
+    pub shutdown_on_stdin_eof: bool,
+    pub allow_desktop_origins: bool,
+}
+
+impl ServerOptions {
+    pub fn desktop_sidecar() -> Self {
+        Self {
+            emit_ready: true,
+            shutdown_on_stdin_eof: true,
+            allow_desktop_origins: true,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let desktop = env_flag("GRAPHER_DESKTOP_SIDECAR");
+        Self {
+            emit_ready: desktop || env_flag("GRAPHER_READY_PROTOCOL"),
+            shutdown_on_stdin_eof: desktop || env_flag("GRAPHER_SHUTDOWN_ON_STDIN_EOF"),
+            allow_desktop_origins: desktop,
+        }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        let trimmed = value.trim();
+        trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+    })
+}
+
+fn bound_server_port(server: &tiny_http::Server) -> Result<u16, String> {
+    server
+        .server_addr()
+        .to_ip()
+        .map(|addr| addr.port())
+        .filter(|&port| port != 0)
+        .ok_or_else(|| "Cannot determine bound HTTP listener port".into())
+}
+
+fn format_ready_line(port: u16, data_dir: &std::path::Path) -> String {
+    serde_json::json!({
+        "type": "grapher_ready",
+        "port": port,
+        "dataDir": crate::native::host_path(data_dir).to_string_lossy(),
+    })
+    .to_string()
+}
+
+fn is_stdin_shutdown_command(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case("shutdown") {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("shutdown"))
+                || value
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|cmd| cmd.eq_ignore_ascii_case("shutdown"))
+        })
+}
+
+fn watch_stdin_for_shutdown<R: BufRead>(mut reader: R) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                if is_stdin_shutdown_command(&line) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 // Host is not an authentication mechanism, but an exact loopback authority
 // check prevents DNS rebinding from using a remote hostname to reach this API.
 fn is_trusted_host(host: &str, backend_port: u16) -> bool {
     host == format!("127.0.0.1:{backend_port}") || host == format!("localhost:{backend_port}")
 }
 
+fn is_tauri_desktop_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    )
+}
+
+#[cfg(test)]
 fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
+    is_trusted_origin_for(origin, backend_port, false)
+}
+
+fn is_trusted_origin_for(
+    origin: &str,
+    backend_port: u16,
+    allow_desktop_origins: bool,
+) -> bool {
     let local = ["localhost", "127.0.0.1"];
     if local.iter().any(|host| {
         origin == format!("http://{host}:{backend_port}") || origin == format!("http://{host}:1420")
     }) {
+        return true;
+    }
+    if allow_desktop_origins && is_tauri_desktop_origin(origin) {
         return true;
     }
     // Opt-in for nonstandard frontends only. Never use this to authorize Host.
@@ -6655,6 +6765,9 @@ fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
 fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
     allowed.split(',').any(|entry| {
         let entry = entry.trim();
+        if entry == "tauri://localhost" {
+            return origin == "tauri://localhost";
+        }
         let authority = entry
             .strip_prefix("http://")
             .or_else(|| entry.strip_prefix("https://"));
@@ -6725,6 +6838,10 @@ fn warm_selected_engines_on_startup(service: &Arc<Service>, stop: &AtomicBool) {
 }
 
 pub fn run() -> Result<(), String> {
+    run_with_options(ServerOptions::from_env())
+}
+
+pub fn run_with_options(options: ServerOptions) -> Result<(), String> {
     use tiny_http::Server;
     load_env_file();
     let configured_root = crate::workspace::data_root();
@@ -6755,11 +6872,14 @@ pub fn run() -> Result<(), String> {
     // Enqueue pending cleanup metadata synchronously before binding, and run
     // actual directory deletions in the background cleanup thread after bind.
     enqueue_recovered_cleanup_tasks(&service)?;
-    let port: u16 = std::env::var("GRAPHER_PORT")
+    let requested_port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
         .parse()
         .map_err(|_| "Invalid GRAPHER_PORT")?;
-    let server = Arc::new(Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?);
+    let server = Arc::new(
+        Server::http(("127.0.0.1", requested_port)).map_err(|error| error.to_string())?,
+    );
+    let bound_port = bound_server_port(&server)?;
     // Hold macOS sleep/screen-saver assertions only after this backend owns its
     // port, so a failed second launch cannot keep the host awake.
     crate::keep_awake::install();
@@ -6814,53 +6934,73 @@ pub fn run() -> Result<(), String> {
             }
         }
     });
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<&'static str>();
+    {
+        let signal_tx = shutdown_tx.clone();
+        thread::Builder::new()
+            .name("grapher-signal-watcher".into())
+            .spawn(move || {
+                #[cfg(unix)]
+                let stop = signals.forever().next().is_some();
+                #[cfg(windows)]
+                let stop = {
+                    while !shutdown_requested.load(Ordering::SeqCst) {
+                        thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    true
+                };
+                if stop {
+                    let _ = signal_tx.send("signal");
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    if options.shutdown_on_stdin_eof {
+        let stdin_tx = shutdown_tx.clone();
+        thread::Builder::new()
+            .name("grapher-stdin-shutdown".into())
+            .spawn(move || {
+                watch_stdin_for_shutdown(BufReader::new(std::io::stdin()));
+                let _ = stdin_tx.send("stdin");
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    drop(shutdown_tx);
     let shutdown_service = service.clone();
     let shutdown_server = server.clone();
     #[cfg(not(feature = "fixture"))]
     let warm_stop = cleanup_stopped.clone();
-    thread::spawn(move || {
-        #[cfg(unix)]
-        let stop = signals.forever().next().is_some();
-        #[cfg(windows)]
-        let stop = {
-            while !shutdown_requested.load(Ordering::SeqCst) {
-                thread::sleep(std::time::Duration::from_millis(50));
-            }
-            true
-        };
-        if stop {
-            cleanup_stopped.store(true, Ordering::SeqCst);
-            crate::provider_auth::begin_shutdown();
-            crate::native::begin_shutdown();
-            #[cfg(not(feature = "fixture"))]
-            crate::engine::stop_partition_prewarm();
-            crate::engine::stop_lingering();
-            if let Ok(mut runtime) = shutdown_service.runtime.lock() {
-                if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
-                    let _ = runtime.emit(EventKind::PublicationFailed {
-                        error: "Backend stopped during publication; inspect and retry publication."
-                            .into(),
-                    });
-                } else if runtime.state.approved
-                    && (runtime.active() || runtime.state.phase == "running")
-                {
-                    let _ = runtime.emit(EventKind::Paused { paused: true });
+    let shutdown_handle = thread::Builder::new()
+        .name("grapher-shutdown".into())
+        .spawn(move || {
+            if shutdown_rx.recv().is_ok() {
+                cleanup_stopped.store(true, Ordering::SeqCst);
+                crate::provider_auth::begin_shutdown();
+                crate::native::begin_shutdown();
+                #[cfg(not(feature = "fixture"))]
+                crate::engine::stop_partition_prewarm();
+                crate::engine::stop_lingering();
+                if let Ok(mut runtime) = shutdown_service.runtime.lock() {
+                    if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+                        let _ = runtime.emit(EventKind::PublicationFailed {
+                            error:
+                                "Backend stopped during publication; inspect and retry publication."
+                                    .into(),
+                        });
+                    } else if runtime.state.approved
+                        && (runtime.active() || runtime.state.phase == "running")
+                    {
+                        let _ = runtime.emit(EventKind::Paused { paused: true });
+                    }
                 }
+                crate::engine::terminate_all();
+                crate::native::shutdown_runtime();
+                crate::provider_auth::shutdown();
+                close_all_sse_subscribers();
+                shutdown_server.unblock();
             }
-            crate::engine::terminate_all();
-            crate::native::shutdown_runtime();
-            crate::provider_auth::shutdown();
-            close_all_sse_subscribers();
-            shutdown_server.unblock();
-        }
-    });
-    // Dev uses Vite's frontend URL; do not invite users into stale dist assets.
-    if std::env::var_os("GRAPHER_DEV_HIDE_BACKEND_URL").is_none() {
-        eprintln!(
-            "Grapher backend: http://127.0.0.1:{port} (data: {})",
-            root.display()
-        );
-    }
+        })
+        .map_err(|error| error.to_string())?;
     let web_root = crate::native::installation_root().join("dist");
     // Bounded workers keep slow HTTP clients (including SSE streams) from
     // creating an unbounded number of OS threads.
@@ -6870,13 +7010,34 @@ pub fn run() -> Result<(), String> {
         let rx = rx.clone();
         let service = service.clone();
         let web_root = web_root.clone();
+        let allow_desktop_origins = options.allow_desktop_origins;
         thread::spawn(move || loop {
             let next = rx.lock().unwrap().recv();
             match next {
-                Ok(request) => handle_http_request(request, &service, &web_root, port),
+                Ok(request) => handle_http_request_with_options(
+                    request,
+                    &service,
+                    &web_root,
+                    bound_port,
+                    allow_desktop_origins,
+                ),
                 Err(_) => break,
             }
         });
+    }
+    // Dev uses Vite's frontend URL; do not invite users into stale dist assets.
+    if std::env::var_os("GRAPHER_DEV_HIDE_BACKEND_URL").is_none() {
+        eprintln!(
+            "Grapher backend: http://127.0.0.1:{bound_port} (data: {})",
+            root.display()
+        );
+    }
+    if options.emit_ready || requested_port == 0 {
+        let ready_line = format_ready_line(bound_port, &root);
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{ready_line}")
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("Cannot emit backend readiness line: {error}"))?;
     }
     // Warm the sidebar independently of engines. This read-only connection never
     // holds a runtime lock or loads full histories, and the cache is invalidated by
@@ -6917,6 +7078,8 @@ pub fn run() -> Result<(), String> {
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
         }
     }
+    drop(tx);
+    let _ = shutdown_handle.join();
     Ok(())
 }
 
@@ -7011,11 +7174,22 @@ fn respond_closed(
     let _ = writer.flush();
 }
 
+#[cfg(test)]
 fn handle_http_request(
+    request: tiny_http::Request,
+    service: &Arc<Service>,
+    web_root: &std::path::Path,
+    port: u16,
+) {
+    handle_http_request_with_options(request, service, web_root, port, false);
+}
+
+fn handle_http_request_with_options(
     mut request: tiny_http::Request,
     service: &Arc<Service>,
     web_root: &std::path::Path,
     port: u16,
+    allow_desktop_origins: bool,
 ) {
     let req_origin = request
         .headers()
@@ -7037,7 +7211,7 @@ fn handle_http_request(
         && origins.len() <= 1
         && origins
             .iter()
-            .all(|h| is_trusted_origin(h.value.as_str(), port));
+            .all(|h| is_trusted_origin_for(h.value.as_str(), port, allow_desktop_origins));
     if !trusted {
         respond_closed(
             request,
@@ -7049,7 +7223,7 @@ fn handle_http_request(
     }
     if request.method() == &tiny_http::Method::Options {
         let mut headers = vec![
-            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
             ("Access-Control-Allow-Headers", "Content-Type"),
         ];
         if let Some(ref origin) = req_origin {
@@ -7065,7 +7239,11 @@ fn handle_http_request(
                 h.field.equiv("Sec-Fetch-Site")
                     && h.value.as_str().eq_ignore_ascii_case("cross-site")
             });
-            if cross_site {
+            // WebKit/WebView2 tag Tauri WebView -> loopback EventSource requests
+            // with Sec-Fetch-Site: cross-site. Allow only when an explicitly
+            // trusted Origin header is present (validated above); continue to
+            // reject origin-less cross-site browser requests.
+            if cross_site && req_origin.is_none() {
                 respond_closed(
                     request,
                     403,
@@ -7176,12 +7354,11 @@ fn handle_http_request(
                 Ok(service) => service,
                 Err(error) => {
                     let payload = serde_json::json!({"error": error}).to_string();
-                    respond_closed(
-                        request,
-                        400,
-                        &[("Content-Type", "application/json")],
-                        payload.as_bytes(),
-                    );
+                    let mut headers = vec![("Content-Type", "application/json")];
+                    if let Some(ref origin) = req_origin {
+                        headers.push(("Access-Control-Allow-Origin", origin.as_str()));
+                    }
+                    respond_closed(request, 400, &headers, payload.as_bytes());
                     return;
                 }
             };

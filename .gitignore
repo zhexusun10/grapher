@@ -35,6 +35,10 @@ MYLOG.md
 
 # Grapher runtime and Rust outputs
 backend/target*/
+src-tauri/target*/
+src-tauri/gen/
+src-tauri/resources/
+desktop-dist/
 target*/
 .grapher/
 .grapher-verify*/

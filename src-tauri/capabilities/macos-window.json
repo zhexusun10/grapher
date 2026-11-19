@@ -1,0 +1,12 @@
+{
+  "identifier": "macos-window",
+  "description": "Least-privilege macOS-only capability enabling window dragging, double-click maximize, and fullscreen state queries for the overlay titlebar.",
+  "local": true,
+  "platforms": ["macOS"],
+  "windows": ["main"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-is-fullscreen"
+  ]
+}

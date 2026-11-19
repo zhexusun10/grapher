@@ -2178,7 +2178,7 @@ fn run_git_bytes_allowing(
     let cli_args = args;
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
-    let mut command = Command::new("git");
+    let mut command = Command::new(crate::native::trusted_git()?);
     configure_host_git(&mut command);
     crate::native::clear_git_environment(&mut command);
     if let Some(owner) = project_view

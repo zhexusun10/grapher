@@ -35,7 +35,7 @@ impl Drop for Bridge {
 impl Bridge {
     fn start() -> Result<Self, String> {
         let root = crate::native::installation_root();
-        let mut command = Command::new("node");
+        let mut command = Command::new(crate::native::trusted_node()?);
         command
             // Use the same audited Pi source loader as the execution and
             // extension hosts; no tsx install/download on the startup path.
@@ -49,6 +49,7 @@ impl Bridge {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::native::bind_trusted_git(&mut command)?;
         crate::native::bind_baseline_context(&mut command);
         Self::spawn(&mut command)
     }

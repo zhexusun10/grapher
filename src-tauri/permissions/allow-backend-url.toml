@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-backend-url"
+description = "Allows the main window to query the local Grapher backend loopback URL."
+commands.allow = ["backend_url"]

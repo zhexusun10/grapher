@@ -26,7 +26,7 @@ pub(crate) fn verify_git_blob(
         return Err("Invalid streaming native runtime blob identity".into());
     }
     let _lease = SlotGitGuard::acquire(cwd)?;
-    let mut command = Command::new("git");
+    let mut command = Command::new(crate::native::trusted_git()?);
     configure_host_git(&mut command);
     crate::native::clear_git_environment(&mut command);
     command

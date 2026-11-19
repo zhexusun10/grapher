@@ -111,7 +111,7 @@ The **UI settings** card groups reasoning auto-expansion, **Show execution graph
 
 The home composer stays bottom-anchored while welcome copy uses only the remaining space above it. Its wide-screen right offset is capped by the available gutter; narrow or short free regions use smaller copy, and regions too short for readable text hide it until space returns. Draft growth, resizing and editor expansion must not clip the copy, overlap it with the composer, or discard the draft. The decorative dots remain mounted when copy is hidden. [Home viewport tests](../../scripts/ui-polish.test.mjs) cover both languages, the responsive breakpoint, long drafts, expansion/collapse and keyboard-visible composer controls.
 
-`assets/icon-dots.svg` uses a transparent, color-scheme-aware 4×4 grid with the corners omitted. Keep dots aligned at 16 and 32 px and avoid a background tile. Browsers cache favicons by URL, so bump the `?v=` query in `index.html` when changing it; Vite hashes production assets.
+`assets/icon-dots.svg` is a transparent, color-scheme-aware Grapher mark (4 rounded node boxes connected by curved edges) without a background tile. Browsers cache favicons by URL, so bump the `?v=` query in `index.html` when changing it; Vite hashes production assets. Desktop app icons under `src-tauri/icons/` are reproducibly derived from `assets/icon-dots.svg` on a white rounded-square canvas via `npm run desktop:icons` (see [Desktop releases](desktop-releases.md#local-desktop-development-and-builds)).
 
 ## Initializing another Vite/React project
 

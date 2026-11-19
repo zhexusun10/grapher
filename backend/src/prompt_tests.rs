@@ -4944,6 +4944,87 @@ fn local_http_boundary_rejects_other_ports_and_malformed_origins() {
 }
 
 #[test]
+fn desktop_mode_allows_exact_tauri_v2_origins_without_weakening_host_or_loopback_checks() {
+    let port = 54321;
+    // Host stays strictly pinned to the actual bound loopback port.
+    assert!(is_trusted_host("127.0.0.1:54321", port));
+    assert!(is_trusted_host("localhost:54321", port));
+    assert!(!is_trusted_host("127.0.0.1:0", port));
+    assert!(!is_trusted_host("tauri.localhost", port));
+    assert!(!is_trusted_host("tauri://localhost", port));
+    assert!(!is_trusted_host("tauri.localhost:54321", port));
+
+    // Browser/CLI default mode does not accept Tauri origins without opt-in.
+    for origin in [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ] {
+        assert!(!is_trusted_origin_for(origin, port, false), "{origin}");
+        assert!(is_trusted_origin_for(origin, port, true), "{origin}");
+    }
+
+    // Exact bound loopback port and dev port remain trusted in both modes.
+    assert!(is_trusted_origin_for("http://127.0.0.1:54321", port, true));
+    assert!(is_trusted_origin_for("http://localhost:54321", port, true));
+    assert!(is_trusted_origin_for("http://127.0.0.1:1420", port, true));
+    assert!(!is_trusted_origin_for("http://127.0.0.1:1421", port, true));
+
+    // Lookalike or malformed Tauri origins are always rejected.
+    for bad in [
+        "tauri://evil",
+        "tauri://localhost:1420",
+        "tauri://localhost/path",
+        "tauri://localhost.evil.com",
+        "http://tauri.localhost:80",
+        "http://tauri.localhost:54321",
+        "http://tauri.localhost/path",
+        "http://tauri.localhost.evil.com",
+        "http://evil.tauri.localhost",
+        "https://tauri.localhost@evil.com",
+        "null",
+    ] {
+        assert!(!is_trusted_origin_for(bad, port, true), "{bad}");
+    }
+
+    // Explicit allowlist supports exact tauri://localhost plus Windows WebView2 origins.
+    let allowlist = "tauri://localhost, http://tauri.localhost, https://tauri.localhost";
+    assert!(origin_matches_allowlist("tauri://localhost", allowlist));
+    assert!(origin_matches_allowlist("http://tauri.localhost", allowlist));
+    assert!(origin_matches_allowlist("https://tauri.localhost", allowlist));
+    assert!(!origin_matches_allowlist("tauri://evil", "tauri://evil"));
+    assert!(!origin_matches_allowlist(
+        "tauri://localhost/path",
+        "tauri://localhost/path"
+    ));
+}
+
+#[test]
+fn dynamic_port_readiness_and_stdin_shutdown_protocol_helpers() {
+    let server = tiny_http::Server::http(("127.0.0.1", 0)).unwrap();
+    let port = bound_server_port(&server).unwrap();
+    assert_ne!(port, 0);
+    let data_dir = PathBuf::from("/tmp/grapher desktop/data");
+    let line = format_ready_line(port, &data_dir);
+    assert!(!line.contains('\n'));
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed["type"], "grapher_ready");
+    assert_eq!(parsed["port"], port);
+    assert_eq!(parsed["dataDir"], data_dir.to_string_lossy().as_ref());
+
+    assert!(is_stdin_shutdown_command("shutdown\n"));
+    assert!(is_stdin_shutdown_command("  SHUTDOWN \r\n"));
+    assert!(is_stdin_shutdown_command(r#"{"type":"shutdown"}"#));
+    assert!(is_stdin_shutdown_command(r#"{"command":"shutdown"}"#));
+    assert!(!is_stdin_shutdown_command("ping\n"));
+    assert!(!is_stdin_shutdown_command(""));
+
+    // Watcher exits cleanly on EOF and on explicit shutdown commands.
+    watch_stdin_for_shutdown(std::io::Cursor::new(b""));
+    watch_stdin_for_shutdown(std::io::Cursor::new(b"ignore\nshutdown\nnever-read\n"));
+}
+
+#[test]
 fn list_files_and_list_skills_dispatch() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path().join("runtime");

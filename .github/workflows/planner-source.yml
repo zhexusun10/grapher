@@ -49,11 +49,13 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       # Compiling the backend cold is the slowest part of every suite below.
-      # The cache key follows backend/Cargo.lock and the active toolchain, so a
+      # The cache key follows Cargo.lock and the active toolchain, so a
       # dependency change still rebuilds while a re-run of the same code does not.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: backend
+          workspaces: |
+            backend
+            src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/setup-python@v6
         with:
@@ -219,6 +221,10 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 8
         run: npm run test:windows-native
+      - name: Verify Tauri v2 desktop shell and packaging contracts
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        timeout-minutes: 8
+        run: npm run test:desktop
 
   macos-filesystem:
     name: macOS filesystem / ${{ matrix.os }}

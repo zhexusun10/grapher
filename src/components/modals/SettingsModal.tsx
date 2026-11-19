@@ -8,6 +8,8 @@ import { providerAuth, type ProviderCatalog } from "../../services/providerAuth"
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
+import { AutostartSettings } from "../AutostartSettings";
+import { UpdateSettings } from "../UpdateSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
 import { autoExpandCotEnabled, setAutoExpandCot, executionOverviewEnabled, setExecutionOverview, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode } from "../../services/displayPreferences";
 import { DotPattern } from "../ui/dot-pattern";
@@ -397,6 +399,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               </div>
               {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
             </section>
+
+            <AutostartSettings disabled={saving} active={isOpen} />
+
+            <UpdateSettings disabled={saving} />
 
             {/* 存储与重置 */}
             <section className="settings-card" aria-labelledby="storage-settings-title">
