@@ -100,14 +100,11 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
     // If Fit View is pressed mid-animation, keep following its running focus
     // until the cards settle instead of replacing it with a whole-graph fit.
     manualFitRef.current = () => { if (tracking) preferRunning = true; };
-    const resize = new ResizeObserver(() => { previousLayout = ""; tracking = true; schedule(); });
-    resize.observe(canvas);
     schedule();
     return () => {
       cancelled = true;
       synchronizeRef.current = null;
       manualFitRef.current = null;
-      resize.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [flow, runKey, visible, layoutKey, planning, canvasRef]);

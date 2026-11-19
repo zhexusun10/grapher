@@ -761,6 +761,8 @@ test("graph splitter preserves ordinary resizing, cancellation, keyboard control
     await page.waitForFunction(() => !!window.graphFixture);
     await page.evaluate(() => window.graphFixture.update({ phase: "awaiting_approval",
       graph: { originalGoal: "Resize regression", nodes: [{ id: "worker", task: "Task" }], edges: [] } }, false));
+    await waitForSettledGraph(page, 1);
+    const initialViewport = await viewport(page);
     const splitter = page.getByRole("separator", { name: "Resize execution graph", exact: true });
     await splitter.waitFor();
     const savedRatio = () => page.evaluate(() => Number(localStorage.getItem("grapher_workbench_split_ratio")));
@@ -776,6 +778,8 @@ test("graph splitter preserves ordinary resizing, cancellation, keyboard control
     const resized = await savedRatio();
     assert.ok(resized < 0.55 && resized > 0.3, "ordinary drags still resize and persist the split");
     assert.equal(await page.locator(".workbench.resizing").count(), 0);
+    await page.waitForTimeout(200);
+    assertSameViewport(await viewport(page), initialViewport);
 
     await beginDrag(-48);
     await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: window.resizePointerId })));
