@@ -11,6 +11,7 @@ async function expectConversationCentered(page, layout) {
       return (rect.left + rect.right) / 2;
     };
     const scroller = document.querySelector(".initial-query-scroll");
+    if (getComputedStyle(scroller).display !== "block") return Number.POSITIVE_INFINITY;
     const axis = center(scroller);
     return Math.max(...[".chat-messages-stream", ".plan-summary-card", ".pane-bottom-chat .prompt-box-container"]
       .map(selector => Math.abs(center(document.querySelector(selector)) - axis)));

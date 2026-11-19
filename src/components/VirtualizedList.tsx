@@ -409,6 +409,13 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     // compensated right away rather than dropped.
     const hasMeasurementChange = offsetsRevision !== committedOffsetsRevisionRef.current;
     committedOffsetsRevisionRef.current = offsetsRevision;
+    // A staged transcript is measured inside a zero-height clipped wrapper
+    // behind the live stream; it must not scroll the shared conversation pane.
+    if (ref.current?.closest("[data-transcript-staged='true']")) {
+      previousOffsets.current = offsets;
+      previousOffsetIds.current = ids;
+      return;
+    }
     // Follow state is also updated imperatively from scroll handlers without a
     // React render. Re-read it at commit time so a reader who just scrolled up
     // is never pulled back by this frame's row measurement.

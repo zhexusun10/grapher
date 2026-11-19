@@ -618,3 +618,104 @@ test("recovered Planner keeps repeated queued steers separate and marks unread d
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("first-turn Planner handoff fills behind the live stream so a progress-only tail never flashes the user prompt", { timeout: 45_000 }, async () => {
+  const goal = "LONG_OPENING_PROMPT_MARKER\n" + Array.from({ length: 18 }, (_, i) => `- Requirement line ${i}`).join("\n");
+  const config = { repository: "/mock/handoff-tail", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const planning = { planningId: "tail-plan", status: "success", createdAt: 2, runId: "tail-run", repository: config.repository, goal, roles: { planner: {} } };
+  const done = { ...empty, runId: "tail-run", config, planType: "graph", phase: "running", approved: true, planningId: "tail-plan", planning,
+    graph: { originalGoal: goal, nodes: [{ id: "worker", task: "Task" }], edges: [] },
+    nodes: { worker: { status: "running", revision: 1, instruction: "", error: null } },
+    plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
+    executions: [{ id: "ex", node: "worker", status: "running", revision: 1, attempt: 1, startedAt: 1, output: "", outputBytes: 0 }],
+    events: [{ type: "created", sequence: 1, planning_id: "tail-plan", planning, timestamp: 1 }] };
+  const rows = Array.from({ length: 30 }, (_, i) => `PLANNER_ROW_${i}: ` + "detail ".repeat(18));
+  const olderBody = line({ type: "message_end", message: { role: "user", content: [{ type: "text", text: goal }] } }) +
+    rows.map(text => assistant(text)).join("");
+  // Simulate a trailing agent_end larger than INITIAL_TRANSCRIPT_BYTES: the first
+  // tail page lands on trailing metadata lines with zero visible rows.
+  const metadataTail = line({ type: "grapher_context_usage", tokens: 1000, window: 500000 }) +
+    line({ type: "agent_settled", aborted: false });
+  const olderBytes = Buffer.from(olderBody), tailBytes = Buffer.from(metadataTail);
+  const totalBytes = olderBytes.length + tailBytes.length;
+  onPlanStream = (_body, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream", Connection: "keep-alive" });
+    res.write(`event: run_started\ndata: ${JSON.stringify({ runId: done.runId })}\n\n`);
+    for (const text of rows) {
+      res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_start", message: { role: "assistant", content: [] } } })}\n\n`);
+      res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } } })}\n\n`);
+      res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } })}\n\n`);
+    }
+    setTimeout(() => {
+      res.write(`event: complete\ndata: ${JSON.stringify({ snapshot: done })}\n\n`);
+      res.end();
+    }, 300);
+  };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [], conversations: [], repositoryInfo: { path: config.repository, name: "Tail", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = done; break;
+      case "snapshot_if_changed": result = { version: "tail", snapshot: done }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = [planning]; break;
+      case "get_planning": result = planning; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, status: "running" }; break;
+      case "get_planning_output": {
+        if (body.before !== undefined) {
+          await new Promise(resolve => setTimeout(resolve, 120));
+          result = { planningId: body.planningId, role: "planner", content: olderBody,
+            startOffset: 0, nextOffset: olderBytes.length, totalBytes, complete: false, running: false };
+        } else {
+          result = { planningId: body.planningId, role: "planner", content: metadataTail,
+            startOffset: olderBytes.length, nextOffset: totalBytes, totalBytes, complete: true, running: false };
+        }
+        break;
+      }
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.evaluate(() => {
+      window.promptVisibleDuringHandoff = 0;
+      window.sawLiveOffscreen = false;
+      window.samplingHandoff = true;
+      const sample = () => {
+        const scroll = document.querySelector(".initial-query-scroll");
+        const prompt = document.querySelector(".chat-bubble-user");
+        if (scroll && prompt && getComputedStyle(scroll).opacity === "1") {
+          const sr = scroll.getBoundingClientRect(), pr = prompt.getBoundingClientRect();
+          const overlap = Math.max(0, Math.min(pr.bottom, sr.bottom) - Math.max(pr.top, sr.top));
+          if (overlap === 0 && document.querySelector(".planner-transcript")) window.sawLiveOffscreen = true;
+          if (window.sawLiveOffscreen && overlap > 0) window.promptVisibleDuringHandoff += 1;
+        }
+        if (window.samplingHandoff) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    const input = page.locator("textarea").first();
+    await input.fill(goal);
+    await input.press("Enter");
+    await page.locator(".planning-activity").getByText(rows.at(-1), { exact: true }).waitFor();
+    await page.locator(".planner-transcript").waitFor({ state: "detached" });
+    await page.waitForTimeout(250);
+    const { sawLiveOffscreen, promptVisibleDuringHandoff } = await page.evaluate(() => {
+      window.samplingHandoff = false;
+      return { sawLiveOffscreen: window.sawLiveOffscreen, promptVisibleDuringHandoff: window.promptVisibleDuringHandoff };
+    });
+    assert.equal(sawLiveOffscreen, true, "live stream should scroll the opening prompt off-screen before completion");
+    assert.equal(promptVisibleDuringHandoff, 0, "the opening prompt must not flash back into view during handoff");
+    assert.deepEqual(errors, []);
+  } finally { onPlanStream = undefined; await context.close(); }
+});

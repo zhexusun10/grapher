@@ -14,7 +14,7 @@ type MutationTool = "edit_graph";
 type Diagnostic = { code: string; message: string; dependencyPath?: string[] };
 type FailedNodeCall = { nodeId: string; toolCallId: string };
 // A change either succeeds with a summary or is rejected before compilation.
-type Change = { summary: string; notes?: string[]; createdDependencies?: Pick<EdgeEdit, "from" | "to">[] };
+type Change = { summary: string; notes?: string[] };
 // Structured effects for logs and the UI. The model reads `content`; failure is
 // carried by the result's `isError`, as in Pi's bash tool.
 type GraphToolDetails = {
@@ -130,6 +130,119 @@ function applyEdge(graph: Graph, edit: EdgeEdit): EdgeEffect {
   graph.edges = graph.edges.filter(edge => edge !== existing);
   graph.edges.push({ from: edit.from, to: edit.to, feedback });
   return existing ? { kind: "updated", previousFeedback: existing.feedback } : { kind: "created" };
+}
+
+function shortestDependencyPath(outgoing: Map<string, string[]>, from: string, to: string): string[] | undefined {
+  const queue = [from];
+  const previous = new Map<string, string | undefined>([[from, undefined]]);
+  let head = 0;
+  while (head < queue.length) {
+    const id = queue[head++];
+    for (const next of outgoing.get(id) ?? []) {
+      if ((id === from && next === to) || previous.has(next)) continue;
+      previous.set(next, id);
+      if (next === to) {
+        const path = [next];
+        let current: string | undefined = next;
+        while ((current = previous.get(current)) !== undefined) path.push(current);
+        path.reverse();
+        return path;
+      }
+      queue.push(next);
+    }
+  }
+  return undefined;
+}
+
+function dependencyDagOutgoing(graph: Graph): Map<string, string[]> | undefined {
+  const ids = new Set(graph.nodes.map(node => node.id));
+  if (ids.size !== graph.nodes.length) return undefined;
+  const degrees = new Map<string, number>(graph.nodes.map(node => [node.id, 0]));
+  const outgoing = new Map<string, string[]>(graph.nodes.map(node => [node.id, []]));
+  const seenPairs = new Map<string, Set<string>>();
+  for (const edge of graph.edges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to) || edge.from === edge.to) return undefined;
+    let targets = seenPairs.get(edge.from);
+    if (!targets) {
+      targets = new Set();
+      seenPairs.set(edge.from, targets);
+    }
+    if (targets.has(edge.to)) return undefined;
+    targets.add(edge.to);
+    if (edge.feedback) continue;
+    degrees.set(edge.to, (degrees.get(edge.to) ?? 0) + 1);
+    outgoing.get(edge.from)!.push(edge.to);
+  }
+  const ready = Array.from(degrees.entries()).filter(([, degree]) => degree === 0).map(([id]) => id);
+  let head = 0;
+  while (head < ready.length) {
+    const id = ready[head++];
+    for (const next of outgoing.get(id) ?? []) {
+      const remaining = degrees.get(next)! - 1;
+      degrees.set(next, remaining);
+      if (remaining === 0) ready.push(next);
+    }
+  }
+  return head === ids.size ? outgoing : undefined;
+}
+
+function pruneRedundantEdges(graph: Graph): { from: string; to: string; path: string[] }[] {
+  const outgoing = dependencyDagOutgoing(graph);
+  if (!outgoing) return [];
+  // In a finite DAG, direct edge u → v is redundant iff v is reachable in >= 1
+  // step from some direct dependency neighbor of u.
+  const redundantTargets = new Map<string, Set<string>>();
+  for (const [source, neighbors] of outgoing) {
+    if (neighbors.length <= 1) continue;
+    const indirectlyReachable = new Set<string>();
+    const expanded = new Set<string>();
+    const queue = neighbors.slice();
+    let head = 0;
+    while (head < queue.length) {
+      const current = queue[head++];
+      if (expanded.has(current)) continue;
+      expanded.add(current);
+      for (const next of outgoing.get(current) ?? []) {
+        if (!indirectlyReachable.has(next)) {
+          indirectlyReachable.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    if (indirectlyReachable.size > 0) {
+      redundantTargets.set(source, indirectlyReachable);
+    }
+  }
+  if (redundantTargets.size === 0) return [];
+  const removed: { from: string; to: string }[] = [];
+  const kept: Graph["edges"] = [];
+  for (const edge of graph.edges) {
+    if (!edge.feedback && redundantTargets.get(edge.from)?.has(edge.to)) {
+      removed.push({ from: edge.from, to: edge.to });
+    } else {
+      kept.push(edge);
+    }
+  }
+  if (removed.length === 0) return [];
+  graph.edges = kept;
+  // Recompute alternate paths against the final reduced graph in sorted
+  // neighbor order so every edge cited in the explanation exists in the saved
+  // topology and matches the compiler's deterministic shortest path.
+  const keptOutgoing = new Map<string, string[]>();
+  for (const edge of kept) {
+    if (edge.feedback) continue;
+    let list = keptOutgoing.get(edge.from);
+    if (!list) {
+      list = [];
+      keptOutgoing.set(edge.from, list);
+    }
+    list.push(edge.to);
+  }
+  for (const list of keptOutgoing.values()) list.sort();
+  return removed.map(edge => ({
+    ...edge,
+    path: shortestDependencyPath(keptOutgoing, edge.from, edge.to) ?? [edge.from, edge.to],
+  }));
 }
 
 export default function grapherPlanner(pi: ExtensionAPI) {
@@ -410,17 +523,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         return rejected([{ code: "compiler-response", message: "Compiler returned invalid diagnostics." }]);
       }
       if (diagnostics.length) {
-        return rejected(diagnostics.map(diagnostic => {
-          const path = diagnostic.dependencyPath;
-          const added = changed.createdDependencies?.find(edge => path && path[0] === edge.from && path.at(-1) === edge.to);
-          // The compiler describes the rejected candidate. A redundant edge
-          // created by this call was never saved, so do not ask to delete it.
-          // Keep repair hints for other, already-saved redundant edges intact.
-          if (diagnostic.code === "E209" && added && path) {
-            return { ...diagnostic, message: `No need to add dependency ${added.from} → ${added.to}: ${path.join(" → ")} already provides this dependency. Omit this edge.` };
-          }
-          return diagnostic;
-        }));
+        return rejected(diagnostics);
       }
       const plan = output.plan;
       const stringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string");
@@ -453,8 +556,9 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       throwIfAborted();
       let response;
       try {
-        // Keep the cascade count and cumulative risk ahead of unbounded lists.
-        response = result(tool, [changed.summary, ...notes.slice(0, 1), ...warnings.map(warning => `Warning: ${warning}`), ...notes.slice(1)].join("\n"), {
+        // Keep cumulative risk and advisory warnings ahead of local-effect
+        // note sections without splitting a note header from its edge list.
+        response = result(tool, [changed.summary, ...warnings.map(warning => `Warning: ${warning}`), ...notes].join("\n"), {
           ...(warnings.length ? { warnings } : {}),
           ...(notes.length ? { notes } : {}),
         }, false, rerunRisk);
@@ -492,7 +596,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     description:
       "Create, replace, or delete one or more graph nodes, dependency edges, or both. Only one edge per ordered pair. For a dependency edge, the `to` node depends on the `from` node and waits for it to complete."
       + (feedbackEnabled ? " With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace and feedback, and continues from its own context to improve its previous work. The source and other previously run descendants retain their own context and recheck their tasks using the updated workspace after their dependencies complete." : "")
-      + " Replacing a node overwrites its entire task; an existing ordered edge pair is replaced. Deleting a node removes its incident edges; deleting a missing node or edge, or a published node, is an error. Include each node id and ordered edge pair only once. Edges may reference nodes created in the same batch. Only the final graph is validated: dependency cycles and redundant direct dependencies are rejected, never auto-removed. The batch is committed together or leaves the graph unchanged.",
+      + " Replacing a node overwrites its entire task; an existing ordered edge pair is replaced. Deleting a node removes its incident edges; deleting a missing node or edge, or a published node, is an error. Include each node id and ordered edge pair only once. Edges may reference nodes created in the same batch. Only the final graph is validated: dependency cycles are rejected, and redundant direct dependencies implied by indirect paths are automatically removed and reported. The batch is committed together or leaves the graph unchanged.",
     parameters: Type.Object({
       nodes: Type.Optional(Type.Array(nodeSchema, { description: "Node creations, complete task replacements, or deletions" })),
       edges: Type.Optional(Type.Array(feedbackEnabled ? edgeSchema : Type.Omit(edgeSchema, ["feedback"], { additionalProperties: false }), { description: feedbackEnabled ? "Dependency or feedback edge creations, replacements, or deletions" : "Dependency edge creations, replacements, or deletions" })),
@@ -533,23 +637,32 @@ export default function grapherPlanner(pi: ExtensionAPI) {
           removedEdges.push(...applyNode(graph, edit));
           summaries.push(`Successfully ${edit.delete ? "deleted" : existed ? "updated" : "created"} node ${JSON.stringify(edit.id)}.`);
         }
-        const createdDependencies: NonNullable<Change["createdDependencies"]> = [];
         for (const edit of edges.filter(edit => !edit.delete)) {
           const label = `${JSON.stringify(edit.from)} → ${JSON.stringify(edit.to)}`;
           const effect = applyEdge(graph, edit);
           if (effect.kind === "unchanged") summaries.push(`Edge ${label} already exists with these settings; no change.`);
           else if (effect.kind === "updated") summaries.push(`Successfully updated edge ${label}${feedbackEnabled ? ` (feedback: ${effect.previousFeedback} → ${edit.feedback ?? false})` : ""}.`);
-          else {
-            summaries.push(`Successfully created edge ${label}${feedbackEnabled && edit.feedback ? " (feedback)" : ""}.`);
-            if (!edit.feedback) createdDependencies.push({ from: edit.from, to: edit.to });
-          }
+          else summaries.push(`Successfully created edge ${label}${feedbackEnabled && edit.feedback ? " (feedback)" : ""}.`);
         }
+        const pruned = pruneRedundantEdges(graph);
         const visibleRemovals = removedEdges.filter(edge => feedbackEnabled || !edge.feedback);
+        const notes: string[] = [
+          ...(visibleRemovals.length
+            ? [`Removed ${visibleRemovals.length} incident ${visibleRemovals.length === 1 ? "edge" : "edges"}:`,
+              ...visibleRemovals.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)]
+            : []),
+          ...(pruned.length
+            ? [`Auto-removed ${pruned.length} redundant direct ${pruned.length === 1 ? "dependency" : "dependencies"} (already provided by indirect ${pruned.length === 1 ? "path" : "paths"}):`,
+              ...pruned.map(edge => `${edge.from} → ${edge.to} (via ${edge.path.join(" → ")})`)]
+            : []),
+        ];
+        const singlePrunedEdge = nodes.length === 0 && edges.length === 1 && !edges[0].delete && !edges[0].feedback
+          && pruned.some(edge => edge.from === edges[0].from && edge.to === edges[0].to);
         return {
-          summary: summaries.length === 1 ? summaries[0] : `Successfully applied ${nodes.length} node edit(s) and ${edges.length} edge edit(s).`,
-          notes: visibleRemovals.length ? [`Removed ${visibleRemovals.length} incident ${visibleRemovals.length === 1 ? "edge" : "edges"}:`,
-            ...visibleRemovals.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)] : [],
-          createdDependencies,
+          summary: singlePrunedEdge
+            ? `Edit succeeded; redundant direct ${pruned.length === 1 ? "dependency was" : "dependencies were"} automatically removed.`
+            : summaries.length === 1 ? summaries[0] : `Successfully applied ${nodes.length} node edit(s) and ${edges.length} edge edit(s).`,
+          notes,
         };
       }, edges.flatMap(edit => [edit.from, edit.to]));
     },

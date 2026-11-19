@@ -321,6 +321,73 @@ export function applyPlannerNodeEditsToState(prev: Snapshot, edits: readonly Pla
   };
 }
 
+function previewDependencyDagOutgoing(
+  nodes: readonly Snapshot["graph"]["nodes"][number][],
+  edges: readonly Snapshot["graph"]["edges"][number][],
+): Map<string, string[]> | undefined {
+  const ids = new Set(nodes.map(node => node.id));
+  if (ids.size !== nodes.length) return undefined;
+  const degrees = new Map<string, number>(nodes.map(node => [node.id, 0]));
+  const outgoing = new Map<string, string[]>(nodes.map(node => [node.id, []]));
+  const seenPairs = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to) || edge.from === edge.to) return undefined;
+    let targets = seenPairs.get(edge.from);
+    if (!targets) {
+      targets = new Set();
+      seenPairs.set(edge.from, targets);
+    }
+    if (targets.has(edge.to)) return undefined;
+    targets.add(edge.to);
+    if (edge.feedback) continue;
+    degrees.set(edge.to, (degrees.get(edge.to) ?? 0) + 1);
+    outgoing.get(edge.from)!.push(edge.to);
+  }
+  const ready = Array.from(degrees.entries()).filter(([, degree]) => degree === 0).map(([id]) => id);
+  let head = 0;
+  while (head < ready.length) {
+    const id = ready[head++];
+    for (const next of outgoing.get(id) ?? []) {
+      const remaining = degrees.get(next)! - 1;
+      degrees.set(next, remaining);
+      if (remaining === 0) ready.push(next);
+    }
+  }
+  return head === ids.size ? outgoing : undefined;
+}
+
+function pruneRedundantPreviewEdges(
+  nodes: readonly Snapshot["graph"]["nodes"][number][],
+  edges: Snapshot["graph"]["edges"],
+): Snapshot["graph"]["edges"] {
+  const outgoing = previewDependencyDagOutgoing(nodes, edges);
+  if (!outgoing) return edges;
+  const redundantTargets = new Map<string, Set<string>>();
+  for (const [source, neighbors] of outgoing) {
+    if (neighbors.length <= 1) continue;
+    const indirectlyReachable = new Set<string>();
+    const expanded = new Set<string>();
+    const queue = neighbors.slice();
+    let head = 0;
+    while (head < queue.length) {
+      const current = queue[head++];
+      if (expanded.has(current)) continue;
+      expanded.add(current);
+      for (const next of outgoing.get(current) ?? []) {
+        if (!indirectlyReachable.has(next)) {
+          indirectlyReachable.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    if (indirectlyReachable.size > 0) {
+      redundantTargets.set(source, indirectlyReachable);
+    }
+  }
+  if (redundantTargets.size === 0) return edges;
+  return edges.filter(edge => edge.feedback || !redundantTargets.get(edge.from)?.has(edge.to));
+}
+
 export function applyPlannerEdgeEditsToState(prev: Snapshot, edits: readonly PlannerEdgeEdit[]): Snapshot {
   let nextEdges = [...prev.graph.edges];
   for (const edit of edits) {
@@ -333,6 +400,7 @@ export function applyPlannerEdgeEditsToState(prev: Snapshot, edits: readonly Pla
       });
     }
   }
+  nextEdges = pruneRedundantPreviewEdges(prev.graph.nodes, nextEdges);
   return {
     ...prev,
     graph: {

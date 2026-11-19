@@ -190,28 +190,28 @@ try {
     await nodeTool.execute("off-add-node", nodeTool.prepareArguments!({ id: "middle", task: "Intermediate work" }) as any, undefined, undefined, {} as ExtensionContext);
     const addedPath = await edgeTool.execute("off-rewire", edgeTool.prepareArguments!({ from: "a", to: "middle" }) as any, undefined, undefined, {} as ExtensionContext);
     assert.equal(graphResult(addedPath).applied, true);
-    // The edge that would make the retained direct route redundant is rejected,
-    // never repaired by silently deleting the existing route.
-    const beforeRedundant = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
+    // Completing the indirect path automatically removes the now-redundant
+    // direct edge while preserving the retained hidden feedback route.
     const redundant = await edgeTool.execute("off-redundant", edgeTool.prepareArguments!({ from: "middle", to: "b" }) as any, undefined, undefined, {} as ExtensionContext);
-    assert.equal(graphResult(redundant).applied, false);
-    assert.deepEqual(redundant.details.diagnosticCodes, ["E209"]);
+    assert.equal(graphResult(redundant).applied, true);
+    assert.equal(redundant.isError, undefined);
+    assert.deepEqual(graphResult(redundant).notes, [
+      "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+      "a → b (via a → middle → b)",
+    ]);
     assert.doesNotMatch(redundant.content[0].text, /feedback/i);
-    assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"), beforeRedundant);
-    // Atomic ordinary-edge rewiring preserves the retained route without
-    // exposing or editing the disabled protocol, or requiring a manual repair.
-    const repaired = await edgeTool.execute("off-atomic-rewire", { edges: [
-      { from: "a", to: "b", delete: true }, { from: "middle", to: "b" },
-    ] }, undefined, undefined, {} as ExtensionContext);
-    assert.equal(graphResult(repaired).applied, true);
-    assert.doesNotMatch(repaired.content[0].text, /feedback/i);
     assert.ok(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).edges.some((edge: any) => edge.feedback && edge.from === "b" && edge.to === "a"));
+    assert.ok(!JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).edges.some((edge: any) => !edge.feedback && edge.from === "a" && edge.to === "b"));
     const valid = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
     const unnecessary = await edgeTool.execute("off-unnecessary", { from: "a", to: "b" }, undefined, undefined, {} as ExtensionContext);
-    assert.equal(unnecessary.isError, true);
-    assert.deepEqual(unnecessary.details.diagnosticCodes, ["E209"]);
-    assert.match(graphResult(unnecessary).text, /No need to add dependency a → b: a → middle → b.*Omit this edge/);
-    assert.doesNotMatch(unnecessary.content[0].text, /Remove this direct edge|feedback/i);
+    assert.equal(unnecessary.isError, undefined);
+    assert.equal(graphResult(unnecessary).applied, true);
+    assert.match(graphResult(unnecessary).text, /automatically removed/i);
+    assert.deepEqual(graphResult(unnecessary).notes, [
+      "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+      "a → b (via a → middle → b)",
+    ]);
+    assert.doesNotMatch(unnecessary.content[0].text, /The graph is unchanged|feedback/i);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"), valid);
     const invalid = JSON.parse(valid);
     invalid.edges.push({ from: "b", to: "middle", feedback: true });
@@ -251,7 +251,7 @@ try {
   assert.match(edgeDescription, /source and other previously run descendants retain their own context and recheck their tasks using the updated workspace after their dependencies complete/);
   assert.doesNotMatch(edgeDescription, /workspace state/);
   assert.match(edgeDescription, /ordered edge pair.*replaced/);
-  assert.match(edgeDescription, /cycles.*redundant.*rejected.*never auto-removed/);
+  assert.match(edgeDescription, /cycles are rejected.*redundant direct dependencies.*automatically removed/);
   assert.match(edgeDescription, /missing node or edge.*error/);
   const nodeDescription = editTool.description;
   assert.match(nodeDescription, /overwrites.*entire task/);
@@ -846,6 +846,10 @@ try {
     { nodes: [{ id: "__proto__", task: "Literal prototype-like id" }], edges: [
       { from: "build", to: "__proto__" }, { from: "build", to: "check", delete: true }, { from: "__proto__", to: "check" },
     ] },
+    // Redundant direct edges are auto-removed in both the saved graph and the live preview.
+    { nodes: [{ id: "mid", task: "Intermediate stage" }], edges: [
+      { from: "build", to: "mid" }, { from: "mid", to: "check" },
+    ] },
   ]) {
     writeFileSync(process.env.GRAPHER_GRAPH_PATH!, JSON.stringify(coercionBase));
     assert.equal(graphResult(await preparedCall("edit_graph", raw)).applied, true);
@@ -1195,37 +1199,107 @@ fn main() {
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
   assert.equal(JSON.parse(batchSaved).originalGoal, "Single-call fixture");
   assert.ok(JSON.parse(batchSaved).edges.every((edge: { feedback: boolean }) => edge.feedback === false));
-  // A redundant addition was never saved: tell the caller to omit it, not
-  // delete it. The compiler still rejects it without changing any graph data.
-  for (const to of ["integration", "verification"]) {
+  // Redundant direct dependencies are automatically removed and reported as
+  // successful notes instead of failing with E209.
+  for (const [to, path] of [
+    ["integration", "contract → parser → integration"],
+    ["verification", "contract → parser → integration → verification"],
+  ] as const) {
     const redundant = await edge({ from: "contract", to });
     const redundantResult = graphResult(redundant);
-    assert.equal(redundantResult.applied, false);
-    assert.deepEqual(redundant.details.diagnosticCodes, ["E209"]);
-    assert.equal(redundant.isError, true);
-    assert.match(redundantResult.diagnostics[0], new RegExp(`^No need to add dependency contract → ${to}: contract → parser → integration`));
-    assert.match(redundantResult.text, /Omit this edge\.\nThe graph is unchanged\./);
-    assert.doesNotMatch(redundantResult.text, /Auto-removed|Remove this direct edge/);
+    assert.equal(redundantResult.applied, true);
+    assert.equal(redundant.isError, undefined);
+    assert.equal(redundant.details.diagnosticCodes, undefined);
+    assert.match(redundantResult.text, /Edit succeeded; redundant direct dependency was automatically removed\./);
+    assert.deepEqual(redundantResult.notes, [
+      "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+      `contract → ${to} (via ${path})`,
+    ]);
+    assert.doesNotMatch(redundantResult.text, /The graph is unchanged/);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
   }
-  // Structured compiler evidence identifies the requested pair even when ids
-  // contain arrows, and does not rewrite a retained edge's repair hint.
+  // A mixed batch commits valid nodes and edges while auto-removing redundant
+  // direct dependencies in the same call.
+  const mixedBatch = await call("edit_graph", {
+    nodes: [{ id: "release", task: "Release package" }],
+    edges: [
+      { from: "verification", to: "release" },
+      { from: "contract", to: "release" },
+    ],
+  });
+  assert.equal(mixedBatch.isError, undefined);
+  assert.equal(graphResult(mixedBatch).applied, true);
+  assert.deepEqual(graphResult(mixedBatch).notes, [
+    "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+    "contract → release (via contract → parser → integration → verification → release)",
+  ]);
+  assert.ok(readGraph().nodes.some((node: any) => node.id === "release"));
+  assert.ok(readGraph().edges.some((edge: any) => edge.from === "verification" && edge.to === "release"));
+  assert.ok(!readGraph().edges.some((edge: any) => edge.from === "contract" && edge.to === "release"));
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, batchSaved);
+  // Pre-existing redundant edges (including ids containing arrows) are also
+  // auto-removed and reported against surviving indirect paths.
   const retainedRedundant = JSON.parse(batchSaved);
   const literalSource = "contract → alias";
   retainedRedundant.nodes.find((node: any) => node.id === "contract").id = literalSource;
   for (const edge of retainedRedundant.edges) if (edge.from === "contract") edge.from = literalSource;
   retainedRedundant.edges.push({ from: literalSource, to: "integration", feedback: false });
-  const retainedBytes = JSON.stringify(retainedRedundant);
-  writeFileSync(process.env.GRAPHER_GRAPH_PATH, retainedBytes);
-  const existingRedundant = graphResult(await edge({ from: literalSource, to: "integration" }));
-  assert.equal(existingRedundant.applied, false);
-  assert.match(existingRedundant.diagnostics[0], /^Redundant dependency contract → alias → integration\. Remove this direct edge:/);
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(retainedRedundant));
   const mixedRedundancy = graphResult(await edge({ from: literalSource, to: "verification" }));
-  assert.equal(mixedRedundancy.applied, false);
-  assert.equal(mixedRedundancy.diagnostics.length, 2);
-  assert.ok(mixedRedundancy.diagnostics.some((text: string) => text.startsWith(`Redundant dependency ${literalSource} → integration. Remove this direct edge:`)));
-  assert.ok(mixedRedundancy.diagnostics.some((text: string) => text.startsWith(`No need to add dependency ${literalSource} → verification: ${literalSource} → integration → verification`)));
-  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), retainedBytes);
+  assert.equal(mixedRedundancy.applied, true);
+  assert.deepEqual(mixedRedundancy.notes, [
+    "Auto-removed 2 redundant direct dependencies (already provided by indirect paths):",
+    `${literalSource} → integration (via ${literalSource} → parser → integration)`,
+    `${literalSource} → verification (via ${literalSource} → parser → integration → verification)`,
+  ]);
+  assert.ok(!readGraph().edges.some((edge: any) => edge.from === literalSource && (edge.to === "integration" || edge.to === "verification")));
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, batchSaved);
+  // Warnings never wedge between an auto-removed note header and its edge list.
+  const warnAndPrune = graphResult(await call("edit_graph", {
+    nodes: [{ id: "dup", task: batchNodes[0].task }],
+    edges: [{ from: "contract", to: "integration" }],
+  }));
+  assert.equal(warnAndPrune.applied, true);
+  assert.equal(warnAndPrune.warnings.length, 1);
+  assert.ok(warnAndPrune.text.includes(
+    "Auto-removed 1 redundant direct dependency (already provided by indirect path):\ncontract → integration (via contract → parser → integration)",
+  ));
+  assert.ok(warnAndPrune.text.indexOf("Warning:") < warnAndPrune.text.indexOf("Auto-removed 1 redundant direct dependency"));
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, batchSaved);
+  // Fanout DAG pruning stays fast (O(V*(V+E))) in both tool and preview.
+  const fanoutLeaves = leaves.slice(0, 150);
+  const fanoutGraph = {
+    originalGoal: "Fanout prune",
+    nodes: [{ id: "hub", task: "Hub" }, ...fanoutLeaves],
+    edges: fanoutLeaves.map(leaf => ({ from: "hub", to: leaf.id, feedback: false })),
+  };
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(fanoutGraph));
+  const pruneStart = Date.now();
+  const fanoutPruned = graphResult(await edge({ from: "n0", to: "n1" }));
+  assert.equal(fanoutPruned.applied, true);
+  assert.deepEqual(fanoutPruned.notes, [
+    "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+    "hub → n1 (via hub → n0 → n1)",
+  ]);
+  assert.ok(Date.now() - pruneStart < 5000, "Fanout redundant-edge pruning stays fast");
+  const fanoutPreview = applyPlannerEdgeEditsToState(
+    { graph: fanoutGraph, plan: null } as any,
+    [{ from: "n0", to: "n1", feedback: false, delete: false }],
+  );
+  assert.deepEqual(fanoutPreview.graph, readGraph());
+  const hugeFanout = {
+    originalGoal: "Huge fanout preview prune",
+    nodes: [{ id: "hub", task: "Hub" }, ...leaves],
+    edges: leaves.map(leaf => ({ from: "hub", to: leaf.id, feedback: false })),
+  };
+  const previewStart = Date.now();
+  const hugePreview = applyPlannerEdgeEditsToState(
+    { graph: hugeFanout, plan: null } as any,
+    [{ from: "n0", to: "n1", feedback: false, delete: false }],
+  );
+  assert.ok(Date.now() - previewStart < 500, "Large fanout preview pruning stays fast");
+  assert.ok(!hugePreview.graph.edges.some(item => item.from === "hub" && item.to === "n1"));
+  assert.ok(hugePreview.graph.edges.some(item => item.from === "n0" && item.to === "n1"));
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, batchSaved);
 
   // Every rejected call leaves the saved graph unchanged.
@@ -1316,9 +1390,8 @@ fn main() {
   const single = graphResult(await node({ id: "single", task: "Single task" }));
   assert.equal(single.applied, true);
   await node({ id: "single", delete: true });
-  // Inserting a node across an existing direct edge: the direct edge is never
-  // pruned for the caller. Adding the second leg is rejected until the caller
-  // deletes the bypassed edge itself; the rejected call changes nothing.
+  // Inserting a node across an existing direct edge: adding the second leg
+  // automatically removes the bypassed direct edge and reports the surviving path.
   await applyEdits("node", [
     { id: "bypass_a", task: "Step A" },
     { id: "bypass_b", task: "Step B" },
@@ -1326,20 +1399,16 @@ fn main() {
   ]);
   await edge({ from: "bypass_a", to: "bypass_c" });
   await edge({ from: "bypass_a", to: "bypass_b" });
-  const beforeBypass = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
-  const rejectedLeg = await edge({ from: "bypass_b", to: "bypass_c" });
-  assert.equal(graphResult(rejectedLeg).applied, false);
-  assert.deepEqual(rejectedLeg.details.diagnosticCodes, ["E209"]);
-  assert.match(graphResult(rejectedLeg).diagnostics[0], /Redundant dependency bypass_a → bypass_c\. Remove this direct edge: bypass_a → bypass_b → bypass_c/);
-  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeBypass);
-  const insertedMiddle = graphResult(await applyEdits("edge", [
-    { from: "bypass_a", to: "bypass_c", delete: true },
-    { from: "bypass_b", to: "bypass_c" },
-  ]));
-  assert.equal(insertedMiddle.applied, true);
+  const insertedMiddle = await edge({ from: "bypass_b", to: "bypass_c" });
+  const insertedMiddleResult = graphResult(insertedMiddle);
+  assert.equal(insertedMiddleResult.applied, true);
+  assert.equal(insertedMiddle.isError, undefined);
   assert.deepEqual(readGraph().edges.filter((edge: any) => edge.from.startsWith("bypass_")).map((edge: any) => `${edge.from}>${edge.to}`), ["bypass_a>bypass_b", "bypass_b>bypass_c"]);
-  assert.equal(insertedMiddle.warnings, undefined);
-  assert.equal(insertedMiddle.notes, undefined);
+  assert.equal(insertedMiddleResult.warnings, undefined);
+  assert.deepEqual(insertedMiddleResult.notes, [
+    "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+    "bypass_a → bypass_c (via bypass_a → bypass_b → bypass_c)",
+  ]);
   await applyEdits("node", [
     { id: "bypass_a", delete: true },
     { id: "bypass_b", delete: true },
@@ -1538,11 +1607,13 @@ fn main() {
   assert.equal(mixedFeedback.notes, undefined, "Mixed new and existing feedback routes produce no rerun-scope notes");
   const beforeRedundantFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   const prunedWithFeedback = await edge({ from: "base", to: "ship" });
-  assert.equal(graphResult(prunedWithFeedback).applied, false);
-  assert.deepEqual(prunedWithFeedback.details.diagnosticCodes, ["E209"]);
-  assert.match(graphResult(prunedWithFeedback).diagnostics[0], /^No need to add dependency base → ship: base → review → inspect → ship/);
-  assert.doesNotMatch(graphResult(prunedWithFeedback).text, /Remove this direct edge/);
-  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeRedundantFeedback, "A redundant request is rejected, never auto-pruned");
+  assert.equal(graphResult(prunedWithFeedback).applied, true);
+  assert.equal(prunedWithFeedback.isError, undefined);
+  assert.deepEqual(graphResult(prunedWithFeedback).notes, [
+    "Auto-removed 1 redundant direct dependency (already provided by indirect path):",
+    "base → ship (via base → review → inspect → ship)",
+  ]);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeRedundantFeedback, "Auto-removed redundant edge is not persisted while feedback routes stay intact");
   const reappliedRoute = graphResult(await edge({ from: "inspect", to: "base", feedback: true }));
   assert.equal(reappliedRoute.warnings, undefined);
   assert.equal(reappliedRoute.notes, undefined, "Reapplying a route does not add it again");

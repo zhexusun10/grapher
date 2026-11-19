@@ -149,15 +149,15 @@ test("actual App: node results render before Planner completion; edges rearrange
     assert.ok(new Set(frames.map(frame => JSON.stringify(frame.positions))).size > 3, "cards move through intermediate layouts, not a final-layout jump");
     assert.equal(planningResponse.writableEnded, false, "edge layout does not wait for Planner completion");
 
-    // Current tools reject redundant edges without changing the preview.
-    const errorsBeforeRedundant = await page.locator(".tool-call-card.error").count();
-    startTool("rejected-redundant-edge", { edges: [{ from: "a", to: "c" }] });
-    planner({ type: "tool_execution_end", toolCallId: "rejected-redundant-edge", toolName: "edit_graph", isError: true,
-      result: { isError: true, content: [{ type: "text", text: "No need to add dependency a → c: a → b → c already provides this dependency. Omit this edge.\nThe graph is unchanged." }],
-        details: { diagnosticCodes: ["E209"] } } });
-    await page.waitForFunction(count => document.querySelectorAll(".tool-call-card.error").length > count, errorsBeforeRedundant);
+    // Redundant direct edges succeed with auto-removal and never enter the live preview.
+    const successesBeforeRedundant = await page.locator(".tool-call-card.success").count();
+    startTool("auto-pruned-redundant-edge", { edges: [{ from: "a", to: "c" }] });
+    planner({ type: "tool_execution_end", toolCallId: "auto-pruned-redundant-edge", toolName: "edit_graph", isError: false,
+      result: { content: [{ type: "text", text: "Edit succeeded; redundant direct dependency was automatically removed.\nAuto-removed 1 redundant direct dependency (already provided by indirect path):\na → c (via a → b → c)" }],
+        details: { notes: ["Auto-removed 1 redundant direct dependency (already provided by indirect path):", "a → c (via a → b → c)"] } } });
+    await page.waitForFunction(count => document.querySelectorAll(".tool-call-card.success").length > count, successesBeforeRedundant);
     await assertFitted(page, [["a"], ["b"], ["c"]]);
-    assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "Rejected edges never enter the live preview");
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "Auto-removed redundant edges never enter the live preview");
 
     // A business tool's JSON is not a compiler response and cannot set layout.
     const successfulTools = await page.locator(".tool-call-card.success").count();

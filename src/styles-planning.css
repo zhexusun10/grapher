@@ -538,13 +538,15 @@
 }
 
 /* Pulse only an inert overlay: never repaint the moving card's border/shadow
-   every frame or change its entrance animation list when a tool settles. */
+   every frame or change its entrance animation list when a tool settles.
+   Match the 1px border's 7px inner radius and avoid a second hard inset ring
+   so the glow sits flush against the blue border without a corner gap. */
 .tool-call-card.running::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
-  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.25), inset 0 0 12px rgba(59, 130, 246, 0.15);
+  border-radius: 7px;
+  box-shadow: inset 0 0 12px rgba(59, 130, 246, 0.18);
   pointer-events: none;
   animation: tool-running-glow 2.4s ease-in-out infinite;
 }

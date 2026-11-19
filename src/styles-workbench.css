@@ -293,14 +293,18 @@
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
-  /* Match the overlaid composer's centerline, even with classic scrollbars. */
+  /* Match the overlaid composer's centerline, even with classic scrollbars.
+     Keep block layout on the scroller itself: WebKit flexbox subtracts both
+     gutters from the width without offsetting children from the left edge. */
   scrollbar-gutter: stable both-edges;
   padding: 16px 18px calc(var(--composer-height, 100px) + 16px);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  display: block;
   box-sizing: border-box;
   min-height: 0;
+}
+
+.initial-query-scroll > * + * {
+  margin-top: 16px;
 }
 
 .create-node-form {
@@ -531,6 +535,7 @@
 /* 虚拟列表负责屏幕外卸载；不要再叠加 content-visibility，避免快速滚动时出现延迟绘制闪烁。 */
 
 .chat-messages-stream {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;

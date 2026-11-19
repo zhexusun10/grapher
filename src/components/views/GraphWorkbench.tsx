@@ -3383,7 +3383,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {/* 历史保存的规划活动记录（如重新加载或未被活动流完全覆盖时） */}
                     {savedPlannerIds.length > 0 && (
-                      <div style={!useSavedPlanner ? { display: "none" } : undefined}>
+                      <div
+                        data-transcript-staged={!useSavedPlanner ? "true" : undefined}
+                        aria-hidden={!useSavedPlanner || undefined}
+                        style={!useSavedPlanner ? { position: "absolute", left: 0, right: 0, top: 0, height: 0, overflow: "hidden", visibility: "hidden", pointerEvents: "none" } : undefined}
+                      >
                         <PlanningActivity
                           runId={transcriptRunId}
                           planningIds={savedPlannerIds}

@@ -48,7 +48,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       lastGesture = performance.now();
     };
     const containMissingHistory = () => {
-      if (parent.dataset.transcriptScrollMode === "latest" ||
+      if (element.closest("[data-transcript-staged='true']") || parent.dataset.transcriptScrollMode === "latest" ||
           (parent.dataset.transcriptHistoryReading !== "true" && performance.now() - lastGesture > 1000)) return;
       const top = olderInsertionTop(element, olderSource);
       if (top === null) return;
@@ -108,9 +108,10 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
           measuredViewportRef.current = "";
           return;
         }
+        const staged = Boolean(element.closest("[data-transcript-staged='true']"));
         const relativeTop = parent.getBoundingClientRect().top - element.getBoundingClientRect().top;
         const threshold = Math.max(480, parent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
-        const readingNearTop = hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
+        const readingNearTop = !staged && hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
         // Background viewport filling is not the reader asking for a page: it
         // commits immediately even when they sit somewhere in the middle of the
         // history. Only a page that extends the history they are reading waits

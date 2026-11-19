@@ -1492,6 +1492,23 @@ test("clicking a tool card leaves keyboard focus in the composer", { timeout: 30
     assert.equal(await input.evaluate(element => document.activeElement === element), true,
       "a tool disclosure click must not move Enter/Space handling away from the composer");
     assert.equal(await input.inputValue(), "Unsaved draft");
+    const runningOverlay = await card.evaluate(element => {
+      const hadRunning = element.classList.contains("running");
+      element.classList.add("running");
+      const cardStyle = getComputedStyle(element);
+      const before = getComputedStyle(element, "::before");
+      const result = {
+        innerRadius: parseFloat(cardStyle.borderTopLeftRadius) - parseFloat(cardStyle.borderTopWidth),
+        overlayRadius: parseFloat(before.borderTopLeftRadius),
+        hasHardInsetRing: /inset[^,]*0px\s+0px\s+0px\s+1px|0px\s+0px\s+0px\s+1px\s+inset/.test(before.boxShadow),
+      };
+      if (!hadRunning) element.classList.remove("running");
+      return result;
+    });
+    assert.equal(runningOverlay.overlayRadius, runningOverlay.innerRadius,
+      `running glow overlay radius must match the card's inner border curve: ${JSON.stringify(runningOverlay)}`);
+    assert.equal(runningOverlay.hasHardInsetRing, false,
+      "running glow overlay must not draw a detached inner 1px stroke");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
