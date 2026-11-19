@@ -37,7 +37,7 @@ export function ExtensionCommandUI({ request, respond }: {
     const timer = setTimeout(() => { void send({ cancelled: true }); }, request.timeout);
     return () => clearTimeout(timer);
   }, [request.id]);
-  return <section ref={panel} className="prompt-command-ui" role="group" aria-labelledby={titleId} aria-busy={busy}
+  return <section ref={panel} className="prompt-command-popover prompt-command-ui" role="group" aria-labelledby={titleId} aria-busy={busy}
     onKeyDown={event => {
       if (event.nativeEvent.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape') {

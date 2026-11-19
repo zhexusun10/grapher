@@ -4231,3 +4231,87 @@ test("an edited Planner follow-up keeps its turn and the failure notice", { time
     await context.close();
   }
 });
+
+test("opening workspace details while streaming output stays pinned without vertical jitter", async () => {
+  let output = Array.from({ length: 18 }, (_, i) => assistant(`Initial line ${i + 1}\n\nParagraph text for line ${i + 1}.`)).join("")
+    + line({ type: "message_start", message: { role: "assistant", content: [] } });
+  let streamCount = 0;
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON?.() ?? {};
+    if (command === "get_execution_output") {
+      const bytes = Buffer.from(output);
+      const start = Math.min(bytes.length, body.offset ?? 0);
+      return route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: bytes.subarray(start).toString(),
+        startOffset: start, nextOffset: bytes.length, totalBytes: bytes.length,
+        complete: true, status: "running",
+      } } });
+    }
+    return route.fulfill({ json: { result: command === "list_files" ? { files: [] } : { skills: [] } } });
+  });
+  let interval;
+  try {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    const trigger = page.getByRole("button", { name: "Workspace and session details", exact: true });
+    await trigger.waitFor();
+    await page.waitForTimeout(250);
+    await page.evaluate(() => { window.audit.send(); window.audit.startExecution(100); });
+    await page.waitForTimeout(250);
+    interval = setInterval(() => {
+      streamCount += 1;
+      output += line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `Streamed line ${streamCount}.\n` } });
+    }, 30);
+    await page.waitForTimeout(100);
+    await page.evaluate(() => {
+      window.__jitterSamples = [];
+      const start = performance.now();
+      const scroll = document.querySelector(".initial-query-scroll");
+      const stream = document.querySelector(".chat-messages-stream");
+      const sample = () => {
+        const anchor = document.querySelector(".workspace-details");
+        const streamBox = stream?.getBoundingClientRect();
+        window.__jitterSamples.push({
+          t: Math.round(performance.now() - start),
+          scrollTop: scroll.scrollTop,
+          distBottom: Math.round((scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) * 10) / 10,
+          anchorTop: anchor ? anchor.getBoundingClientRect().top : null,
+          streamLeft: streamBox ? Math.round(streamBox.left * 10) / 10 : null,
+          streamWidth: streamBox ? Math.round(streamBox.width * 10) / 10 : null,
+          overflowY: getComputedStyle(scroll).overflowY,
+        });
+        if (performance.now() - start < 700) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await trigger.click();
+    await page.waitForTimeout(750);
+    clearInterval(interval);
+    interval = undefined;
+    const samples = await page.evaluate(() => window.__jitterSamples);
+    assert.ok(streamCount >= 10, `expected concurrent streaming chunks, got ${streamCount}`);
+    assert.ok(samples.length >= 10, `expected painted frame samples, got ${samples.length}`);
+    assert.equal(samples[0].overflowY, "scroll", "conversation scroller reserves scrollbar gutter persistently");
+    let reversals = 0;
+    let prevDir = 0;
+    let maxDistBottom = 0;
+    for (let i = 1; i < samples.length; i += 1) {
+      assert.equal(samples[i].streamLeft, samples[0].streamLeft, "conversation column must not shift horizontally");
+      assert.equal(samples[i].streamWidth, samples[0].streamWidth, "conversation column width must not change");
+      if (samples[i].distBottom > maxDistBottom) maxDistBottom = samples[i].distBottom;
+      const delta = samples[i].anchorTop - samples[i - 1].anchorTop;
+      const dir = Math.abs(delta) >= 1 ? Math.sign(delta) : 0;
+      if (dir !== 0 && prevDir !== 0 && dir !== prevDir) reversals += 1;
+      if (dir !== 0) prevDir = dir;
+    }
+    assert.equal(reversals, 0, `footer direction reversed while opening during stream: ${JSON.stringify(samples)}`);
+    assert.ok(maxDistBottom <= 1, `bottom-pinned scroll drifted (${maxDistBottom}px) while opening during stream`);
+    assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+    assert.deepEqual(errors, []);
+  } finally {
+    if (interval) clearInterval(interval);
+    await context.close();
+  }
+});

@@ -350,7 +350,7 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     server: { middlewareMode: true, watch: null, hmr: false, ws: false },
   });
   try {
-    const { ExtensionItem } = await vite.ssrLoadModule('/src/components/ExtensionSettings.tsx');
+    const { ExtensionItem, KeenablePublicDialog } = await vite.ssrLoadModule('/src/components/ExtensionSettings.tsx');
     const render = (bundled: boolean, enabled = true, required = bundled) => renderToStaticMarkup(React.createElement(ExtensionItem, {
       extension: { id: bundled ? (required ? 'npm:pi-trim' : 'npm:pi-continuity') : 'probe.ts',
         name: bundled ? (required ? 'pi-trim' : 'pi-continuity') : 'probe', bundled, required, enabled, path: 'probe.ts', source: 'auto' },
@@ -386,6 +386,22 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     assert.ok(webSearch.includes(t('支持已配置的专用搜索 API 和已认证的兼容 Provider；仅在有可用搜索接口时注册 web_search 工具。')),
       'web search describes its configured API and provider-gated tool registration');
     assert.ok(!webSearch.includes('extensions/index.ts'), 'bundled web search describes its purpose instead of exposing a local path');
+    const webSearchWithNote = renderToStaticMarkup(React.createElement(ExtensionItem, {
+      extension: { id: 'npm:pi-better-web-search', name: 'pi-better-web-search', source: 'npm:pi-better-web-search',
+        path: '/Users/jerry/.pi/agent/npm/node_modules/pi-better-web-search/extensions/index.ts', bundled: true,
+        required: false, enabled: true },
+      disabled: false, onToggle() {},
+      statusNote: t('当前使用 Keenable 免费公共端点（配置 Keenable、Exa 或 Perplexity API 后自动切换）'),
+    }));
+    assert.ok(webSearchWithNote.replace(/&#x27;/g, "'").includes(t('当前使用 Keenable 免费公共端点（配置 Keenable、Exa 或 Perplexity API 后自动切换）')));
+    const dialog = renderToStaticMarkup(React.createElement(KeenablePublicDialog, {
+      open: true, busy: false, onCancel() {}, onEnableOnly() {}, onUsePublic() {},
+    })).replace(/&#x27;/g, "'");
+    assert.ok(dialog.includes(t('是否使用 Keenable 免费公共端点？')));
+    assert.ok(dialog.includes('https://docs.keenable.ai/api-keys'));
+    assert.ok(dialog.includes(t('使用免费公共端点')));
+    assert.ok(dialog.includes(t('暂不使用，仅启用')));
+    assert.ok(dialog.includes(t('取消')));
   } finally { await vite.close(); }
 });
 

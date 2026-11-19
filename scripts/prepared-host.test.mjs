@@ -355,7 +355,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
       if (role === 'partition') assert.deepEqual(tools, []);
       else if (role === 'planner') {
-        assert.match(system, /You are (?:a|the) planner operating inside (?:Grapher, )?a graph-based coding agent harness/);
+        assert.match(system, /You are (?:a|the) planner operating inside (?:Grapher, )?a (?:graph-based )?coding agent harness/);
         assert.ok(['edit_graph', 'read_graph', 'read', 'bash', 'write', 'edit'].every(tool => tools.includes(tool)));
         assert.ok(['node', 'edge'].every(tool => !tools.includes(tool)), 'retired mutation tools are not advertised');
         assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)));

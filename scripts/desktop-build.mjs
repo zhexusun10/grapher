@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -24,6 +25,7 @@ import {
   resolveDesktopTarget,
   sha256File,
   stageDesktopResources,
+  verifyStagedRuntimeWithNode,
 } from './desktop-stage.mjs';
 import {
   verifyMinisignSignatureAgainstPayload,
@@ -319,6 +321,12 @@ function tauriTargetBundleDir(target, env = process.env) {
   return hostTargetMatches(target) && existsSync(hostDir) ? hostDir : tripleDir;
 }
 
+export const MACOS_DMG_FORMAT = 'ULMO';
+
+function formatFileSizeMb(filePath) {
+  return `${(statSync(filePath).size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function createSignedDmg(appPath, dmgPath, signingIdentity) {
   const staging = mkdtempSync(join(tmpdir(), 'grapher-dmg-'));
   try {
@@ -328,7 +336,7 @@ function createSignedDmg(appPath, dmgPath, signingIdentity) {
     rmSync(dmgPath, { force: true });
     execFileSync(
       'hdiutil',
-      ['create', '-volname', 'Grapher', '-srcfolder', staging, '-ov', '-format', 'UDZO', dmgPath],
+      ['create', '-volname', 'Grapher', '-srcfolder', staging, '-ov', '-format', MACOS_DMG_FORMAT, dmgPath],
       { stdio: 'inherit' },
     );
     if (signingIdentity && signingIdentity !== '-') {
@@ -355,7 +363,7 @@ export function createMacosUpdaterTarball(appPath, tarballPath) {
     'tar',
     ['-czf', tarballPath, '-C', dirname(appPath), basename(appPath)],
     {
-      env: { ...process.env, COPYFILE_DISABLE: '1' },
+      env: { ...process.env, COPYFILE_DISABLE: '1', GZIP: '-9' },
       stdio: 'inherit',
     },
   );
@@ -554,10 +562,7 @@ export async function buildDesktopBundle({
         const bundledRuntime = join(appPath, 'Contents', 'Resources', 'runtime');
         const bundledNode = join(appPath, 'Contents', 'Resources', target.nodeRelPath);
         console.log('[desktop:build] Verifying bundled Grapher.app runtime with bundled Node...');
-        execFileSync(bundledNode, [join(bundledRuntime, 'scripts', 'pi-baseline.mjs'), 'verify'], {
-          env: { ...buildEnv, NODE_OPTIONS: '', NODE_PATH: '' },
-          stdio: 'inherit',
-        });
+        verifyStagedRuntimeWithNode(bundledNode, bundledRuntime, buildEnv);
       }
 
       const notarizationConfig = resolveMacosNotarizationConfig(baseEnv, normalizedIdentity);
@@ -574,12 +579,12 @@ export async function buildDesktopBundle({
       }
 
       const dmgPath = join(bundleDir, 'dmg', names.installerName);
-      console.log(`[desktop:build] Creating macOS .dmg installer at ${dmgPath}...`);
+      console.log(`[desktop:build] Creating macOS .dmg installer at ${dmgPath} (${MACOS_DMG_FORMAT})...`);
       createSignedDmg(appPath, dmgPath, normalizedIdentity);
       if (notarizationConfig) {
         notarizeAndStapleMacosDmg(dmgPath, notarizationConfig);
       }
-      console.log(`[desktop:build] Built ${dmgPath}`);
+      console.log(`[desktop:build] Built ${dmgPath} (${formatFileSizeMb(dmgPath)})`);
 
       let updaterPath = null;
       let signaturePath = null;
@@ -587,6 +592,7 @@ export async function buildDesktopBundle({
         updaterPath = join(bundleDir, 'macos', names.updaterName);
         console.log(`[desktop:build] Creating macOS updater archive at ${updaterPath}...`);
         createMacosUpdaterTarball(appPath, updaterPath);
+        console.log(`[desktop:build] Built ${updaterPath} (${formatFileSizeMb(updaterPath)})`);
         signaturePath = signUpdaterArtifact(updaterPath, version, baseEnv, updaterSigning.pubkey);
       } else {
         console.log(
@@ -629,7 +635,7 @@ export async function buildDesktopBundle({
     const bundleDir = tauriTargetBundleDir(target, buildEnv);
     const nsisDir = join(bundleDir, 'nsis');
     const installerPath = locateWindowsNsisInstaller(nsisDir, names.installerName);
-    console.log(`[desktop:build] Built Windows NSIS installer at ${installerPath}`);
+    console.log(`[desktop:build] Built Windows NSIS installer at ${installerPath} (${formatFileSizeMb(installerPath)})`);
 
     let updaterPath = null;
     let signaturePath = null;

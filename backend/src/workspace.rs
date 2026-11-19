@@ -551,7 +551,7 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
                         }
                         if dir_bytes > 0 {
                             let prev = total
-                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                                     Some(cur.saturating_add(dir_bytes))
                                 })
                                 .unwrap_or(u64::MAX);

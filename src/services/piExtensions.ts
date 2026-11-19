@@ -9,7 +9,15 @@ export interface PiExtension {
   bundled: boolean;
   required: boolean;
 }
-export interface ExtensionCatalog { globalDirectory: string; extensions: PiExtension[] }
+export interface WebSearchExtensionStatus {
+  keenablePublic: boolean;
+  hasDedicatedApi: boolean;
+}
+export interface ExtensionCatalog {
+  globalDirectory: string;
+  extensions: PiExtension[];
+  webSearch?: WebSearchExtensionStatus;
+}
 async function call(operation: string, fields: Record<string, unknown> = {}): Promise<ExtensionCatalog> {
   const response = await fetchApi('/api/pi_extensions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
@@ -67,11 +75,16 @@ export const piExtensions = {
     inFlightCatalog = task;
     return task;
   },
-  setEnabled: (id: string, enabled: boolean) => call('set_enabled', { id, enabled }).then(value => {
-    // Settings refreshes behind cached rows while those rows remain usable.
-    // Its earlier read must not undo a toggle that has since been committed.
-    catalogGeneration++;
-    inFlightCatalog = null;
-    return remember(value);
-  }),
+  setEnabled: (id: string, enabled: boolean, options?: { keenablePublic?: boolean }) =>
+    call('set_enabled', {
+      id,
+      enabled,
+      ...(options?.keenablePublic !== undefined ? { keenablePublic: options.keenablePublic } : {}),
+    }).then(value => {
+      // Settings refreshes behind cached rows while those rows remain usable.
+      // Its earlier read must not undo a toggle that has since been committed.
+      catalogGeneration++;
+      inFlightCatalog = null;
+      return remember(value);
+    }),
 };

@@ -23,6 +23,12 @@ incremental = false
 debug = 0
 incremental = false
 
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

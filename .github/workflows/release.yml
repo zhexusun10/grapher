@@ -44,6 +44,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.platform == 'windows' && 'stable-x86_64-pc-windows-msvc' || 'stable' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -103,6 +106,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.platform == 'windows' && 'stable-x86_64-pc-windows-msvc' || 'stable' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend
+            src-tauri
       - name: Install Node dependencies
         run: |
           npm ci --ignore-scripts
@@ -137,8 +145,10 @@ jobs:
             --tauri-conf src-tauri/tauri.conf.json
       - name: Verify Tauri desktop shell unit tests
         run: node scripts/cargo.mjs test --manifest-path src-tauri/Cargo.toml --lib
-      - name: Install and build Pi
-        run: npm run pi:setup
+      - name: Install Pi runtime dependencies
+        run: npm run pi:setup -- --no-build
+      - name: Verify Pi baseline and lean desktop staging contracts
+        run: node --test scripts/pi-baseline.test.mjs scripts/desktop-packaging.test.mjs
       - name: Configure optional macOS signing and notarization credentials
         id: macos-signing
         if: matrix.platform == 'macos'

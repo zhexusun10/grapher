@@ -6,6 +6,7 @@ import { isCaseInsensitive, pathKey, toHostInput } from './path-identity.mjs';
 import { fileURLToPath } from 'node:url';
 import { DefaultPackageManager, SettingsManager, createMcpExtension, composerCommandsExtension, loadBundledWebSearch, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
+import { hasConfiguredDedicatedSearchApiInDir, isKeenableDisabledInDir } from './search-credentials.mjs';
 import workspacePolicy from './prompt-extension.ts';
 
 // Native ESM reuses the already loaded Pi SDK. Passing this mandatory adapter
@@ -98,15 +99,33 @@ export function skillKey(resource: { path: string; metadata?: { packageRoot?: st
   const key = `file:${basename(cleanPath)}`;
   return keyCase(key, resource.path);
 }
-function overrides(directory: string): Record<string, boolean> {
+interface ExtensionState {
+  overrides: Record<string, boolean>;
+  webSearch?: { keenablePublic?: boolean };
+}
+function readExtensionState(directory: string): ExtensionState {
   const path = join(directory, 'extensions.json');
-  if (!existsSync(path)) return {};
-  const value = JSON.parse(readFileSync(path, 'utf8')).overrides;
+  if (!existsSync(path)) return { overrides: {} };
+  const parsed = JSON.parse(readFileSync(path, 'utf8'));
+  const value = parsed?.overrides;
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(v => typeof v !== 'boolean')) {
     throw new Error('Invalid Grapher extensions.json');
   }
   if (Object.hasOwn(value, trimId)) throw new Error('Unsupported pi-trim override; pi-trim is required');
-  return value;
+  let webSearch: { keenablePublic?: boolean } | undefined;
+  if (parsed.webSearch !== undefined) {
+    if (!parsed.webSearch || typeof parsed.webSearch !== 'object' || Array.isArray(parsed.webSearch)) {
+      throw new Error('Invalid Grapher extensions.json');
+    }
+    if (parsed.webSearch.keenablePublic !== undefined && typeof parsed.webSearch.keenablePublic !== 'boolean') {
+      throw new Error('Invalid Grapher extensions.json');
+    }
+    if (parsed.webSearch.keenablePublic === true) webSearch = { keenablePublic: true };
+  }
+  return webSearch ? { overrides: value, webSearch } : { overrides: value };
+}
+function overrides(directory: string): Record<string, boolean> {
+  return readExtensionState(directory).overrides;
 }
 async function resolveGlobal() {
   const agentDir = globalAgentDir();
@@ -126,7 +145,8 @@ export interface PiExtension {
   required: boolean;
 }
 export async function extensionCatalog(directory: string) {
-  const state = overrides(directory);
+  const persisted = readExtensionState(directory);
+  const state = persisted.overrides;
   const resources = await resolveGlobal();
   const extensions: PiExtension[] = bundledExtensions.map(({ defaultEnabled, ...extension }) => ({ ...extension, source: extension.id,
     enabled: extension.required || (state[extension.id] ?? defaultEnabled), bundled: true }));
@@ -139,18 +159,41 @@ export async function extensionCatalog(directory: string) {
     extensions.push({ id, name: extensionName(resource), source: resource.metadata.source,
       path: resource.path, enabled: state[id] ?? resource.enabled, bundled: false, required: false });
   }
-  return { globalDirectory: globalAgentDir(), extensions };
+  const globalDirectory = globalAgentDir();
+  return {
+    globalDirectory,
+    extensions,
+    webSearch: {
+      keenablePublic: persisted.webSearch?.keenablePublic === true && !isKeenableDisabledInDir(directory),
+      hasDedicatedApi: hasConfiguredDedicatedSearchApiInDir(directory, globalDirectory),
+    },
+  };
 }
-export async function setExtensionEnabled(directory: string, id: string, enabled: boolean) {
+export async function setExtensionEnabled(
+  directory: string,
+  id: string,
+  enabled: boolean,
+  options?: { keenablePublic?: boolean },
+) {
   if (id === trimId) throw new Error('Bundled pi-trim is required and cannot be changed');
   const catalog = await extensionCatalog(directory);
   if (!catalog.extensions.some(extension => extension.id === id)) throw new Error('Unknown Pi extension');
-  const state = overrides(directory);
-  state[id] = enabled;
+  const persisted = readExtensionState(directory);
+  persisted.overrides[id] = enabled;
+  if (id === webSearchId) {
+    if (!enabled) {
+      delete persisted.webSearch;
+    } else if (options?.keenablePublic === true) {
+      persisted.webSearch = { keenablePublic: true };
+    } else if (options?.keenablePublic === false) {
+      delete persisted.webSearch;
+    }
+  }
   const target = join(directory, 'extensions.json');
   const temporary = `${target}.${process.pid}.tmp`;
+  const payload = persisted.webSearch ? { overrides: persisted.overrides, webSearch: persisted.webSearch } : { overrides: persisted.overrides };
   try {
-    writeFileSync(temporary, JSON.stringify({ overrides: state }, null, 2), { mode: 0o600 });
+    writeFileSync(temporary, JSON.stringify(payload, null, 2), { mode: 0o600 });
     renameSync(temporary, target);
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);

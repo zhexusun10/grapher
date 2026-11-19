@@ -96,8 +96,10 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
   } finally {
     if (backend.pid && backend.exitCode === null && backend.signalCode === null) {
       const exited = once(backend, 'exit');
-      if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(backend.pid), '/T', '/F'], { stdio: 'ignore' });
-      else backend.kill('SIGTERM');
+      if (process.platform === 'win32') {
+        try { execFileSync('taskkill', ['/PID', String(backend.pid), '/T', '/F'], { stdio: 'ignore' }); }
+        catch { try { backend.kill(); } catch {} }
+      } else backend.kill('SIGTERM');
       await exited;
     }
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import {
+  cpSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -12,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { root } from './ensure-deps.mjs';
-import { assertVersionsSynced } from './desktop-build.mjs';
+import { assertVersionsSynced, MACOS_DMG_FORMAT } from './desktop-build.mjs';
 import {
   entitlementsForBinary,
   findMachOBinaries,
@@ -25,8 +27,12 @@ import {
   ensureBundleableGitMetadata,
   findRemainingSymlinks,
   PINNED_NODE_VERSION,
+  pruneNodeModulesBloat,
   resolveDesktopTarget,
+  stageLeanPiRuntime,
 } from './desktop-stage.mjs';
+import { BUNDLED_PI_MANIFEST_FILE, lock as piBaselineLock, verifyBaseline } from './pi-baseline.mjs';
+import { corePackages, verifyPiDependencies } from './pi-dependencies.mjs';
 import { buildDesktopIconSvg, REQUIRED_DESKTOP_ICONS } from './desktop-icons.mjs';
 import { inflateSync } from 'node:zlib';
 
@@ -402,4 +408,173 @@ test('macOS nested signer identifies Mach-O binaries, excludes Java classes, and
   assert.match(entitlementsForBinary(nativeAddon), /NodeEntitlements\.plist$/);
   assert.match(entitlementsForBinary(backendBin), /Entitlements\.plist$/);
   assert.doesNotMatch(entitlementsForBinary(backendBin), /NodeEntitlements\.plist$/);
+});
+
+test('release profiles and macOS DMG compression are optimized for compact bundles', () => {
+  assert.equal(MACOS_DMG_FORMAT, 'ULMO');
+
+  const backendCargo = readFileSync(join(root, 'backend', 'Cargo.toml'), 'utf8');
+  assert.match(backendCargo, /\[profile\.release\][\s\S]*strip\s*=\s*true/);
+  assert.match(backendCargo, /\[profile\.release\][\s\S]*lto\s*=\s*true/);
+  assert.match(backendCargo, /\[profile\.release\][\s\S]*codegen-units\s*=\s*1/);
+  assert.match(backendCargo, /\[profile\.release\][\s\S]*opt-level\s*=\s*"s"/);
+  // backend/src/server.rs relies on std::panic::catch_unwind.
+  assert.doesNotMatch(backendCargo, /panic\s*=\s*"abort"/);
+
+  const tauriCargo = readFileSync(join(root, 'src-tauri', 'Cargo.toml'), 'utf8');
+  assert.match(tauriCargo, /\[profile\.release\][\s\S]*strip\s*=\s*true/);
+  assert.match(tauriCargo, /\[profile\.release\][\s\S]*lto\s*=\s*true/);
+  assert.match(tauriCargo, /\[profile\.release\][\s\S]*codegen-units\s*=\s*1/);
+  assert.match(tauriCargo, /\[profile\.release\][\s\S]*opt-level\s*=\s*"s"/);
+});
+
+test('pruneNodeModulesBloat removes declarations, sourcemaps, and docs while preserving runtime and license files', t => {
+  const dir = tempDir(t);
+  const pkgDir = join(dir, 'example-pkg');
+  const typesOnlyDir = join(pkgDir, 'types');
+  mkdirSync(typesOnlyDir, { recursive: true });
+  writeFileSync(join(pkgDir, 'package.json'), '{"name":"example-pkg","version":"1.0.0"}\n');
+  writeFileSync(join(pkgDir, 'index.js'), 'export const ok = true;\n');
+  writeFileSync(join(pkgDir, 'index.d.ts'), 'export declare const ok: boolean;\n');
+  writeFileSync(join(pkgDir, 'index.d.mts'), 'export declare const ok: boolean;\n');
+  writeFileSync(join(pkgDir, 'index.js.map'), '{"version":3}\n');
+  writeFileSync(join(pkgDir, 'README.md'), '# readme\n');
+  writeFileSync(join(pkgDir, 'CHANGELOG.md'), '# changes\n');
+  writeFileSync(join(pkgDir, 'LICENSE.md'), 'MIT\n');
+  writeFileSync(join(typesOnlyDir, 'extra.d.cts'), 'export {};\n');
+
+  const stats = pruneNodeModulesBloat(dir);
+  assert.equal(stats.removedFiles, 6);
+  assert.equal(readFileSync(join(pkgDir, 'index.js'), 'utf8'), 'export const ok = true;\n');
+  assert.equal(readFileSync(join(pkgDir, 'LICENSE.md'), 'utf8'), 'MIT\n');
+  assert.throws(() => lstatSync(join(pkgDir, 'index.d.ts')));
+  assert.throws(() => lstatSync(join(pkgDir, 'index.js.map')));
+  assert.throws(() => lstatSync(join(pkgDir, 'README.md')));
+  assert.throws(() => lstatSync(typesOnlyDir));
+});
+
+test('stageLeanPiRuntime omits .git, devDependencies, dist/test/docs/apps, and workspace duplicates while staying verifiable', t => {
+  // Only run when the workspace Pi checkout has its dependencies installed.
+  try {
+    verifyPiDependencies(root);
+  } catch {
+    t.skip('Pi dependencies are not installed in this checkout');
+    return;
+  }
+
+  const outRoot = tempDir(t);
+  const destPi = join(outRoot, 'pi');
+  const target = resolveDesktopTarget(null);
+  stageLeanPiRuntime({ sourceRoot: root, destinationPiDir: destPi, target, baseline: piBaselineLock });
+
+  // Copy engine/model-data and engine/pi-dependencies manifests into outRoot so verifyBaseline/verifyPiDependencies run against outRoot.
+  mkdirSync(join(outRoot, 'engine', 'model-data'), { recursive: true });
+  for (const name of Object.keys(piBaselineLock.modelData)) {
+    writeFileSync(
+      join(outRoot, 'engine', 'model-data', name),
+      readFileSync(join(root, 'engine', 'model-data', name)),
+    );
+  }
+  mkdirSync(join(outRoot, 'engine', 'pi-dependencies'), { recursive: true });
+  for (const name of ['package.json', 'package-lock.json']) {
+    writeFileSync(
+      join(outRoot, 'engine', 'pi-dependencies', name),
+      readFileSync(join(root, 'engine', 'pi-dependencies', name)),
+    );
+  }
+
+  assert.throws(() => lstatSync(join(destPi, '.git')));
+  assert.throws(() => lstatSync(join(destPi, 'apps')));
+  assert.throws(() => lstatSync(join(destPi, 'packages', 'coding-agent', 'dist')));
+  assert.throws(() => lstatSync(join(destPi, 'packages', 'coding-agent', 'test')));
+  assert.throws(() => lstatSync(join(destPi, 'packages', 'coding-agent', 'docs')));
+  assert.throws(() => lstatSync(join(destPi, 'node_modules', 'typescript')));
+  assert.throws(() => lstatSync(join(destPi, 'node_modules', 'vitest')));
+  assert.throws(() => lstatSync(join(destPi, 'node_modules', '@earendil-works', 'pi-coding-agent', 'src')));
+  assert.equal(
+    lstatSync(join(destPi, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json')).isFile(),
+    true,
+  );
+  assert.equal(lstatSync(join(destPi, BUNDLED_PI_MANIFEST_FILE)).isFile(), true);
+  assert.deepEqual(findRemainingSymlinks(destPi), []);
+  for (const pkgDir of corePackages) {
+    assert.equal(lstatSync(join(destPi, 'packages', pkgDir, 'package.json')).isFile(), true);
+  }
+
+  verifyBaseline({ installationRoot: outRoot, baseline: piBaselineLock });
+  assert.equal(verifyPiDependencies(outRoot), piBaselineLock.packageVersion);
+
+  // Also verify prepare-native-runtime.mjs can copy a .git-less bundled runtime and admit it via --cache-key-session.
+  for (const name of ['package.json', 'package-lock.json']) {
+    cpSync(join(root, name), join(outRoot, name));
+  }
+  mkdirSync(join(outRoot, 'scripts'), { recursive: true });
+  for (const script of [
+    'pi-baseline.mjs',
+    'pi-dependencies.mjs',
+    'bundled-extensions.mjs',
+    'cargo.mjs',
+    'model-data-manifest.mjs',
+    'prepare-native-runtime.mjs',
+  ]) {
+    cpSync(join(root, 'scripts', script), join(outRoot, 'scripts', script));
+  }
+  cpSync(join(root, 'engine', 'pi-lock.json'), join(outRoot, 'engine', 'pi-lock.json'));
+  for (const ext of ['pi-trim', 'pi-continuity', 'pi-better-web-search']) {
+    cpSync(join(root, 'node_modules', ext), join(outRoot, 'node_modules', ext), { recursive: true });
+  }
+
+  const runtimeParent = tempDir(t);
+  const prepared = execFileSync(process.execPath, [join(outRoot, 'scripts', 'prepare-native-runtime.mjs')], {
+    cwd: outRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent,
+      GRAPHER_TRUSTED_GIT: join(outRoot, 'missing-git-binary'),
+    },
+    timeout: 60000,
+  }).trim();
+
+  assert.throws(() => lstatSync(join(prepared, 'pi', '.git')));
+  const sessionReplies = execFileSync(
+    process.execPath,
+    [join(outRoot, 'scripts', 'prepare-native-runtime.mjs'), '--cache-key-session'],
+    {
+      cwd: outRoot,
+      encoding: 'utf8',
+      input: `${JSON.stringify({ verify: prepared })}\n`,
+      timeout: 30000,
+    },
+  )
+    .trim()
+    .split(/\r?\n/)
+    .map(line => JSON.parse(line));
+  assert.equal(sessionReplies.length, 2);
+  assert.equal(sessionReplies[0].ok, true);
+  assert.equal(sessionReplies[1].ok, true);
+  assert.equal(sessionReplies[0].key, sessionReplies[1].key);
+
+  // Tampering with the copied runtime by adding a pruned dev dependency must fail cache admission.
+  mkdirSync(join(prepared, 'pi', 'node_modules', 'typescript'), { recursive: true });
+  writeFileSync(
+    join(prepared, 'pi', 'node_modules', 'typescript', 'package.json'),
+    '{"name":"typescript","version":"7.0.2"}\n',
+  );
+  const tamperedReplies = execFileSync(
+    process.execPath,
+    [join(outRoot, 'scripts', 'prepare-native-runtime.mjs'), '--cache-key-session'],
+    {
+      cwd: outRoot,
+      encoding: 'utf8',
+      input: `${JSON.stringify({ verify: prepared })}\n`,
+      timeout: 30000,
+    },
+  )
+    .trim()
+    .split(/\r?\n/)
+    .map(line => JSON.parse(line));
+  assert.equal(tamperedReplies[0].ok, true);
+  assert.equal(tamperedReplies[1].ok, false);
+  assert.match(tamperedReplies[1].error, /Extraneous Pi dependency: node_modules\/typescript/);
 });

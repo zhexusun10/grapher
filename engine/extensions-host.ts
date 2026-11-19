@@ -12,7 +12,12 @@ try {
   let result;
   if (request.operation === 'catalog') result = await extensionCatalog(directory);
   else if (request.operation === 'set_enabled' && typeof request.id === 'string' && typeof request.enabled === 'boolean') {
-    result = await setExtensionEnabled(directory, request.id, request.enabled);
+    if (request.keenablePublic !== undefined && typeof request.keenablePublic !== 'boolean') {
+      throw new Error('Invalid extension operation');
+    }
+    result = await setExtensionEnabled(directory, request.id, request.enabled, {
+      keenablePublic: request.keenablePublic,
+    });
   } else throw new Error('Invalid extension operation');
   process.stdout.write(JSON.stringify({ result }));
 } catch (error) {

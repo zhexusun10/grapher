@@ -289,7 +289,10 @@
 
 .initial-query-scroll {
   flex: 1;
-  overflow-y: auto;
+  /* Always reserve the custom ::-webkit-scrollbar track so WebKit does not
+     add/remove both scrollbar-gutter edges (shifting the whole conversation
+     horizontally) when opening details crosses the overflow threshold. */
+  overflow-y: scroll;
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
@@ -2328,7 +2331,9 @@ button.session-label-toggle:focus-visible {
   padding-top: 6px;
   font-family: inherit;
   font-size: 13px;
-  line-height: 1.6;
+  /* Integer pixel line-height avoids fractional-pixel scrollHeight rounding
+     when the details panel is open while streaming output pins the bottom. */
+  line-height: 21px;
   font-variant-numeric: tabular-nums;
 }
 

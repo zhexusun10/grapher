@@ -7,12 +7,14 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const corePackages = ['chord', 'tui', 'telemetry', 'schema', 'codemode', 'mcp', 'ai', 'durable', 'agent', 'coding-agent'];
+export const BUNDLED_PI_MANIFEST_FILE = '.grapher-bundled-manifest.json';
+export const PI_DEPENDENCIES_MODE_RUNTIME_ONLY = 'runtime-only';
 const excludedPackages = new Set(['shx', 'shelljs', 'fast-glob', 'micromatch', 'braces', 'node-forge', '@earendil-works/gondolin']);
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 export const profileDirectory = root => join(root, 'engine/pi-dependencies');
 
-export function dependencyManifest(root) {
+export function dependencyManifest(root, { includeDev = true } = {}) {
   const source = join(root, 'pi');
   const upstream = json(join(source, 'package.json'));
   const packages = corePackages.map(directory => json(join(source, 'packages', directory, 'package.json')));
@@ -32,12 +34,16 @@ export function dependencyManifest(root) {
   for (const pkg of packages) {
     if (pkg.version !== version) throw new Error(`Pi workspace version mismatch: ${pkg.name}`);
     for (const [name, spec] of Object.entries({ ...pkg.dependencies, ...pkg.optionalDependencies })) add(name, spec);
-    for (const [name, spec] of Object.entries(pkg.devDependencies ?? {})) {
-      if (name.startsWith('@types/') || name === 'vitest' || name === '@xterm/headless') add(name, spec);
+    if (includeDev) {
+      for (const [name, spec] of Object.entries(pkg.devDependencies ?? {})) {
+        if (name.startsWith('@types/') || name === 'vitest' || name === '@xterm/headless') add(name, spec);
+      }
     }
   }
-  add('typescript', upstream.devDependencies.typescript);
-  add('@types/node', upstream.devDependencies['@types/node']);
+  if (includeDev) {
+    add('typescript', upstream.devDependencies.typescript);
+    add('@types/node', upstream.devDependencies['@types/node']);
+  }
   return {
     name: 'grapher-pi-dependencies', version, private: true, type: 'module',
     description: 'Pinned dependencies for the unmodified Pi source runtime; no example workspaces or shelljs build chain.',
@@ -45,6 +51,55 @@ export function dependencyManifest(root) {
     dependencies: Object.fromEntries(Object.entries(dependencies).sort(([a], [b]) => a.localeCompare(b))),
     overrides: upstream.overrides,
   };
+}
+
+export function computeRuntimeDependencyKeys(root, lock) {
+  const runtimeManifest = dependencyManifest(root, { includeDev: false });
+  const resolveInLock = (fromKey, depName) => {
+    let current = fromKey;
+    while (true) {
+      const candidate = current ? `${current}/node_modules/${depName}` : `node_modules/${depName}`;
+      if (lock.packages[candidate]) return candidate;
+      if (!current) return null;
+      const idx = current.lastIndexOf('/node_modules/');
+      current = idx === -1 ? '' : current.slice(0, idx);
+    }
+  };
+  const visited = new Set();
+  const queue = [];
+  for (const name of Object.keys(runtimeManifest.dependencies)) {
+    const resolved = resolveInLock('', name);
+    if (!resolved) throw new Error(`Missing runtime Pi dependency in lockfile: ${name}`);
+    if (!visited.has(resolved)) {
+      visited.add(resolved);
+      queue.push(resolved);
+    }
+  }
+  while (queue.length > 0) {
+    const key = queue.shift();
+    const entry = lock.packages[key];
+    const deps = { ...entry.dependencies, ...entry.optionalDependencies, ...entry.peerDependencies };
+    for (const depName of Object.keys(deps)) {
+      const resolved = resolveInLock(key, depName);
+      if (resolved && !visited.has(resolved)) {
+        visited.add(resolved);
+        queue.push(resolved);
+      }
+    }
+  }
+  return visited;
+}
+
+function isTrustedRuntimeOnlyInstallation(root) {
+  const expectedSource = join(root, 'pi');
+  if (existsSync(join(expectedSource, '.git'))) return false;
+  if (!existsSync(join(expectedSource, BUNDLED_PI_MANIFEST_FILE))) return false;
+  const markerPath = join(expectedSource, 'node_modules', '.grapher-pi-dependencies.json');
+  try {
+    return json(markerPath)?.mode === PI_DEPENDENCIES_MODE_RUNTIME_ONLY;
+  } catch {
+    return false;
+  }
 }
 
 export function dependencyProfileHashes(root) {
@@ -90,6 +145,14 @@ export function verifyPiDependencies(root, { installationRoot = root, profileCac
   if (profileCache) profileCache.profile = verifiedProfile;
   const { manifest, lock } = verifiedProfile;
   const expectedHashes = verifiedProfile.hashes ?? dependencyProfileHashes(root);
+  const runtimeOnly = verifiedProfile.runtimeOnly ?? isTrustedRuntimeOnlyInstallation(root);
+  verifiedProfile.runtimeOnly = runtimeOnly;
+  const expectedMarker = runtimeOnly
+    ? { ...expectedHashes, mode: PI_DEPENDENCIES_MODE_RUNTIME_ONLY }
+    : expectedHashes;
+  const allowedPackageKeys = runtimeOnly
+    ? (verifiedProfile.runtimeKeys ??= computeRuntimeDependencyKeys(root, lock))
+    : null;
   const source = join(installationRoot, 'pi');
   const expectedSource = join(root, 'pi');
   const modules = join(source, 'node_modules');
@@ -97,7 +160,7 @@ export function verifyPiDependencies(root, { installationRoot = root, profileCac
   let markerRaw;
   try { markerRaw = readFileSync(markerPath, 'utf8'); }
   catch { throw new Error('Pi dependencies are missing or use an unreviewed install; run npm run pi:setup'); }
-  if (JSON.stringify(JSON.parse(markerRaw)) !== JSON.stringify(expectedHashes)) {
+  if (JSON.stringify(JSON.parse(markerRaw)) !== JSON.stringify(expectedMarker)) {
     throw new Error('Pi dependencies are missing or use an unreviewed install; run npm run pi:setup');
   }
   const internal = verifiedProfile.internal ?? new Map(corePackages.map(directory => {
@@ -108,6 +171,7 @@ export function verifyPiDependencies(root, { installationRoot = root, profileCac
   verifiedProfile.internal = internal;
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path) continue;
+    if (allowedPackageKeys && !allowedPackageKeys.has(path)) continue;
     const metadata = join(source, path, 'package.json');
     let raw;
     try { raw = readFileSync(metadata, 'utf8'); }
@@ -135,7 +199,7 @@ export function verifyPiDependencies(root, { installationRoot = root, profileCac
       const metadata = join(path, 'package.json');
       if (internal.has(key)) {
         if (hash(metadata) !== internal.get(key)) throw new Error(`Pi workspace binding mismatch: ${key}`);
-      } else if (!lock.packages[key]) {
+      } else if (!lock.packages[key] || (allowedPackageKeys && !allowedPackageKeys.has(key))) {
         throw new Error(`Extraneous Pi dependency: ${key}; run npm run pi:setup`);
       }
       inspect(join(path, 'node_modules'));

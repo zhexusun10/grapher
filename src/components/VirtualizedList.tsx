@@ -421,7 +421,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     // is never pulled back by this frame's row measurement.
     const followingLatestNow = parent?.dataset.transcriptScrollMode === "latest";
     const readingHistoryNow = !followingLatestNow && parent?.dataset.transcriptHistoryReading === "true";
-    const bottomPinnedNow = !followingLatestNow && !readingHistoryNow &&
+    const disclosureAnimatingNow = parent?.dataset.transcriptDisclosureAnimating === "true";
+    const bottomPinnedNow = !followingLatestNow && !readingHistoryNow && !disclosureAnimatingNow &&
       (parent?.dataset.transcriptPreparing === "true" || parent?.dataset.transcriptFollowing === "true");
 
     const restore = restoreRef.current;

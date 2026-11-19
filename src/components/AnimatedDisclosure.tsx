@@ -94,9 +94,18 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     let scrollDelta = 0;
     let revealProgress = 0;
     const scrollOwner = {};
+    const following = container?.dataset.transcriptFollowing === "true"
+      && container.dataset.transcriptScrollMode !== "latest";
+    let followBottom = false;
     const followAnchor = () => {
       if (!container || !open || interruptedRef.current || container.dataset.transcriptScrollMode === "latest"
         || disclosureScrollOwners.get(container) !== scrollOwner) return;
+      if (followBottom) {
+        if (container.dataset.transcriptFollowing === "true") {
+          container.scrollTop = container.scrollHeight;
+        }
+        return;
+      }
       const targetAnchorTop = startAnchorTop - scrollDelta * revealProgress;
       const correction = anchor.getBoundingClientRect().top - targetAnchorTop;
       if (Math.abs(correction) >= 0.5) container.scrollTop += correction;
@@ -107,18 +116,33 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     rafIdRef.current = null;
     cleanupListenersRef.current?.();
     cleanupListenersRef.current = null;
-    onBeforeToggleRef.current?.();
 
     if (container && open) {
       const viewport = getConversationViewport(container);
+      const visibleTop = viewport.top + 12;
+      const visibleBottom = viewport.bottom - 12;
+      const additionalHeight = Math.max(0, targetHeight - startHeight);
+      const maxScrollAfter = Math.max(0, container.scrollHeight + additionalHeight - container.clientHeight);
+      const futureAnchorTop = startAnchorTop - (maxScrollAfter - container.scrollTop);
+      // When the conversation is already following the newest output and the
+      // expanded panel fits without pushing the trigger above the viewport,
+      // stay bottom-pinned throughout the reveal instead of suppressing
+      // auto-scroll and fighting concurrent streaming output.
+      followBottom = following && futureAnchorTop >= visibleTop;
       // The changes list is a disclosure nested beside the session-details
       // trigger; keep that enclosing trigger row visible, not just the list's
       // own top edge.
-      scrollDelta = calculateWorkspaceDetailsScrollDelta(
+      scrollDelta = followBottom ? 0 : calculateWorkspaceDetailsScrollDelta(
         open, startHeight, targetHeight,
         anchor.getBoundingClientRect().top, panel.getBoundingClientRect().bottom,
-        viewport.top + 12, viewport.bottom - 12,
+        visibleTop, visibleBottom,
       );
+      if (!followBottom) {
+        onBeforeToggleRef.current?.();
+        container.dataset.transcriptDisclosureAnimating = "true";
+      } else {
+        delete container.dataset.transcriptDisclosureAnimating;
+      }
       // History can commit between animation frames. Correct its height change
       // before paint as well, rather than showing one frame of old scrollTop.
       disclosureScrollOwners.set(container, scrollOwner);
@@ -130,16 +154,23 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
       container.addEventListener("touchmove", onUserScroll, { passive: true });
       cleanupListenersRef.current = () => {
         observer.disconnect();
-        if (disclosureScrollOwners.get(container) === scrollOwner) disclosureScrollOwners.delete(container);
+        if (disclosureScrollOwners.get(container) === scrollOwner) {
+          disclosureScrollOwners.delete(container);
+          delete container.dataset.transcriptDisclosureAnimating;
+        }
         container.removeEventListener("wheel", onUserScroll);
         container.removeEventListener("touchmove", onUserScroll);
       };
+    } else if (!following) {
+      onBeforeToggleRef.current?.();
     }
 
     const duration = 280;
     const startTime = performance.now();
     const tick = (now: number) => {
-      const progress = Math.min(1, (now - startTime) / duration);
+      // rAF's frame timestamp can precede a performance.now() taken mid-frame
+      // in useLayoutEffect; clamp at 0 so the first frame never scrolls backward.
+      const progress = Math.min(1, Math.max(0, (now - startTime) / duration));
       // ease-out cubic
       const ease = 1 - Math.pow(1 - progress, 3);
       animator.style.height = `${startHeight + (targetHeight - startHeight) * ease}px`;
@@ -155,6 +186,9 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
       cleanupListenersRef.current = null;
       animator.style.height = open ? "auto" : "0px";
       animator.style.opacity = open ? "1" : "0";
+      if (followBottom && container && !interruptedRef.current && container.dataset.transcriptFollowing === "true") {
+        container.scrollTop = container.scrollHeight;
+      }
       onAfterToggleRef.current?.();
     };
     rafIdRef.current = requestAnimationFrame(tick);

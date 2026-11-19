@@ -1,40 +1,138 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { enableCompileCache, registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extname, join, resolve, sep } from "node:path";
 import { toolchainEnv } from "./cargo.mjs";
-import { corePackages, installPiDependencies, verifyPiDependencies } from "./pi-dependencies.mjs";
+import { BUNDLED_PI_MANIFEST_FILE, corePackages, installPiDependencies, verifyPiDependencies } from "./pi-dependencies.mjs";
 import { regenerateModelDataManifest } from "./model-data-manifest.mjs";
 
+export { BUNDLED_PI_MANIFEST_FILE };
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
 export const lock = JSON.parse(readFileSync(join(root, "engine/pi-lock.json"), "utf8"));
 const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 
-// Called both on the host and inside isolated runtime copies. Git metadata is
-// copied into those runtimes; --no-optional-locks keeps verification read-only.
-export function verifyBaseline({ installationRoot = root, baseline = lock } = {}) {
-  const pi = join(installationRoot, "pi");
-  const git = (...args) => {
-    try {
-      return execFileSync(process.env.GRAPHER_TRUSTED_GIT || "git", ["--no-optional-locks", "-C", pi, ...args], {
-        encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-        env: toolchainEnv(Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))),
-      }).trim();
-    } catch (error) {
-      throw new Error(`Cannot inspect Pi checkout: ${error.stderr?.toString().trim() || error.message}. Initialize the Pi submodule and ensure Git is available.`);
+function collectBundledPiFiles(piDir) {
+  const files = [];
+  const walk = (dir, relPrefix) => {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (!relPrefix && (entry.name === "node_modules" || entry.name === BUNDLED_PI_MANIFEST_FILE)) continue;
+      const fullPath = join(dir, entry.name);
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      const meta = lstatSync(fullPath);
+      if (meta.isSymbolicLink()) {
+        throw new Error(`Bundled Pi runtime must not contain symbolic links: ${relPath}`);
+      }
+      if (meta.isDirectory()) {
+        walk(fullPath, relPath);
+      } else if (meta.isFile()) {
+        files.push({ relPath, fullPath });
+      } else {
+        throw new Error(`Bundled Pi runtime contains unsupported filesystem entry: ${relPath}`);
+      }
     }
   };
+  walk(piDir, "");
+  files.sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
+  return files;
+}
+
+export function buildBundledPiManifest(piDir, baseline = lock) {
   if (!/^[a-f0-9]{40}$/.test(baseline.forkCommit ?? "")) throw new Error("Invalid Pi baseline commit in engine/pi-lock.json");
   if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(baseline.packageVersion ?? "")) throw new Error("Invalid Pi package version in engine/pi-lock.json");
-  const actual = git("rev-parse", "HEAD");
-  if (actual !== baseline.forkCommit) throw new Error(`Pi checkout is ${actual}, expected ${baseline.forkCommit}; restore the pinned submodule before starting Grapher`);
-  if (git("status", "--porcelain", "--untracked-files=normal")) {
-    throw new Error("Pi checkout has tracked or untracked changes; review and remove them before starting Grapher (ignored build artifacts and model data are allowed)");
+  const files = {};
+  for (const { relPath, fullPath } of collectBundledPiFiles(piDir)) {
+    files[relPath] = hash(fullPath);
+  }
+  return {
+    schemaVersion: 1,
+    mode: "bundled-desktop",
+    forkCommit: baseline.forkCommit,
+    packageVersion: baseline.packageVersion,
+    packageLockSha256: baseline.packageLockSha256,
+    files,
+  };
+}
+
+function verifyBundledPiManifest(piDir, baseline) {
+  const manifestPath = join(piDir, BUNDLED_PI_MANIFEST_FILE);
+  let manifest;
+  try {
+    manifest = json(manifestPath);
+  } catch (error) {
+    throw new Error(`Invalid bundled Pi manifest: ${error.message}`);
+  }
+  if (
+    !manifest ||
+    manifest.schemaVersion !== 1 ||
+    manifest.mode !== "bundled-desktop" ||
+    manifest.forkCommit !== baseline.forkCommit ||
+    manifest.packageVersion !== baseline.packageVersion ||
+    manifest.packageLockSha256 !== baseline.packageLockSha256 ||
+    !manifest.files ||
+    typeof manifest.files !== "object" ||
+    Array.isArray(manifest.files)
+  ) {
+    throw new Error("Bundled Pi manifest does not match engine/pi-lock.json");
+  }
+  const expectedKeys = Object.keys(manifest.files).sort();
+  if (expectedKeys.length === 0) {
+    throw new Error("Bundled Pi manifest contains no files");
+  }
+  const actualFiles = collectBundledPiFiles(piDir);
+  if (actualFiles.length !== expectedKeys.length) {
+    const actualSet = new Set(actualFiles.map(item => item.relPath));
+    const missing = expectedKeys.filter(key => !actualSet.has(key));
+    const extra = actualFiles.map(item => item.relPath).filter(key => !Object.hasOwn(manifest.files, key));
+    throw new Error(
+      `Bundled Pi runtime file list mismatch (missing: ${missing.slice(0, 3).join(", ") || "none"}, extra: ${extra.slice(0, 3).join(", ") || "none"})`,
+    );
+  }
+  for (let i = 0; i < actualFiles.length; i++) {
+    const { relPath, fullPath } = actualFiles[i];
+    if (relPath !== expectedKeys[i]) {
+      throw new Error(`Bundled Pi runtime file list mismatch at ${relPath}`);
+    }
+    if (relPath.startsWith("/") || relPath.includes("\\") || relPath.split("/").includes("..")) {
+      throw new Error(`Invalid bundled Pi manifest path: ${relPath}`);
+    }
+    const expectedHash = manifest.files[relPath];
+    if (typeof expectedHash !== "string" || !/^[a-f0-9]{64}$/.test(expectedHash) || hash(fullPath) !== expectedHash) {
+      throw new Error(`Bundled Pi runtime integrity mismatch: ${relPath}`);
+    }
+  }
+}
+
+// Called both on the host and inside isolated runtime copies. Git metadata is
+// copied into source runtimes (--no-optional-locks keeps verification read-only);
+// desktop bundles omit .git and verify against their sealed SHA-256 manifest.
+export function verifyBaseline({ installationRoot = root, baseline = lock } = {}) {
+  const pi = join(installationRoot, "pi");
+  if (!/^[a-f0-9]{40}$/.test(baseline.forkCommit ?? "")) throw new Error("Invalid Pi baseline commit in engine/pi-lock.json");
+  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(baseline.packageVersion ?? "")) throw new Error("Invalid Pi package version in engine/pi-lock.json");
+  if (!existsSync(join(pi, ".git")) && existsSync(join(pi, BUNDLED_PI_MANIFEST_FILE))) {
+    verifyBundledPiManifest(pi, baseline);
+  } else {
+    const git = (...args) => {
+      try {
+        return execFileSync(process.env.GRAPHER_TRUSTED_GIT || "git", ["--no-optional-locks", "-C", pi, ...args], {
+          encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+          env: toolchainEnv(Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))),
+        }).trim();
+      } catch (error) {
+        throw new Error(`Cannot inspect Pi checkout: ${error.stderr?.toString().trim() || error.message}. Initialize the Pi submodule and ensure Git is available.`);
+      }
+    };
+    const actual = git("rev-parse", "HEAD");
+    if (actual !== baseline.forkCommit) throw new Error(`Pi checkout is ${actual}, expected ${baseline.forkCommit}; restore the pinned submodule before starting Grapher`);
+    if (git("status", "--porcelain", "--untracked-files=normal")) {
+      throw new Error("Pi checkout has tracked or untracked changes; review and remove them before starting Grapher (ignored build artifacts and model data are allowed)");
+    }
   }
   if (json(join(pi, "packages/coding-agent/package.json")).version !== baseline.packageVersion) {
     throw new Error("Pi coding-agent version does not match engine/pi-lock.json");
@@ -180,24 +278,44 @@ function fastBaselineFingerprint(installationRoot = root, baseline = lock) {
     if (!/^[a-f0-9]{40}$/.test(baseline.forkCommit ?? "")) return null;
     if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(baseline.packageVersion ?? "")) return null;
     const piDir = join(installationRoot, "pi");
-    const gitDir = resolvePiGitDir(piDir);
-    if (!gitDir) return null;
-    const headRaw = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
-    let headCommit = headRaw;
-    if (headRaw.startsWith("ref:")) {
-      const ref = headRaw.slice(4).trim();
-      const refPath = join(gitDir, ref);
-      if (existsSync(refPath)) {
-        headCommit = readFileSync(refPath, "utf8").trim();
-      } else {
-        const packed = join(gitDir, "packed-refs");
-        if (!existsSync(packed)) return null;
-        const st = statSync(packed);
-        headCommit = `${headRaw}:${st.size}:${st.mtimeMs}`;
+    let piIdentityToken;
+    const bundledManifestPath = join(piDir, BUNDLED_PI_MANIFEST_FILE);
+    if (!existsSync(join(piDir, ".git")) && existsSync(bundledManifestPath)) {
+      const manifestRaw = readFileSync(bundledManifestPath);
+      const manifest = JSON.parse(manifestRaw.toString("utf8"));
+      if (
+        manifest?.schemaVersion !== 1 ||
+        manifest.mode !== "bundled-desktop" ||
+        manifest.forkCommit !== baseline.forkCommit ||
+        manifest.packageVersion !== baseline.packageVersion ||
+        manifest.packageLockSha256 !== baseline.packageLockSha256
+      ) {
+        return null;
       }
+      const manifestStat = statSync(bundledManifestPath);
+      const manifestHash = createHash("sha256").update(manifestRaw).digest("hex");
+      piIdentityToken = `bundled:${manifestHash}:${manifestStat.size}:${manifestStat.mtimeMs}`;
+    } else {
+      const gitDir = resolvePiGitDir(piDir);
+      if (!gitDir) return null;
+      const headRaw = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+      let headCommit = headRaw;
+      if (headRaw.startsWith("ref:")) {
+        const ref = headRaw.slice(4).trim();
+        const refPath = join(gitDir, ref);
+        if (existsSync(refPath)) {
+          headCommit = readFileSync(refPath, "utf8").trim();
+        } else {
+          const packed = join(gitDir, "packed-refs");
+          if (!existsSync(packed)) return null;
+          const st = statSync(packed);
+          headCommit = `${headRaw}:${st.size}:${st.mtimeMs}`;
+        }
+      }
+      if (/^[a-f0-9]{40}$/.test(headCommit) && headCommit !== baseline.forkCommit) return null;
+      const indexStat = statSync(join(gitDir, "index"));
+      piIdentityToken = `${headCommit}\0${indexStat.size}:${indexStat.mtimeMs}:${indexStat.ctimeMs}`;
     }
-    if (/^[a-f0-9]{40}$/.test(headCommit) && headCommit !== baseline.forkCommit) return null;
-    const indexStat = statSync(join(gitDir, "index"));
     if (json(join(piDir, "packages/coding-agent/package.json")).version !== baseline.packageVersion) return null;
     const piPkgStat = statSync(join(piDir, "package.json"));
     const piLockStat = statSync(join(piDir, "package-lock.json"));
@@ -212,7 +330,7 @@ function fastBaselineFingerprint(installationRoot = root, baseline = lock) {
 
     const digest = createHash("sha256");
     digest.update(`${installationRoot}\0${baseline.forkCommit}\0${baseline.packageVersion}\0${baseline.packageLockSha256}\0`);
-    digest.update(`${headCommit}\0${indexStat.size}:${indexStat.mtimeMs}:${indexStat.ctimeMs}\0`);
+    digest.update(`${piIdentityToken}\0`);
     digest.update(`${piPkgStat.size}:${piPkgStat.mtimeMs}\0${piLockStat.size}:${piLockStat.mtimeMs}\0${modulesStat.mtimeMs}\0`);
     digest.update(`${depMarker}\0`);
     digest.update(`${depPkgStat.size}:${depPkgStat.mtimeMs}\0${depLockStat.size}:${depLockStat.mtimeMs}\0`);
@@ -381,7 +499,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (action === "setup") {
       installPiDependencies(root, runNpm);
       restoreModelData();
-      runBuild();
+      if (!process.argv.includes("--no-build")) {
+        runBuild();
+      }
     } else if (action === "build") {
       verifyPiDependencies(root);
       restoreModelData();

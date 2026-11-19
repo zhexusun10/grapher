@@ -49,7 +49,7 @@ import { resolvePath as resolvePiPath } from '../pi/packages/coding-agent/src/ut
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { withInheritedSearchCredentials } from './search-credentials.mjs';
+import { withGrapherSearchPreferences, withInheritedSearchCredentials } from './search-credentials.mjs';
 import { samePath } from './path-identity.mjs';
 
 const bundledTrimPath = fileURLToPath(new URL('../node_modules/pi-trim/extensions/index.ts', import.meta.url));
@@ -153,12 +153,19 @@ export async function loadBundledWebSearch() {
     import('../pi/packages/coding-agent/src/core/extensions/virtual-modules.ts'),
   ]);
   const credentialPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/credentials.ts', import.meta.url));
+  const preferencesPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/preferences.ts', import.meta.url));
   const loader = createJiti(import.meta.url, { moduleCache: false, virtualModules: VIRTUAL_MODULES, tsconfigPaths: true });
   const credentials = withInheritedSearchCredentials(await loader.import(credentialPath));
+  const preferences = withGrapherSearchPreferences(await loader.import(preferencesPath), credentials, getAgentDir);
   // This relative module belongs only to this package-local loader. Other
   // user extensions keep their own imports and credential implementations.
   const jiti = createJiti(import.meta.url, { moduleCache: false,
-    virtualModules: { ...VIRTUAL_MODULES, './credentials.ts': credentials }, tsconfigPaths: true });
+    virtualModules: {
+      ...VIRTUAL_MODULES,
+      './credentials.ts': credentials,
+      './preferences.ts': preferences,
+      '../preferences.ts': preferences,
+    }, tsconfigPaths: true });
   return jiti.import<import('../pi/packages/coding-agent/src/index.ts').ExtensionFactory>(
     fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url)), { default: true });
 }

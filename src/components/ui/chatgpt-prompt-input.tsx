@@ -1177,8 +1177,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         <AnimatePresence>
           {commands.scopedModelsOpen && <ScopedModelsModal key="scoped-models-modal" onClose={commands.closeScopedModels} />}
         </AnimatePresence>
-        {(commandError || commands.notice) && <ComposerNotice text={commandError || commands.notice} error={!!commandError}
-          onClose={() => { setCommandError(""); commands.clearNotice(); }} />}
+        {(commandError || commands.notice || commands.ui) && (
+          <div className="prompt-command-popover-stack" onClick={(e) => e.stopPropagation()}>
+            {(commandError || commands.notice) && <ComposerNotice text={commandError || commands.notice} error={!!commandError}
+              onClose={() => { setCommandError(""); commands.clearNotice(); }} />}
+            {commands.ui && <ExtensionCommandUI key={commands.ui.id} request={commands.ui} respond={commands.respond} />}
+          </div>
+        )}
         {/* Floating Suggestion Popover above the PromptBox */}
         <AnimatePresence>
           {showSuggestions && (
@@ -1344,7 +1349,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               onClick={event => { event.stopPropagation(); setRestoredImages(images => images.filter((_, i) => i !== index)); }}><X size={12} /></button>
           </div>)}
         </div>}
-        {commands.ui && <ExtensionCommandUI key={commands.ui.id} request={commands.ui} respond={commands.respond} />}
         {attachmentError && <p role="alert" className="prompt-box-attachment-error">{attachmentError}</p>}
         {/* Textarea Input */}
         <div className="prompt-box-textarea-row">

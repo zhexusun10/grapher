@@ -411,10 +411,15 @@ test("arbitrary extension dialogs support filtering, keyboard selection, IME and
     });
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands`);
     const composer = page.locator('textarea').first();
+    const composerBoxBefore = await page.locator('.prompt-box-container').boundingBox();
     const submit = async () => { await composer.fill('/choose-workspace'); await composer.press('Escape'); await composer.press('Enter'); };
     await submit();
     const filter = page.getByRole('searchbox', { name: '筛选选项' });
     await expect(filter).toBeFocused();
+    const dialogBox = await page.locator('.prompt-command-ui').boundingBox();
+    const composerBoxOpen = await page.locator('.prompt-box-container').boundingBox();
+    assert.ok(dialogBox.y + dialogBox.height <= composerBoxOpen.y, 'extension dialog floats above the composer');
+    assert.ok(Math.abs(composerBoxOpen.height - composerBoxBefore.height) <= 1, 'opening extension dialog does not change composer height');
     await filter.fill('missing');
     await expect(page.locator('.prompt-command-ui [role="status"]')).toContainText('没有匹配的选项');
     await filter.fill('12');
@@ -423,6 +428,8 @@ test("arbitrary extension dialogs support filtering, keyboard selection, IME and
     await page.keyboard.press('Enter');
     const input = page.getByRole('textbox', { name: 'Workspace name' });
     await expect(input).toBeFocused();
+    const composerBoxAfterSelect = await page.locator('.prompt-box-container').boundingBox();
+    assert.ok(Math.abs(composerBoxAfterSelect.height - composerBoxBefore.height) <= 1, 'selecting an extension option does not change composer height');
     await input.fill('工作区');
     await input.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true });
     assert.equal(replies.length, 1, 'IME confirmation does not submit the dialog');

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { t } from "../../i18n";
 import { isMacosTauriDesktop, isWindowsTauriDesktop } from "../../services/apiBase";
 
@@ -25,6 +25,7 @@ export function useDesktopTitlebar(): DesktopTitlebarState {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  const syncSeqRef = useRef(0);
 
   const visible = platform !== null && !isFullscreen;
 
@@ -42,13 +43,16 @@ export function useDesktopTitlebar(): DesktopTitlebarState {
 
   const syncWindowState = useCallback(async () => {
     if (!platform) return;
+    const seq = ++syncSeqRef.current;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const current = getCurrentWindow();
       const fullscreen = await current.isFullscreen().catch(() => false);
+      if (seq !== syncSeqRef.current) return;
       setIsFullscreen(Boolean(fullscreen));
       if (platform === "windows") {
         const maximized = await current.isMaximized().catch(() => false);
+        if (seq !== syncSeqRef.current) return;
         setIsMaximized(Boolean(maximized));
       }
     } catch {
@@ -59,17 +63,62 @@ export function useDesktopTitlebar(): DesktopTitlebarState {
   useEffect(() => {
     if (!platform) return;
     let active = true;
+    let unlistenResize: (() => void) | null = null;
+    const followUpTimers = new Set<ReturnType<typeof setTimeout>>();
+
+    const clearFollowUps = () => {
+      for (const timer of followUpTimers) clearTimeout(timer);
+      followUpTimers.clear();
+    };
+
     const runSync = () => {
       if (!active) return;
       void syncWindowState();
     };
+
+    // On macOS, `window.resize` fires during the native Space transition while
+    // `NSWindowStyleMaskFullScreen` is still set; AppKit clears the flag only
+    // after `windowDidExitFullScreen:` completes without always emitting
+    // another resize. Re-check after the animation settles so the titlebar
+    // never stays stuck hidden when leaving fullscreen.
+    const scheduleSync = () => {
+      if (!active) return;
+      runSync();
+      clearFollowUps();
+      for (const delay of [150, 450, 950]) {
+        const timer = setTimeout(() => {
+          followUpTimers.delete(timer);
+          runSync();
+        }, delay);
+        followUpTimers.add(timer);
+      }
+    };
+
     runSync();
-    window.addEventListener("resize", runSync);
-    document.addEventListener("fullscreenchange", runSync);
+    window.addEventListener("resize", scheduleSync);
+    window.addEventListener("focus", scheduleSync);
+    document.addEventListener("fullscreenchange", scheduleSync);
+    document.addEventListener("visibilitychange", scheduleSync);
+
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const unlisten = await getCurrentWindow().onResized(scheduleSync);
+        if (!active) unlisten();
+        else unlistenResize = unlisten;
+      } catch {
+        // Native resize listener is optional; DOM resize/focus remain active.
+      }
+    })();
+
     return () => {
       active = false;
-      window.removeEventListener("resize", runSync);
-      document.removeEventListener("fullscreenchange", runSync);
+      clearFollowUps();
+      unlistenResize?.();
+      window.removeEventListener("resize", scheduleSync);
+      window.removeEventListener("focus", scheduleSync);
+      document.removeEventListener("fullscreenchange", scheduleSync);
+      document.removeEventListener("visibilitychange", scheduleSync);
     };
   }, [platform, syncWindowState]);
 

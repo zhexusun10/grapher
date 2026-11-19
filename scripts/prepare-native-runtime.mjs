@@ -1,7 +1,7 @@
 // Host-only preparation. Backends cache this verified copy by content, shared
 // across projects and processes, including when Grapher hosts itself.
 import { createHash } from 'node:crypto';
-import { cpSync, constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { cpSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,8 @@ import { execFileSync } from 'node:child_process';
 import { root, source, verifyBaseline } from './pi-baseline.mjs';
 import { verifyPiDependencies } from './pi-dependencies.mjs';
 import { bundledExtensionNames, verifyBundledExtensions } from './bundled-extensions.mjs';
+
+const BUNDLED_PI_MANIFEST_FILE = '.grapher-bundled-manifest.json';
 
 // Fail before the expensive Pi copy when an existing checkout needs npm ci.
 verifyBundledExtensions(root);
@@ -71,6 +73,8 @@ async function computeCacheKey(input, { verifyCachedDeps = false } = {}) {
     }
   };
   for (const name of ['engine', 'package.json', 'package-lock.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) collect(join(input, name), name);
+  const bundledManifestPath = join(input, 'pi', BUNDLED_PI_MANIFEST_FILE);
+  if (existsSync(bundledManifestPath)) collect(bundledManifestPath, `pi/${BUNDLED_PI_MANIFEST_FILE}`);
   for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) collect(join(input, 'scripts', script), `scripts/${script}`);
   for (const name of bundledExtensionNames) collect(join(input, 'node_modules', name), `node_modules/${name}`);
 
@@ -164,11 +168,17 @@ try {
   };
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   const gitExecutable = process.env.GRAPHER_TRUSTED_GIT || 'git';
-  // Independent metadata; never retain the submodule's pointer into source/.git.
-  // AppData and Unicode profiles can push Git metadata past MAX_PATH. Enable
-  // long paths for the clone itself and persist it for later verification.
-  execFileSync(gitExecutable, ['-c', 'core.longpaths=true', 'clone', '--config', 'core.longpaths=true', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
-  cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
+  const usesBundledManifest = !existsSync(join(source, '.git')) && existsSync(join(source, BUNDLED_PI_MANIFEST_FILE));
+  if (usesBundledManifest) {
+    // Bundled desktop runtimes omit .git and verify against their sealed SHA-256 manifest.
+    cpSync(source, join(destination, 'pi'), options);
+  } else {
+    // Independent metadata; never retain the submodule's pointer into source/.git.
+    // AppData and Unicode profiles can push Git metadata past MAX_PATH. Enable
+    // long paths for the clone itself and persist it for later verification.
+    execFileSync(gitExecutable, ['-c', 'core.longpaths=true', 'clone', '--config', 'core.longpaths=true', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
+  }
   cpSync(join(root, 'engine'), join(destination, 'engine'), {
     ...options,
     // Only the profile manifests are needed at runtime; Pi has the audited
@@ -186,7 +196,9 @@ try {
   for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
   }
-  execFileSync(gitExecutable, ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  if (!usesBundledManifest) {
+    execFileSync(gitExecutable, ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  }
   execFileSync(process.execPath, [gitPath(join(destination, 'scripts/pi-baseline.mjs')), 'verify'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   process.stdout.write(destination);
 } catch (error) {

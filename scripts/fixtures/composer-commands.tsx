@@ -33,7 +33,7 @@ function Fixture() {
     setSnapshot(next);
   };
   return <ComposerModels.Provider value={{ config, snapshot, envOverrides: {}, save, rename }}>
-    <div style={{ margin: "400px auto 0", maxWidth: 700 }}>
+    <div style={{ margin: "16px auto 0", maxWidth: 700 }}>
       <button onClick={() => setMode(mode === "graph" ? "serial" : "graph")}>Switch mode</button>
       <button onClick={() => setNode(node === "a" ? "b" : "a")}>Switch node</button>
       <button onClick={() => setSnapshot(previous => ({ ...previous, runId: previous.runId === "run-a" ? "run-b" : "run-a" }))}>Switch run</button>
@@ -41,6 +41,8 @@ function Fixture() {
       <button onClick={() => { void piExtensions.setEnabled('fixture-extension', false); }}>Disable fixture extension</button>
       <button onClick={() => setShowComposer(previous => !previous)}>Toggle composer</button>
       <button onClick={() => setConfig(previous => updateRoleModelConfig(previous, "planner", { model: "test/two", thinkingLevel: "off" }))}>Apply newer settings</button>
+    </div>
+    <div style={{ margin: "320px auto 0", maxWidth: 700 }}>
       {showComposer && <PromptBox repository={config.repository} runId={snapshot.runId || undefined} node={node}
         conversationModel={conversationModel} planMode={mode}
         value={value} onChange={event => setValue(event.target.value)}

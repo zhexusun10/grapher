@@ -597,6 +597,21 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
     }));
     assert.equal(fullscreenLayout.bgStageTop, 0);
     assert.equal(fullscreenLayout.insetVar, "0px");
+
+    // Leaving macOS fullscreen can fire `resize` while NSWindowStyleMaskFullScreen
+    // is still set, then clear the flag once the Space animation finishes without
+    // emitting another resize. The titlebar and inset must still recover.
+    await mac.page.evaluate(() => {
+      window.dispatchEvent(new Event("resize"));
+      setTimeout(() => { window.__TEST_WINDOW__.state.fullscreen = false; }, 200);
+    });
+    await titlebar.waitFor({ state: "visible" });
+    const restoredLayout = await mac.page.evaluate(() => ({
+      bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
+      insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
+    }));
+    assert.equal(restoredLayout.bgStageTop, 30);
+    assert.equal(restoredLayout.insetVar, "30px");
     assert.deepEqual(mac.pageErrors, []);
   } finally {
     await mac.context.close();
