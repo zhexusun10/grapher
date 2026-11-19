@@ -137,22 +137,25 @@ fn extract_tauri_conf_updater_pubkey(conf_text: &str) -> Option<String> {
 }
 
 fn main() {
-    // Windows application targets receive the Common Controls v6 manifest from
-    // tauri-build. Cargo's unit-test harness is a separate executable and does
-    // not inherit that manifest; without it, linked Tauri/tao imports such as
-    // TaskDialogIndirect resolve against comctl32 v5 and the process exits with
-    // STATUS_ENTRYPOINT_NOT_FOUND before the tests can start.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
+    // Windows binaries linking Tauri/tao import TaskDialogIndirect from
+    // comctl32 v6. `tauri-build`'s default resource manifest only attaches to
+    // `[[bin]]` targets, and `cargo:rustc-link-arg-tests` only covers
+    // integration tests under `tests/`, leaving `--lib` unit-test harnesses
+    // without a manifest (`STATUS_ENTRYPOINT_NOT_FOUND` / 0xc0000139).
+    // On Windows MSVC, embed the identical Common-Controls v6 manifest via the
+    // linker for every target (app binary + unit/integration test harnesses)
+    // and tell `tauri-build` not to emit a duplicate `RT_MANIFEST` resource.
+    let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if windows_msvc {
         let manifest = std::path::PathBuf::from(
             std::env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"),
         )
         .join("tests")
         .join("windows-test.manifest");
         println!("cargo:rerun-if-changed={}", manifest.display());
-        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
-        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }
 
     // Ensure staged resource directories exist so `cargo check` and `cargo test`
@@ -179,5 +182,13 @@ fn main() {
         }
     }
 
-    tauri_build::build();
+    if windows_msvc {
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+        )
+        .expect("failed to run tauri-build");
+    } else {
+        tauri_build::build();
+    }
 }
