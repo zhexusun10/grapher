@@ -370,28 +370,60 @@ export function createMacosUpdaterTarball(appPath, tarballPath) {
   return tarballPath;
 }
 
-function submitToNotarytool(submissionPath, notarizationConfig) {
-  const args = ['notarytool', 'submit', submissionPath, '--wait'];
+function notarytoolAuthArgs(notarizationConfig) {
   if (notarizationConfig.mode === 'api-key') {
-    args.push(
+    return [
       '--key',
       notarizationConfig.keyPath,
       '--key-id',
       notarizationConfig.keyId,
       '--issuer',
       notarizationConfig.issuer,
-    );
-  } else {
-    args.push(
-      '--apple-id',
-      notarizationConfig.appleId,
-      '--team-id',
-      notarizationConfig.teamId,
-      '--password',
-      notarizationConfig.password,
+    ];
+  }
+  return [
+    '--apple-id',
+    notarizationConfig.appleId,
+    '--team-id',
+    notarizationConfig.teamId,
+    '--password',
+    notarizationConfig.password,
+  ];
+}
+
+function submitToNotarytool(submissionPath, notarizationConfig) {
+  const authArgs = notarytoolAuthArgs(notarizationConfig);
+  const args = ['notarytool', 'submit', submissionPath, '--wait', '--output-format', 'json', ...authArgs];
+  const raw = execFileSync('xcrun', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Fall back to printing raw output if Apple changed formatting.
+  }
+  if (!parsed) {
+    console.log(raw);
+    return;
+  }
+  console.log(
+    `[desktop:build] Apple notarization result for ${basename(submissionPath)}: status=${parsed.status} id=${parsed.id}`,
+  );
+  if (parsed.status !== 'Accepted') {
+    let details = '';
+    if (parsed.id) {
+      try {
+        details = execFileSync('xcrun', ['notarytool', 'log', parsed.id, ...authArgs], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+      } catch {
+        // Ignore secondary log fetch errors; primary status error still fails the build.
+      }
+    }
+    throw new Error(
+      `Apple notarization failed for ${basename(submissionPath)} (status=${parsed.status}, id=${parsed.id ?? 'unknown'}).${details ? `\n${details}` : ''}`,
     );
   }
-  execFileSync('xcrun', args, { stdio: 'inherit' });
 }
 
 function notarizeAndStapleMacosApp(appPath, notarizationConfig) {

@@ -19,6 +19,7 @@ import {
   entitlementsForBinary,
   findMachOBinaries,
   isMachOBuffer,
+  resealBundledPiManifest,
 } from './desktop-sign-macos.mjs';
 import {
   assertMinimumNodeVersion,
@@ -397,15 +398,40 @@ test('macOS nested signer identifies Mach-O binaries, excludes Java classes, and
   }
   writeFileSync(textFile, '# Grapher\n');
 
-  const found = findMachOBinaries(app);
-  assert.equal(found.length, 4);
-  assert.equal(found.includes(trackedPiPrebuild), false);
-  // Deepest nested native addon signs before node/backend, and main binary signs last among Mach-O files.
-  assert.equal(found[0], nativeAddon);
-  assert.equal(found.at(-1), mainBin);
+  const foundBundled = findMachOBinaries(app);
+  assert.equal(foundBundled.length, 5);
+  assert.equal(
+    foundBundled.includes(trackedPiPrebuild),
+    true,
+    'lean bundled desktop Pi runtimes without .git must sign native prebuilds for Apple notarization',
+  );
+  // Deepest nested native prebuild signs before node/backend, and main binary signs last among Mach-O files.
+  assert.equal(foundBundled[0], trackedPiPrebuild);
+  assert.equal(foundBundled.at(-1), mainBin);
+
+  // Re-sealing updates `.grapher-pi-runtime-manifest.json` after signing mutates a bundled prebuild.
+  const bundledPiRoot = join(app, 'Contents', 'Resources', 'runtime', 'pi');
+  const bundledManifestPath = join(bundledPiRoot, BUNDLED_PI_MANIFEST_FILE);
+  writeFileSync(bundledManifestPath, '{}\n');
+  assert.equal(resealBundledPiManifest(app), true);
+  const resealed = JSON.parse(readFileSync(bundledManifestPath, 'utf8'));
+  assert.match(
+    resealed.files['packages/tui/native/darwin/prebuilds/darwin-arm64/darwin-platform.node'],
+    /^[a-f0-9]{64}$/,
+  );
+
+  // Live Git checkouts of `runtime/pi/` (with `.git`) remain skipped to avoid dirtying git status.
+  writeFileSync(join(bundledPiRoot, '.git'), 'gitdir: /tmp/pi\n');
+  const foundGitCheckout = findMachOBinaries(app);
+  assert.equal(foundGitCheckout.length, 4);
+  assert.equal(foundGitCheckout.includes(trackedPiPrebuild), false);
+  assert.equal(resealBundledPiManifest(app), false);
+  assert.equal(foundGitCheckout[0], nativeAddon);
+  assert.equal(foundGitCheckout.at(-1), mainBin);
 
   assert.match(entitlementsForBinary(nodeBin), /NodeEntitlements\.plist$/);
   assert.match(entitlementsForBinary(nativeAddon), /NodeEntitlements\.plist$/);
+  assert.match(entitlementsForBinary(trackedPiPrebuild), /NodeEntitlements\.plist$/);
   assert.match(entitlementsForBinary(backendBin), /Entitlements\.plist$/);
   assert.doesNotMatch(entitlementsForBinary(backendBin), /NodeEntitlements\.plist$/);
 });
