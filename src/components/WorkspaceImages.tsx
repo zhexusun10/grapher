@@ -62,9 +62,13 @@ export function useWorkspaceImages(root: RefObject<HTMLDivElement | null>, html:
         });
         store.pending.set(path, pending);
       }
-      image.setAttribute("aria-busy", "true");
+      if (!image.getAttribute("src")) image.setAttribute("aria-busy", "true");
       pending.then(url => {
         if (disposed || store.abort.signal.aborted || !container.contains(image)) return;
+        if (image.getAttribute("src") === url) {
+          image.removeAttribute("aria-busy");
+          return;
+        }
         image.onload = () => {
           image.removeAttribute("aria-busy");
           notifyTranscriptContentGrowth(container);

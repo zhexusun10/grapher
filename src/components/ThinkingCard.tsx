@@ -93,7 +93,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       pinBodyToBottom();
     }, [isExpanded]);
 
-    useEffect(() => {
+    // Pin synchronously before paint (after MarkdownRenderer's child layout
+    // effect updates the DOM) so fast line wraps never paint one frame unpinned
+    // and then yank the upper text upward on the next frame.
+    useLayoutEffect(() => {
       // A completed block can receive its visible text in a later summary as
       // well. Follow that backfill unless the reader has scrolled up inside it.
       if (isExpanded && !userScrolledUpRef.current) pinBodyToBottom();
@@ -155,7 +158,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
           userScrolledUpRef.current = true;
           return;
         }
-        if (isStreamingRef.current || stillTypingRef.current) requestAnimationFrame(pinBodyToBottom);
+        if (isStreamingRef.current || stillTypingRef.current) pinBodyToBottom();
       }
     };
 
@@ -336,7 +339,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                 <div ref={contentRef} className="thinking-content-container">
                   <MarkdownRenderer
                     content={smoothContent}
-                    isStreaming={isStreaming}
+                    isStreaming={stillTyping}
                     streamingCursor={isStreaming}
                     className="thinking-markdown"
                   />

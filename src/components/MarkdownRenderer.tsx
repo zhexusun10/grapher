@@ -1,7 +1,28 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { StreamingMarkdownCache } from "../services/streamingMarkdown";
 import { t } from "../i18n";
 import { useWorkspaceImages } from "./WorkspaceImages";
+
+function syncMarkdownDom(container: HTMLElement, html: string, prevKeys: string[]): string[] {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const incoming = Array.from(template.content.childNodes);
+  const nextKeys = incoming.map(node =>
+    node.nodeType === 1 ? (node as Element).outerHTML : `\0${node.nodeType}:${node.textContent ?? ""}`
+  );
+  // Keep unchanged leading top-level blocks mounted across streaming updates so
+  // settled paragraphs, loaded images and text selection are never torn down.
+  let prefix = 0;
+  const limit = Math.min(prevKeys.length, nextKeys.length, container.childNodes.length);
+  while (prefix < limit && prevKeys[prefix] === nextKeys[prefix]) prefix++;
+  while (container.childNodes.length > prefix) container.removeChild(container.lastChild!);
+  if (prefix < incoming.length) {
+    const fragment = document.createDocumentFragment();
+    for (let i = prefix; i < incoming.length; i++) fragment.appendChild(incoming[i]);
+    container.appendChild(fragment);
+  }
+  return nextKeys;
+}
 
 interface MarkdownRendererProps {
   content: string;
@@ -57,6 +78,18 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
     }, [content, isStreaming, streamingCursor, copyLabel]);
 
     const imageScopeKey = useWorkspaceImages(root, sanitizedHtml);
+    const prevNodeKeysRef = useRef<string[]>([]);
+    const lastContainerRef = useRef<HTMLDivElement | null>(null);
+
+    useLayoutEffect(() => {
+      const container = root.current;
+      if (!container) return;
+      if (lastContainerRef.current !== container) {
+        lastContainerRef.current = container;
+        prevNodeKeysRef.current = [];
+      }
+      prevNodeKeysRef.current = syncMarkdownDom(container, sanitizedHtml, prevNodeKeysRef.current);
+    }, [sanitizedHtml, imageScopeKey]);
 
     const handleCopy = async (event: React.MouseEvent) => {
       const target = event.target;
@@ -83,10 +116,12 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       }
     };
 
+    const ssrHtml = typeof document === "undefined" ? { dangerouslySetInnerHTML: { __html: sanitizedHtml } } : {};
+
     return (
       <div key={imageScopeKey} ref={root}
         className={`markdown-content ${isStreaming ? "streaming" : ""} ${className}`}
-        dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
+        {...ssrHtml}
         onClick={handleCopy}
       />
     );

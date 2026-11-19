@@ -2153,6 +2153,67 @@ test("a growing reasoning card reserves its scrollbar track instead of rewrappin
   } finally { await context?.close(); await scrollbarBrowser.close(); }
 });
 
+test("fast streaming reasoning preserves upper DOM nodes and stays pinned without height oscillation", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking", undefined, "no-preference");
+  try {
+    const initial = Array.from({ length: 16 }, (_, i) =>
+      `Initial reasoning step ${i}: analyzing repository structure and verifying constraints.`
+    ).join("\n\n") + "\n\n";
+    await page.evaluate(content => {
+      window.audit.append({ type: "message_start", message: { role: "assistant", content: [] } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0, content } });
+    }, initial);
+    const body = page.locator('[data-thinking-view="live"] .thinking-card-body');
+    await body.waitFor();
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-thinking-view="live"] .thinking-card-body');
+      return el && el.scrollHeight > el.clientHeight + 20;
+    });
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-thinking-view="live"] .thinking-card-body');
+      const md = el.querySelector(".markdown-content");
+      window.firstParagraph = md.querySelector("p");
+      window.streamCheck = { unpinned: 0, maxGap: 0, shrinks: 0, h2Seen: false, cursorWidth: 0 };
+      let prevHeight = el.scrollHeight;
+      const sample = () => {
+        const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (gap > 1.5) {
+          window.streamCheck.unpinned += 1;
+          window.streamCheck.maxGap = Math.max(window.streamCheck.maxGap, gap);
+        }
+        if (el.scrollHeight < prevHeight - 1) window.streamCheck.shrinks += 1;
+        if (md.querySelector("h2")) window.streamCheck.h2Seen = true;
+        const cursor = md.querySelector(".thinking-streaming-cursor");
+        if (cursor) window.streamCheck.cursorWidth = Math.max(window.streamCheck.cursorWidth, cursor.getBoundingClientRect().width);
+        prevHeight = el.scrollHeight;
+        if (!window.stopStreamCheck) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    const stream = [
+      "Checking the files:\n- First item with `inline_code`\n- Second item\n\n",
+      "Code check:\n```ts\nconst a = 1;\n```\n\n",
+      "Next paragraph:\n- Another list item\n",
+    ].join("");
+    await page.evaluate(delta => {
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta } });
+    }, stream);
+    await body.getByText("Another list item").waitFor();
+    await page.waitForTimeout(200);
+    const result = await page.evaluate(() => {
+      window.stopStreamCheck = true;
+      const md = document.querySelector('[data-thinking-view="live"] .thinking-card-body .markdown-content');
+      return { firstParagraphPreserved: md.querySelector("p") === window.firstParagraph, ...window.streamCheck };
+    });
+    assert.equal(result.firstParagraphPreserved, true, "settled upper paragraphs must stay mounted across streaming frames");
+    assert.equal(result.unpinned, 0, `fast streaming must stay pinned before paint: ${JSON.stringify(result)}`);
+    assert.equal(result.shrinks, 0, `fast streaming must not oscillate card height: ${JSON.stringify(result)}`);
+    assert.equal(result.h2Seen, false, "streaming `paragraph\\n- list` must not flash a transient h2 heading");
+    assert.equal(result.cursorWidth, 0, "streaming cursor must not consume inline layout width");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const reducedMotion of ["no-preference", "reduce"]) {
   test(`resolving an auto route keeps a Planner reader where they scrolled to (${reducedMotion})`, { timeout: 30_000 }, async () => {
     // Auto routing renders the Planner pane while the route is still undecided.

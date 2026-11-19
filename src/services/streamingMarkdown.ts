@@ -324,13 +324,25 @@ function tokenizeBareLink(this: InstanceType<typeof marked.Tokenizer<string, str
 marked.use({ tokenizer: { url: tokenizeBareLink } });
 
 export function repairStreamingMarkdown(text: string): string {
+  const normalized = text.replace(/\r\n|\r/g, "\n");
   const fences = /^(\s*)(`{3,}|~{3,})/mg;
   let match: RegExpExecArray | null, inside = false, chars = "";
-  while ((match = fences.exec(text)) !== null) {
+  while ((match = fences.exec(normalized)) !== null) {
     if (!inside) { inside = true; chars = match[2]; }
     else if (match[2].startsWith(chars.slice(0, 3))) { inside = false; chars = ""; }
   }
-  return inside ? text + `\n${chars}\n` : text;
+  if (inside) {
+    // Strip a partial closing fence at EOF (`\n` or `\n``) so the streaming
+    // preview does not add a transient line and collapse when the fence closes.
+    const fenceChar = chars[0];
+    const partialClose = new RegExp(`\\n[ ]{0,3}\\${fenceChar}{1,${chars.length - 1}}[ \\t]*$`);
+    const trimmed = normalized.replace(partialClose, "\n");
+    return trimmed.endsWith("\n") ? `${trimmed}${chars}\n` : `${trimmed}\n${chars}\n`;
+  }
+  // A trailing `-`/`=` line without a terminating newline promotes the entire
+  // preceding paragraph into a transient setext heading until the next token
+  // arrives (e.g. `summary:\n- ` starting a list). Hold it back until confirmed.
+  return normalized.replace(/(\S[^\n]*)\n[ ]{0,3}(?:-+|=+)[ \t]*$/, "$1");
 }
 
 type InlineEntry = { context: string; tokens: Token[]; state: InstanceType<typeof marked.Lexer>["state"] };

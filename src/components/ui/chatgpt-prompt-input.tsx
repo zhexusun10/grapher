@@ -1202,7 +1202,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 <span className="suggestions-header-actions">
                   {triggerMode === '/' && triggerStart === 0 && <button type="button" className="suggestions-header-refresh-btn"
                     aria-label={t('刷新指令')} title={t('刷新指令')} disabled={commands.commandsLoading}
-                    onClick={commands.refreshCommands}><RefreshCw size={12} /></button>}
+                    aria-busy={commands.commandsLoading}
+                    onClick={commands.refreshCommands}><RefreshCw size={12} className={commands.commandsLoading ? "spin-icon" : undefined} /></button>}
                   <span className="suggestions-header-hints" aria-hidden="true">
                     <kbd className="key-hint">
                       <ChevronUp size={10} />
@@ -1232,9 +1233,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 </span>
               </div>
               <div className="prompt-box-suggestions-list" ref={suggestionsListRef}>
-                {triggerMode === '/' && triggerStart === 0 && commands.commandsLoading && (
-                  <div className="prompt-box-suggestions-empty" role="status">{t('正在读取扩展指令…')}</div>
-                )}
                 {triggerMode === '/' && triggerStart === 0 && commands.commandsError && (
                   <div className="prompt-box-suggestions-empty" role="status">
                     {commands.commandsError} <button type="button" onClick={commands.refreshCommands}>{t('重试')}</button>

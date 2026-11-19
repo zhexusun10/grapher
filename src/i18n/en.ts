@@ -100,7 +100,6 @@ export const en: Record<string, string> = {
   "支持已配置的专用搜索 API 和已认证的兼容 Provider；仅在有可用搜索接口时注册 web_search 工具。": "Supports configured dedicated search APIs and authenticated compatible providers; registers web_search only when a search interface is available.",
   "pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。": "pi-trim applies to all roles; pi-continuity applies to Planner, Node Agent and Merger; pi-better-web-search is off by default, must be enabled manually in settings, and applies only to Planner and Node Agent; other extensions, MCP and skills apply only to Planner and Node Agent.",
   "正在读取扩展…": "Loading extensions…",
-  "正在读取扩展指令…": "Loading extension commands…",
   "扩展指令加载失败，请重试。": "Could not load extension commands. Try again.",
   "刷新指令": "Refresh commands",
   "未知或未启用的指令：/{0}": "Unknown or disabled command: /{0}",

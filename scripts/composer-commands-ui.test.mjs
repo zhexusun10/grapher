@@ -345,8 +345,14 @@ test("extension catalogs show loading and retry, refresh selections and reject s
     const composer = page.locator('textarea').first();
     await composer.fill('/');
     await expect.poll(() => reads.length).toBe(1);
-    await expect(page.locator('.prompt-box-suggestions-list [role="status"]')).toContainText('正在读取扩展指令');
+    const refreshButton = page.getByRole('button', { name: '刷新指令', exact: true });
+    await expect(refreshButton).toBeDisabled();
+    await expect(refreshButton).toHaveAttribute('aria-busy', 'true');
+    await expect(refreshButton.locator('svg')).toHaveClass(/spin-icon/);
+    await expect(page.locator('.prompt-box-suggestions-list')).not.toContainText('正在读取扩展指令');
     await reads[0].fulfill({ status: 503, json: { error: 'Temporary host failure' } });
+    await expect(refreshButton).toBeEnabled();
+    await expect(refreshButton.locator('svg')).not.toHaveClass(/spin-icon/);
     await expect(page.locator('.prompt-box-suggestions-list [role="status"]')).toContainText('扩展指令加载失败');
     await page.getByRole('button', { name: '重试', exact: true }).click();
     await expect.poll(() => reads.length).toBe(2);

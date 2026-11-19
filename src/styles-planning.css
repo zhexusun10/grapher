@@ -456,15 +456,28 @@
   position: relative;
 }
 
+/* Zero layout width so the blinking caret can never wrap onto a line of its own
+   and bounce the thinking body's height up and down during fast streaming. */
 .thinking-streaming-cursor {
   display: inline-block;
-  width: 2px;
+  position: relative;
+  width: 0;
   height: 13px;
-  background-color: #8b5cf6;
-  margin-left: 3px;
   vertical-align: -1px;
-  border-radius: 1px;
+  overflow: visible;
+  pointer-events: none;
   animation: thinking-cursor-blink 0.8s ease-in-out infinite;
+}
+
+.thinking-streaming-cursor::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background-color: #8b5cf6;
+  border-radius: 1px;
 }
 
 @keyframes thinking-cursor-blink {

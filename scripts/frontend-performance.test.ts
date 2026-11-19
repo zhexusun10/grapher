@@ -382,3 +382,21 @@ test("assistant stream deltas never grow a user steer row", () => {
   assert.equal(afterThinking.at(-1)?.role, "assistant");
   assert.notEqual(afterThinking.at(-1)?.id, thinking.id);
 });
+
+test("streaming Markdown repair prevents transient setext headings and partial closing-fence lines", () => {
+  const cache = new StreamingMarkdownCache();
+  for (const fragment of ["Summary:\n-", "Summary:\n- ", "Summary:\n--", "Summary:\n="]) {
+    const html = cache.render(fragment, true);
+    assert.doesNotMatch(html, /<h[12]>/, `${JSON.stringify(fragment)} must not flash as a setext heading`);
+    assert.match(html, /<p>Summary:<\/p>/);
+  }
+  assert.match(cache.render("Summary:\n- first item", true), /<p>Summary:<\/p>\s*<ul>\s*<li>first item<\/li>/);
+  assert.match(cache.render("Summary:\n---\n", true), /<h2>Summary:<\/h2>/);
+  assert.match(cache.render("Summary:\n---", false), /<h2>Summary:<\/h2>/);
+  assert.match(cache.render("\n---", true), /<hr\s*\/?>/);
+
+  const openFence = cache.render("```ts\nconst x = 1;\n", true);
+  assert.equal(cache.render("```ts\nconst x = 1;\n`", true), openFence);
+  assert.equal(cache.render("```ts\nconst x = 1;\n``", true), openFence);
+  assert.equal(cache.render("```ts\nconst x = 1;\n```", true), openFence);
+});
