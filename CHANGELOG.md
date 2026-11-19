@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [1.9.10] - 2026-11-19
+
+**Validation release:** Focused on verifying the Windows and macOS Tauri apps, direct macOS command-line downloads, in-app update visibility, and one-click updates from the macOS client. These are validation goals for this release, not claims that every path has already been verified.
+
+## [1.9.9] - 2026-11-17
 
 - Added native Tauri v2 desktop apps for macOS (`arm64` / `x64` `.dmg`) and Windows (`x64` NSIS `-setup.exe`) that reuse the existing React/Vite frontend, Rust `grapher` backend (as a managed sidecar), verified Pi/engine runtime, and bundled Node.js `22.19.0` without breaking ordinary browser or `npm run dev` workflows (`src-tauri/`, `scripts/desktop-dev.mjs`, `scripts/desktop-icons.mjs`, `scripts/desktop-stage.mjs`, `scripts/desktop-build.mjs`, `scripts/desktop-sign-macos.mjs`, `docs/tauri-desktop-plan.md`, `docs/development/desktop-releases.md`).
 - Extended the Rust backend and frontend transport for desktop sidecar operation: added `GRAPHER_INSTALLATION_ROOT`, `GRAPHER_TRUSTED_NODE`, `GRAPHER_TRUSTED_GIT`, and `GRAPHER_MANAGED_GIT_PATH` resolution across backend/runtime launchers, automatic on-demand SHA-256-verified portable Git provisioning (`dugite-native` on macOS, `PortableGit` with Git Bash on Windows) when host Git is absent, ephemeral port `0` binding with a `grapher_ready` stdout handshake, parent-stdin EOF/command graceful shutdown, Tauri WebView `Origin`/SSE trust rules, IPC-backed loopback `apiBase` routing, host Git preflight diagnostics with retry/re-check, locked atomic first-launch legacy `.grapher` migration into `app_data_dir()/data`, and macOS overlay titlebar integration (`src-tauri/src/managed_git.rs`, `src/services/gitBootstrap.ts`, `backend/src/main.rs`, `backend/src/server.rs`, `backend/src/native.rs`, `backend/src/engine.rs`, `backend/src/provider_auth.rs`, `backend/src/pi_extensions.rs`, `backend/src/workspace.rs`, `backend/src/workspace_blob.rs`, `backend/src/server/project_discovery.rs`, `backend/tests/desktop_sidecar.rs`, `scripts/prepare-native-runtime.mjs`, `src/services/apiBase.ts`, `src/services/runtime.ts`, `src/services/runtimeEvents.ts`, `src/services/providerAuth.ts`, `src/services/piExtensions.ts`, `src/App.tsx`, `src/components/layout/Sidebar.tsx`, `src/styles.css`, `src/styles-workbench.css`).
@@ -71,9 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raised Windows `cygpath` / `git --exec-path` timeouts to 15 seconds, stopped pre-populating drive-letter fallbacks ahead of `cygpath` conversion, and avoided caching `null` or drive-letter fallbacks on `ETIMEDOUT` so `/tmp/...` MSYS mount conversions recover across transient load (`engine/workspace-paths.mjs`).
 - Shared `Runtime::is_run_active` across `Runtime::clear_history` and `Runtime::delete_runs` so history clearing also rejects persisted Runs in `launching_result` or with running mergers or result executions (`backend/src/runtime.rs`, `backend/src/runtime_tests.rs`).
 
-## [1.9.9] - 2026-11-17
-
-**Release highlights:** Planner now has a unified `edit_graph`/`read_graph` workflow with atomic node-and-edge edits, final-graph validation, structured diagnostics, safe overflow reports and revision-impact warnings. The bundled Planner tools and prompts were refined to produce more complete, dependency-aware workstreams and clearer workspace handoffs—better than ever for complex coding tasks.
+### Added Planner now has a unified `edit_graph`/`read_graph` workflow with atomic node-and-edge edits, final-graph validation, structured diagnostics, safe overflow reports and revision-impact warnings. The bundled Planner tools and prompts were refined to produce more complete, dependency-aware workstreams and clearer workspace handoffs—better than ever for complex coding tasks.
 
 `pi-better-web-search` is upgraded to 1.0.3. It provides Pi's best web-search experience to date: provider-native raw search results, URL analysis, automatic fallback and dedicated Keenable, Exa, Perplexity and DeepSeek routes. The supported providers include the leading entries highlighted by the [Artificial Analysis Search Index](https://artificialanalysis.ai/agents/search-api); see the [pi-better-web-search project](https://github.com/zhexusun10/pi-better-web-search) for provider details and methodology.
 

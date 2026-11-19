@@ -558,6 +558,7 @@ fn force_terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
 
     #[cfg(unix)]
