@@ -137,6 +137,24 @@ fn extract_tauri_conf_updater_pubkey(conf_text: &str) -> Option<String> {
 }
 
 fn main() {
+    // Windows application targets receive the Common Controls v6 manifest from
+    // tauri-build. Cargo's unit-test harness is a separate executable and does
+    // not inherit that manifest; without it, linked Tauri/tao imports such as
+    // TaskDialogIndirect resolve against comctl32 v5 and the process exits with
+    // STATUS_ENTRYPOINT_NOT_FOUND before the tests can start.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let manifest = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"),
+        )
+        .join("tests")
+        .join("windows-test.manifest");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+    }
+
     // Ensure staged resource directories exist so `cargo check` and `cargo test`
     // succeed before `scripts/desktop-stage.mjs` populates them for packaging.
     for dir in ["resources/runtime", "resources/node"] {
