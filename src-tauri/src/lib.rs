@@ -427,7 +427,7 @@ fn set_windows_corner_preference<R: tauri::Runtime>(window: &tauri::WebviewWindo
         DwmSetWindowAttribute(
             hwnd.0,
             DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            (&preference as *const _).cast::<c_void>(),
+            (&preference as *const i32).cast::<c_void>(),
             size_of_val(&preference) as u32,
         )
     };

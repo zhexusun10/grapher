@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Removed the transient Workspace card opacity change during workspace switching so the selected card no longer flashes or changes the browser pointer state (`src/styles.css`).
 - Clarified Planner workspace handoff wording to refer to node IDs consistently (`backend/resources/prompts/planner.md`).
+- Increased the `Workspace` and `Conversation` sidebar section labels and aligned them vertically with their right-side `+` controls (`src/styles.css`).
 
 ## [1.9.11] - 2026-11-20
 
