@@ -422,37 +422,39 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         </div>
       )}
 
-      {/* Active Configured Credentials Section */}
-      {configuredProviders.length > 0 && (
-        <div className="configured-credentials-card">
+      {/* Keep this compact header mounted while the catalog loads. The count can
+          change without inserting/removing a block above the provider list. */}
+      <div className="configured-credentials-card">
           <div
             className="configured-card-header"
-            onClick={() => setShowConfigured(!showConfigured)}
+            onClick={() => { if (configuredProviders.length > 0) setShowConfigured(!showConfigured); }}
             role="button"
-            tabIndex={0}
-            aria-expanded={showConfigured}
+            tabIndex={configuredProviders.length > 0 ? 0 : -1}
+            aria-disabled={configuredProviders.length === 0 || undefined}
+            aria-expanded={showConfigured && configuredProviders.length > 0}
             onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
+              if (configuredProviders.length > 0 && (e.key === "Enter" || e.key === " ")) {
                 e.preventDefault();
                 setShowConfigured(!showConfigured);
               }
             }}
-            style={{ cursor: "pointer", userSelect: "none" }}
+            style={{ cursor: configuredProviders.length > 0 ? "pointer" : "default", userSelect: "none" }}
           >
             <div className="configured-title-group">
-              <strong>{t("已绑定的 Provider 凭据 (")}{configuredProviders.length})</strong>
+              <strong>{t("已绑定的 Provider 凭据 (")}{catalog ? configuredProviders.length : "…"})</strong>
             </div>
             <ChevronDown
               size={16}
               className="configured-chevron"
               style={{
                 transition: mounted.current ? "transform 0.2s ease" : "none",
-                transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
+                transform: showConfigured && configuredProviders.length > 0 ? "rotate(180deg)" : "rotate(0deg)",
+                visibility: configuredProviders.length > 0 ? "visible" : "hidden",
               }}
             />
           </div>
 
-          <CollapsibleCardBody expanded={showConfigured}>
+          <CollapsibleCardBody expanded={showConfigured && configuredProviders.length > 0}>
             {() => (
               <div className="configured-list">
                 {configuredProviders.map((p) => (
@@ -505,8 +507,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               </div>
             )}
           </CollapsibleCardBody>
-        </div>
-      )}
+      </div>
     </>
   );
 

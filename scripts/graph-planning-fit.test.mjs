@@ -88,7 +88,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     await input.fill(goal); await input.press("Enter");
     for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(planningResponse, "Planner stream started");
-    assert.equal(providerAuthRequests, 0, "the first Graph send must not wait for a cold Provider/Auth catalog");
+    assert.equal(providerAuthRequests, 1, "Provider/Auth catalog is prefetched once in the background; the first Graph send starts independently");
     snapshot = { ...empty, runId, config, phase: "planning", planType: "graph",
       graph: { ...empty.graph, originalGoal: goal }, events: [{ sequence: 1, timestamp: 1, type: "planning_started", plan_type: "graph" }] };
     send("run_started", { runId });

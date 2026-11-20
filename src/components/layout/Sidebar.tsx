@@ -112,8 +112,8 @@ function useCardEntrance(
     if (entrance === "stagger") {
       const anim = el.animate(
         [
-          { opacity: 0, transform: "translateY(4px)" },
-          { opacity: 1, transform: "translateY(0px)" },
+          { opacity: 0 },
+          { opacity: 1 },
         ],
         {
           duration: 200,

@@ -2091,7 +2091,7 @@ test("actual App: first Serial message keeps the footer still through approval a
     await page.waitForFunction(() => window.footerFrames.length >= 8);
     for (let i = 0; !response && i < 100; i++) await page.waitForTimeout(20);
     assert.ok(response, "Serial planning request started");
-    assert.equal(providerAuthRequests, 0, "the first Serial send must not wait for a cold Provider/Auth catalog");
+    assert.equal(providerAuthRequests, 1, "Provider/Auth catalog is prefetched once in the background; the first Serial send starts independently");
     response.write(`event: run_started\ndata: ${JSON.stringify({ runId: draft.runId })}\n\n`);
     await page.waitForTimeout(80);
     snapshot = draft;

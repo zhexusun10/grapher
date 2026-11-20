@@ -1624,6 +1624,30 @@ test("home slash model changes are reflected in Settings without writing global 
   } finally { await context.close(); }
 });
 
+test("Provider catalog resolution does not shift the first Settings layout", { timeout: 30_000 }, async () => {
+  let catalogRequest;
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command === "provider_auth") { catalogRequest = route; return true; }
+    return false;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await until(() => !!catalogRequest);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.locator(".settings-modal").waitFor();
+    const providerListTop = await page.locator(".providers-grid-title").evaluate(element => element.getBoundingClientRect().top);
+    await page.locator(".configured-card-header").waitFor();
+    assert.match(await page.locator(".configured-card-header").innerText(), /…/,
+      "the credentials header reserves its final position while the catalog is pending");
+    await catalogRequest.fulfill({ json: { result: catalog } });
+    await page.waitForFunction(() => document.querySelector(".configured-card-header")?.textContent?.includes("1)"));
+    const settledProviderListTop = await page.locator(".providers-grid-title").evaluate(element => element.getBoundingClientRect().top);
+    assert.ok(Math.abs(settledProviderListTop - providerListTop) <= 1,
+      `catalog resolution shifted provider controls by ${settledProviderListTop - providerListTop}px`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("a stalled Provider catalog cannot leave settings controls permanently busy", { timeout: 30_000 }, async () => {
   let catalogs = 0;
   const { context, page, errors } = await app(async (_route, command) => {
@@ -1632,8 +1656,10 @@ test("a stalled Provider catalog cannot leave settings controls permanently busy
   });
   try {
     await page.locator('[data-run-id="fast"]').waitFor();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
     await until(() => catalogs > 0);
+    assert.equal(await page.locator(".settings-modal").count(), 0,
+      "Provider/Auth catalog should be requested during startup before Settings is opened");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     assert.equal(await page.locator(".save-config-btn").isDisabled(), true);
     await page.clock.fastForward(15_001);
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
@@ -1653,6 +1679,20 @@ test("restored workspace and conversation cards paint at their final state inste
     await conversationCard.waitFor();
     assert.equal(await workspaceCard.evaluate(element => getComputedStyle(element).opacity), "1");
     assert.equal(await conversationCard.evaluate(element => getComputedStyle(element).opacity), "1");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("new conversation entrances do not translate inside the scroll viewport", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async () => false, undefined, undefined, false, "no-preference");
+  try {
+    const conversation = page.locator('[data-run-id="fast"]');
+    await conversation.waitFor();
+    const transforms = await conversation.evaluate(element => element.getAnimations()
+      .flatMap(animation => animation.effect?.getKeyframes() ?? [])
+      .map(frame => frame.transform)
+      .filter(Boolean));
+    assert.deepEqual(transforms, [], "entrance opacity must not expand the scrollable overflow and flash a scrollbar thumb");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

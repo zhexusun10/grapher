@@ -2645,6 +2645,10 @@ export default function App() {
 
   const initialize = useCallback(async () => {
     setError("");
+    // Fetch the Provider catalog while startup bootstrap/foreground restore runs,
+    // so the first Settings open can render settled provider state instead of
+    // changing the configured-credentials section after the modal appears.
+    void providerAuth.catalog().catch(() => {});
     try {
       await load();
     } catch (err) {
