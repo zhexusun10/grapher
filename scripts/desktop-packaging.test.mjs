@@ -102,6 +102,7 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
   assert.deepEqual(capability.permissions, [
     'allow-backend-url',
     'allow-git-bootstrap',
+    'allow-open-external-url',
     'core:app:allow-version',
     'core:resources:allow-close',
     'autostart:default',
@@ -127,6 +128,16 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
   assert.match(
     gitBootstrapPermission,
     /commands\.allow\s*=\s*\["git_bootstrap_status",\s*"retry_git_bootstrap"\]/,
+  );
+
+  const openExternalPermission = readFileSync(
+    join(root, 'src-tauri', 'permissions', 'allow-open-external-url.toml'),
+    'utf8',
+  );
+  assert.match(openExternalPermission, /identifier\s*=\s*"allow-open-external-url"/);
+  assert.match(
+    openExternalPermission,
+    /commands\.allow\s*=\s*\["open_external_url"\]/,
   );
 
   const macosWindowCap = JSON.parse(

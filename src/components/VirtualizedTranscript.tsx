@@ -1130,8 +1130,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     steerAttachments={liveSteerRows.get(item.id)} />,
     [handleExpandedChange, editingUser, userDraft, startEdit, cancelEdit, onEditUser, liveSteerRows]);
 
+  const isEmptyTranscript = settled && output.length > 0 && items.length === 0;
+
   return (
-    <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${compact ? "transcript-compact" : ""} ${className}`}>
+    <div
+      className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${compact ? "transcript-compact" : ""} ${className}`}
+      data-transcript-empty={isEmptyTranscript ? "true" : undefined}
+    >
       <div
         ref={containerRef}
         className="transcript-scroll-area"

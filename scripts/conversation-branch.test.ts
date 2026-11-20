@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions, applySelectedVersionToEntries, branchEditedMessageEntries, findBranchTargetIndex, localMessagesAfterEdit, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, applySelectedVersionToEntries, branchEditedMessageEntries, buildConversationTurns, findBranchTargetIndex, localMessagesAfterEdit, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
 import { emptySnapshot, type ChatMessage, type GraphEvent, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
@@ -304,4 +304,60 @@ test('a fresh restart supersedes prior attempts and their human turns', () => {
   assert.deepEqual(activeNodeExecutions(state, 'task').map(e => e.id), ['attempt-2']);
   // The dead conversation's human turn no longer renders above the fresh start.
   assert.deepEqual(activeNodeConversationEvents(state, 'task').filter(e => !!e.instruction), []);
+});
+
+test('buildConversationTurns keeps pause/continue and retry executions below their owning follow-up turn', () => {
+  const exec = (id: string, attempt: number, status: string, startedAt: number) => ({
+    id, node: 'task', revision: 1, attempt, sessionId: 's', worktree: '', before: '', after: '',
+    status, output: '', startedAt, completedAt: status === 'running' ? null : startedAt + 1,
+  });
+  const executions = [
+    exec('e1', 1, 'completed', 1),
+    exec('e2-paused', 2, 'paused', 2),
+    exec('e3-continued', 2, 'paused', 3),
+    exec('e4-resumed', 2, 'running', 4),
+  ];
+  const messages: ChatMessage[] = [
+    { id: 'm1', role: 'user', text: 'follow-up 1', delivery: 'node_messaged', executionId: 'e2-paused' },
+    { id: 'steer-on-resumed', role: 'user', text: 'adjust while resumed', delivery: 'steered', executionId: 'e4-resumed' },
+    { id: 'm2-pending', role: 'user', text: 'queued follow-up 2' },
+  ];
+  const turns = buildConversationTurns({
+    initialTurn: { id: 'turn-0', isInitial: true, executions: [executions[0]] },
+    messages,
+    executions,
+    createFollowUpTurn: (message, claimed) => ({ id: message.id, isInitial: false, userMessage: message, executions: claimed }),
+  });
+  assert.deepEqual(turns.map(t => t.id), ['turn-0', 'm1', 'm2-pending']);
+  assert.deepEqual(turns[0].executions.map(e => e.id), ['e1']);
+  assert.deepEqual(turns[1].executions.map(e => e.id), ['e2-paused', 'e3-continued', 'e4-resumed']);
+  assert.deepEqual((turns[1].steerMessages ?? []).map(m => m.id), ['steer-on-resumed']);
+  assert.deepEqual(turns[2].executions, []);
+});
+
+test('buildConversationTurns preserves initial-turn retries and merger steer continuations', () => {
+  const exec = (id: string, attempt: number, status: string, startedAt: number) => ({
+    id, node: 'merge:task', revision: 1, attempt, sessionId: 's', worktree: '', before: '', after: '',
+    status, output: '', startedAt, completedAt: startedAt + 1,
+  });
+  const executions = [
+    exec('m1-failed', 1, 'failed', 1),
+    exec('m2-retried', 2, 'completed', 2),
+    exec('m3-continued', 3, 'completed', 3),
+  ];
+  const messages: ChatMessage[] = [
+    { id: 'cont-1', role: 'user', text: 'continue merge', delivery: 'steered', executionId: 'm3-continued' },
+    { id: 'steer-2', role: 'user', text: 'also check tests', delivery: 'steered', executionId: 'm3-continued' },
+  ];
+  const turns = buildConversationTurns({
+    initialTurn: { id: 'turn-0', isInitial: true, executions: [executions[0]] },
+    messages,
+    executions,
+    allowSteerContinuation: true,
+    createFollowUpTurn: (message, claimed) => ({ id: message.id, isInitial: false, userMessage: message, executions: claimed }),
+  });
+  assert.deepEqual(turns.map(t => t.id), ['turn-0', 'cont-1']);
+  assert.deepEqual(turns[0].executions.map(e => e.id), ['m1-failed', 'm2-retried']);
+  assert.deepEqual(turns[1].executions.map(e => e.id), ['m3-continued']);
+  assert.deepEqual((turns[1].steerMessages ?? []).map(m => m.id), ['steer-2']);
 });

@@ -101,7 +101,7 @@ for (const mode of ["graph", "serial"]) {
       assert.ok(releaseOld, "approaching an old record starts its own reader");
       await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
       await page.getByText("history-19 reply 59", { exact: true }).waitFor();
-      assert.equal(await page.locator(".chat-messages-stream").evaluate(element => element.style.opacity), "1",
+      assert.equal(await scroller.evaluate(element => getComputedStyle(element).opacity), "1",
         "a blocked old request cannot hide an already loaded reply");
       releaseOld();
       await page.getByRole("alert").filter({ hasText: "Deliberately slow old history" }).waitFor({ state: "attached" });
@@ -114,7 +114,7 @@ for (const mode of ["graph", "serial"]) {
   });
 }
 
-for (const mode of ["graph", "serial", "merger", "node-merger"]) {
+for (const mode of ["graph", "merger", "node-merger"]) {
   test(`${mode}: old unsuccessful attempts default closed and explicit expansion survives new turns`, { timeout: 30_000 }, async () => {
     const reads = [];
     const content = id => startTool(`${id}-tool`, `Inspect ${id}`) + endTool(`${id}-tool`, `${id} details`) + assistant(`${id} reply`);
@@ -175,46 +175,93 @@ for (const mode of ["graph", "serial", "merger", "node-merger"]) {
   });
 }
 
-for (const mode of ["graph", "serial"]) {
-  test(`${mode}: explicitly expanding an old record works even while the newest request is stalled`, { timeout: 30_000 }, async () => {
-    let releasePrevious, releaseLatest;
-    const reads = [];
-    const { context, page, errors } = await newPage(async route => {
-      if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
-      const body = route.request().postDataJSON();
-      reads.push(body.executionId);
-      if (body.executionId === "previous") await new Promise(resolve => { releasePrevious = resolve; });
-      if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
-      const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
-      const bytes = Buffer.byteLength(content);
-      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
-        startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } }); } catch {}
-    });
-    try {
-      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
-      await page.waitForFunction(() => !!window.audit?.setExecutions);
-      await page.evaluate(() => window.audit.setExecutions(["old-record", "blocked-latest"].map((id, index) => ({
-        id, node: "task", status: index === 0 ? "failed" : "completed", output: "", outputBytes: 100,
-        revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
-        sessionId: "session", worktree: "/mock", before: "", after: "",
-      }))));
-      await page.locator(".initial-query-scroll.conversation-ready").waitFor();
-      const header = page.locator(".session-label-toggle").first();
-      assert.equal(await header.getAttribute("aria-expanded"), "false");
-      await header.click(); // One explicit expansion bypasses automatic prioritization.
-      await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
-      assert.equal(reads.filter(id => id === "old-record").length, 1);
-      assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
-      if (mode === "graph") {
-        const task = page.locator(".node-task-card");
-        assert.equal(await task.isVisible(), false, "an older reply cannot prematurely reveal the task");
-        await page.locator(".session-label-toggle").last().click();
-        await task.waitFor({ state: "visible" });
-      }
-      assert.deepEqual(errors, []);
-    } finally { releasePrevious?.(); releaseLatest?.(); await context.close(); }
+test("serial: retries continue transcripts inline without attempt record headers", { timeout: 30_000 }, async () => {
+  const outputs = {
+    "first-failed": startTool("t1", "Run bash") + endTool("t1", "ok"),
+    "middle-empty-paused": '{"type":"grapher_process_started"}\n{"type":"turn_start"}\n{"type":"grapher_process_exited"}\n',
+    "retry-completed": startTool("t2", "Read file A") + endTool("t2", "a") + startTool("t3", "Read file B") + endTool("t3", "b") + assistant("retry-completed reply"),
+  };
+  const attempt = (id, status, index) => ({
+    id, node: "task", status, output: "", outputBytes: Buffer.byteLength(outputs[id]),
+    revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
+    sessionId: "session", worktree: "/mock", before: "", after: "",
   });
-}
+  const executions = [
+    attempt("first-failed", "failed", 0),
+    attempt("middle-empty-paused", "paused", 1),
+    attempt("retry-completed", "completed", 2),
+  ];
+  const { context, page, errors } = await newPage(async route => {
+    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+    const body = route.request().postDataJSON();
+    const output = outputs[body.executionId] ?? "", bytes = Buffer.byteLength(output);
+    await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content: output,
+      startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } });
+  });
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=serial&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setExecutions);
+    await page.evaluate(items => window.audit.setExecutions(items), executions);
+    await page.getByText("retry-completed reply", { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelectorAll(".tool-call-card").length === 3);
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-execution-id="middle-empty-paused"]');
+      const panel = el?.closest(".serial-execution-panel");
+      return panel != null && getComputedStyle(panel).display === "none";
+    });
+    assert.equal(await page.locator(".session-label-toggle").count(), 0,
+      "serial retries must not render attempt/failure toggle headers");
+    assert.equal(await page.locator(".execution-record-panel").count(), 0,
+      "serial retries must not wrap transcripts in execution record panels");
+    const gaps = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll(".tool-call-card")].map(el => el.getBoundingClientRect());
+      return {
+        acrossAttempts: Math.round(cards[1].top - cards[0].bottom),
+        withinAttempt: Math.round(cards[2].top - cards[1].bottom),
+      };
+    });
+    assert.equal(gaps.acrossAttempts, gaps.withinAttempt,
+      `gap across continued/empty attempts (${gaps.acrossAttempts}px) must match intra-transcript tool card gap (${gaps.withinAttempt}px)`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("graph: explicitly expanding an old record works even while the newest request is stalled", { timeout: 30_000 }, async () => {
+  let releasePrevious, releaseLatest;
+  const reads = [];
+  const { context, page, errors } = await newPage(async route => {
+    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+    const body = route.request().postDataJSON();
+    reads.push(body.executionId);
+    if (body.executionId === "previous") await new Promise(resolve => { releasePrevious = resolve; });
+    if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
+    const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
+    const bytes = Buffer.byteLength(content);
+    try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+      startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setExecutions);
+    await page.evaluate(() => window.audit.setExecutions(["old-record", "blocked-latest"].map((id, index) => ({
+      id, node: "task", status: index === 0 ? "failed" : "completed", output: "", outputBytes: 100,
+      revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
+      sessionId: "session", worktree: "/mock", before: "", after: "",
+    }))));
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    const header = page.locator(".session-label-toggle").first();
+    assert.equal(await header.getAttribute("aria-expanded"), "false");
+    await header.click(); // One explicit expansion bypasses automatic prioritization.
+    await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
+    assert.equal(reads.filter(id => id === "old-record").length, 1);
+    assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
+    const task = page.locator(".node-task-card");
+    assert.equal(await task.isVisible(), false, "an older reply cannot prematurely reveal the task");
+    await page.locator(".session-label-toggle").last().click();
+    await task.waitFor({ state: "visible" });
+    assert.deepEqual(errors, []);
+  } finally { releasePrevious?.(); releaseLatest?.(); await context.close(); }
+});
 
 test("an old record promoted to newest stays mounted when another turn is appended", { timeout: 30_000 }, async () => {
   let reads = 0;
@@ -3452,7 +3499,7 @@ for (const layout of ["virtualized", "long"]) {
     try {
       await page.emulateMedia({ reducedMotion: "no-preference" });
       await page.goto(`${origin}/__history?case=latestScroll&layout=${layout}`, { waitUntil: "domcontentloaded" });
-      await page.waitForFunction(() => document.querySelector(".chat-messages-stream")?.style.opacity === "1");
+      await page.waitForFunction(() => document.querySelector(".initial-query-scroll")?.style.opacity === "1");
       const scroller = page.locator(".initial-query-scroll");
       const moveUp = () => scroller.evaluate(element => {
         element.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
@@ -3558,7 +3605,7 @@ test("actual App preserves scrollback and reuses bounded history on Node/Convers
     const count = plannerReads();
     await page.locator('.react-flow__node[data-id="worker"]').click();
     await page.waitForFunction(() => !!window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a"));
-    await page.waitForFunction(() => document.querySelector(".chat-messages-stream").style.opacity === "1");
+    await page.waitForFunction(() => document.querySelector(".initial-query-scroll")?.style.opacity === "1");
     const scroller = page.locator(".initial-query-scroll");
     await scroller.evaluate(element => {
       // A reader gesture, not a layout clamp: only gestures stop following.
@@ -3611,7 +3658,7 @@ test("actual App preserves scrollback and reuses bounded history on Node/Convers
     await page.waitForFunction(() => !!window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a"));
     await page.waitForFunction(() => {
       const scroll = document.querySelector(".initial-query-scroll");
-      return document.querySelector(".chat-messages-stream").style.opacity === "1" &&
+      return scroll?.style.opacity === "1" &&
         scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 35;
     });
     assert.equal(await page.evaluate(() => window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a").text.includes("APP_OLDER_0")), true,
@@ -3780,7 +3827,8 @@ test("each Node record waits for its own first viewport fill instead of re-layin
           const row = [...scroll.querySelectorAll("[data-transcript-id]")]
             .find(candidate => candidate.textContent?.includes("FILL_TAIL_ONLY"));
           const content = scroll.querySelector(".execution-transcript-content");
-          window.revealFillFrames.push({ opacity: content ? Number(getComputedStyle(content).opacity) : 0,
+          const effectiveOpacity = Number(getComputedStyle(scroll).opacity) * (content ? Number(getComputedStyle(content).opacity) : 0);
+          window.revealFillFrames.push({ opacity: effectiveOpacity,
             rowTop: row?.getBoundingClientRect().top ?? null,
             filled: scroll.scrollHeight > 2000,
             status: [...scroll.querySelectorAll(".transcript-history-status")].some(element => element.textContent) });

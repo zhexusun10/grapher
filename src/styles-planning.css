@@ -71,22 +71,24 @@
   max-width: min(85%, calc(100% - 320px));
 }
 
-/* Historical conversations and graph views must render at their final geometry. */
-.workbench.historical-settled .serial-execution-panel,
-.workbench.historical-settled .pane-bottom-chat,
-.workbench.historical-settled .chat-message-row,
-.workbench.historical-settled .route-decision-pill,
-.workbench.historical-settled .plan-summary-card,
-.workbench.historical-settled .thinking-card,
-.workbench.historical-settled .initial-query-scroll>div:not(.chat-messages-stream) {
+/* Historical conversations and graph views must render at their final geometry.
+ * Runs that transitioned out of live planning in the same mount keep their
+ * in-flight entrance transitions instead of snapping mid-animation. */
+.workbench.historical-settled:not(.was-live-planning) .serial-execution-panel,
+.workbench.historical-settled:not(.was-live-planning) .pane-bottom-chat,
+.workbench.historical-settled:not(.was-live-planning) .chat-message-row,
+.workbench.historical-settled:not(.was-live-planning) .route-decision-pill,
+.workbench.historical-settled:not(.was-live-planning) .plan-summary-card,
+.workbench.historical-settled:not(.was-live-planning) .thinking-card,
+.workbench.historical-settled:not(.was-live-planning) .initial-query-scroll>div:not(.chat-messages-stream) {
   opacity: 1 !important;
   transform: none !important;
 }
 
-.workbench.historical-settled .task-node,
-.workbench.historical-settled:not(.graph-collapsed) .graph-pane,
-.workbench.historical-settled .workbench-resizer,
-.workbench.historical-settled .thinking-card {
+.workbench.historical-settled:not(.was-live-planning) .task-node,
+.workbench.historical-settled:not(.was-live-planning):not(.graph-collapsed) .graph-pane,
+.workbench.historical-settled:not(.was-live-planning) .workbench-resizer,
+.workbench.historical-settled:not(.was-live-planning) .thinking-card {
   animation: none !important;
   transform: none !important;
 }
@@ -411,7 +413,6 @@
 
 .thinking-card-body .thinking-markdown,
 .tool-call-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #334155;
 }
 
@@ -702,7 +703,7 @@ button.transcript-error-toggle {
   padding: 9px 0;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1501,7 +1502,7 @@ button.transcript-error-toggle {
   color: #91a7b7;
 }
 
-.execution-transcript-content {
+.initial-query-scroll.conversation-ready .execution-transcript-content {
   transition: opacity 0.2s ease-out;
 }
 
@@ -1509,7 +1510,7 @@ button.transcript-error-toggle {
   .transcript-loading .spin {
     animation: none;
   }
-  .execution-transcript-content {
+  .initial-query-scroll.conversation-ready .execution-transcript-content {
     transition: none;
   }
 }
@@ -1709,7 +1710,7 @@ button.transcript-error-toggle {
  * interactive while nothing happened. */
 .provider-card.configured {
   border-color: var(--status-success-border);
-  background: linear-gradient(180deg, var(--status-success-subtle) 0%, var(--bg-surface) 100%);
+  background: var(--status-success-subtle);
 }
 
 .provider-card.selected {
@@ -1758,7 +1759,7 @@ button.transcript-error-toggle {
 }
 
 .badge-configured {
-  background: var(--status-success-subtle);
+  background: var(--bg-canvas);
   color: var(--status-success-strong);
   border: 1px solid var(--status-success-border);
 }
@@ -1814,7 +1815,7 @@ button.transcript-error-toggle {
 }
 
 .card-action-btn.logout-btn {
-  background: transparent;
+  background: var(--bg-canvas);
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.2);
 }
@@ -1825,7 +1826,7 @@ button.transcript-error-toggle {
 }
 
 .card-action-btn.logout-btn:hover {
-  background: rgba(239, 68, 68, 0.1);
+  background: var(--status-danger-subtle);
   border-color: #ef4444;
 }
 

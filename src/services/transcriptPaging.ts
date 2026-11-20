@@ -6,6 +6,22 @@ export const TRANSCRIPT_VIEWPORT_BUFFER = 2;
 /** Stop sparse initial/history auto-fill after this many loaded bytes per gesture.
  * A single in-flight page (including boundary look-behind) can cross the budget. */
 export const MAX_AUTO_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
+/** Small conversations (few attempts whose combined logs fit within a single
+ * initial transcript page) load eagerly together so short histories render
+ * completely on open without placeholder collapses during the first scroll. */
+export const EAGER_EXECUTION_COUNT_LIMIT = 6;
+
+export function shouldDeferOlderExecutions(
+  executions: readonly { outputBytes?: number }[],
+): boolean {
+  if (executions.length > EAGER_EXECUTION_COUNT_LIMIT) return true;
+  let totalBytes = 0;
+  for (const execution of executions) {
+    totalBytes += execution.outputBytes ?? 0;
+    if (totalBytes > INITIAL_TRANSCRIPT_BYTES) return true;
+  }
+  return false;
+}
 /** A settled conversation normally paints once its automatic viewport fill
  * settles, so a short tail cannot jump to the bottom of the filled history
  * mid-fade. A slow or stalled older read must not keep the pane hidden, so this

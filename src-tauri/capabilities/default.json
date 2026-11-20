@@ -6,6 +6,7 @@
   "permissions": [
     "allow-backend-url",
     "allow-git-bootstrap",
+    "allow-open-external-url",
     "core:app:allow-version",
     "core:resources:allow-close",
     "autostart:default",

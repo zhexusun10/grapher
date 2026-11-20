@@ -38,7 +38,7 @@ export const suites = {
         'markdown-code-copy.test.ts', 'math-markdown.test.ts', 'markdown-safety.test.ts',
         'transcript-coalescing.test.ts', 'transcript-compaction.test.ts', 'transcript-settle.test.ts',
         'attachment-card.test.ts', 'frontend-performance.test.ts', 'execution-time-took.test.ts',
-        'session-token-usage.test.ts', 'updater.test.ts', 'autostart.test.ts',
+        'session-token-usage.test.ts', 'updater.test.ts', 'autostart.test.ts', 'external-link.test.ts',
       ),
     ],
   },

@@ -201,7 +201,7 @@
 .suggestion-item-badge {
   flex-shrink: 0;
   font-size: 11px;
-  font-weight: 550;
+  font-weight: 500;
   padding: 2px 7px;
   border-radius: 4px;
 }
@@ -923,6 +923,27 @@
   justify-content: flex-start;
 }
 
+.serial-execution-body {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+}
+
+/* Keep continued Serial attempts on the same 10px row rhythm as tool/message
+   items inside a single transcript, and collapse settled empty attempts that
+   only recorded metadata/lifecycle events before pausing. */
+.serial-execution-panel:not(.execution-record-panel) + .serial-execution-panel:not(.execution-record-panel) {
+  margin-top: -2px;
+}
+
+.serial-execution-panel:not(.execution-record-panel) + .serial-execution-panel:not(.execution-record-panel) > .serial-execution-body {
+  margin-top: 0;
+}
+
+.serial-execution-panel:not(.execution-record-panel):has([data-transcript-empty="true"]):not(:has([role="alert"], .transcript-loading, .transcript-history-status:not(.collapsed))) {
+  display: none;
+}
+
 /* The transcript list owns a 10px row gap. Keep record headers on that same
    rhythm, including collapsed and provisional records. The outer conversation
    uses 12px, so adjacent records compensate for those extra 2px. */
@@ -1220,7 +1241,7 @@ button.session-label-toggle:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 550;
+  font-weight: 500;
 }
 
 @media (max-width: 520px) {
@@ -1459,7 +1480,7 @@ button.session-label-toggle:focus-visible {
   font-size: 12px;
   letter-spacing: 0.45px;
   color: var(--text-secondary);
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .status.running {
@@ -1748,7 +1769,7 @@ button.session-label-toggle:focus-visible {
   min-width: 0;
   font-family: inherit;
   font-size: 17px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.015em;
   flex: 1;
@@ -2540,7 +2561,7 @@ button.session-label-toggle:focus-visible {
   border-radius: 8px;
   padding: 15px;
   background: var(--bg-surface);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono, monospace);
   font-size: 12px;
   line-height: 1.8;
   color: var(--text-primary);
@@ -2893,7 +2914,7 @@ button.session-label-toggle:focus-visible {
 .settings-background-option-label small {
   margin-top: 3px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -2914,6 +2935,7 @@ button.session-label-toggle:focus-visible {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-surface);
   padding: 16px 18px;
+  flex-shrink: 0;
 }
 
 .settings-card-title {
@@ -3542,7 +3564,7 @@ button.session-label-toggle:focus-visible {
 .update-settings-error-detail {
   margin-top: 6px !important;
   font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
+  font-size: 12px;
   opacity: 0.85;
   overflow-wrap: anywhere;
 }
@@ -3585,7 +3607,7 @@ button.session-label-toggle:focus-visible {
 }
 
 .update-settings-date {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -3595,7 +3617,7 @@ button.session-label-toggle:focus-visible {
 
 .update-settings-notes-label {
   display: block;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 4px;
@@ -3632,7 +3654,7 @@ button.session-label-toggle:focus-visible {
 
 .update-settings-progress-bytes {
   font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -3772,7 +3794,7 @@ button.session-label-toggle:focus-visible {
 }
 
 .floating-update-sub {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;

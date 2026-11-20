@@ -112,12 +112,12 @@ function useCardEntrance(
     if (entrance === "stagger") {
       const anim = el.animate(
         [
-          { opacity: 0, transform: "translateY(6px)" },
+          { opacity: 0, transform: "translateY(4px)" },
           { opacity: 1, transform: "translateY(0px)" },
         ],
         {
-          duration: 240,
-          delay: Math.min(initialIndexRef.current, 12) * 28,
+          duration: 200,
+          delay: Math.min(initialIndexRef.current, 6) * 18,
           easing: "cubic-bezier(0.16, 1, 0.3, 1)",
           fill: "backwards",
         },

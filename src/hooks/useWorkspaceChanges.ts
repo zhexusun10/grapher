@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling, type PollingController } from "../services/visibilityPolling";
 import type { Execution, FileChangeSummary, Snapshot } from "../types";
-import { emptyFileChangeSummary } from "../services/fileChanges";
+import {
+  cacheFileChangeSummary,
+  emptyFileChangeSummary,
+  getCachedFileChangeSummary,
+} from "../services/fileChanges";
 
 export interface UseWorkspaceChangesOptions {
   state: Snapshot;
@@ -70,6 +74,7 @@ export function useWorkspaceChanges({
       try {
         const result = await runtimeService.getFileChanges(runId, scopedIds ?? undefined, abort.signal);
         if (abort.signal.aborted) return null;
+        cacheFileChangeSummary(scopeKey, runId, result.summary);
         setFetched(previous => !previous || previous.key !== scopeKey
           ? { key: scopeKey, summary: result.summary }
           : sameSummary(previous.summary, result.summary)
@@ -106,7 +111,9 @@ export function useWorkspaceChanges({
         );
     const activeExecutionId = executions.find((execution) => execution.status === "running")?.id;
 
-    const summary = !emptyScope && fetched && fetched.key === scopeKey ? fetched.summary : emptyFileChangeSummary;
+    const cachedSummary = !emptyScope ? getCachedFileChangeSummary(scopeKey) : undefined;
+    const effectiveSummary = !emptyScope && fetched && fetched.key === scopeKey ? fetched.summary : cachedSummary;
+    const summary = effectiveSummary ?? emptyFileChangeSummary;
 
     const nodes = new Set<string>();
     for (const file of summary.files) {
@@ -117,7 +124,7 @@ export function useWorkspaceChanges({
 
     return {
       summary,
-      isLoaded: !runId || emptyScope || fetched?.key === scopeKey,
+      isLoaded: !runId || emptyScope || effectiveSummary !== undefined,
       availableNodes: nodes.size > 0 ? Array.from(nodes) : EMPTY_NODES,
       activeExecutionId,
     };

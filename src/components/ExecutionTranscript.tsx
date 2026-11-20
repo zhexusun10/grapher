@@ -58,12 +58,12 @@ function ViewportExecutionHistory(props: Props) {
     if (typeof IntersectionObserver === "undefined") { setActivated(true); return; }
     const observer = new IntersectionObserver(entries => {
       if (entries.some(entry => entry.isIntersecting)) setActivated(true);
-    }, { root: transcriptScrollParent(element) });
+    }, { root: transcriptScrollParent(element), rootMargin: "600px 0px 0px 0px" });
     observer.observe(element);
     return () => observer.disconnect();
   }, [active, activated, props.foregroundReady]);
   return <div ref={ref} data-deferred-execution-id={!active ? props.execution.id : undefined}>
-    {active ? <ExecutionHistory {...props} /> : <div className="transcript-loading" style={{ minHeight: 320 }}>
+    {active ? <ExecutionHistory {...props} /> : <div className="transcript-loading" style={{ minHeight: 120 }}>
       <button type="button" onClick={() => setActivated(true)}>{t("加载历史记录")}</button>
     </div>}
   </div>;

@@ -152,3 +152,29 @@ export function mergeFileChangeSummaries(
     ? { ...present[0], files: merged.files, isRunning: merged.isRunning, activeFilePath: merged.activeFilePath }
     : merged;
 }
+
+const MAX_CACHED_FILE_CHANGE_SUMMARIES = 64;
+const fileChangeSummaryCache = new Map<string, { runId: string; summary: FileChangeSummary }>();
+
+export function getCachedFileChangeSummary(key: string): FileChangeSummary | undefined {
+  return fileChangeSummaryCache.get(key)?.summary;
+}
+
+export function cacheFileChangeSummary(key: string, runId: string, summary: FileChangeSummary): void {
+  fileChangeSummaryCache.delete(key);
+  fileChangeSummaryCache.set(key, { runId, summary });
+  if (fileChangeSummaryCache.size > MAX_CACHED_FILE_CHANGE_SUMMARIES) {
+    const oldest = fileChangeSummaryCache.keys().next().value;
+    if (oldest !== undefined) fileChangeSummaryCache.delete(oldest);
+  }
+}
+
+export function invalidateFileChangeSummaryCache(runId?: string): void {
+  if (!runId) {
+    fileChangeSummaryCache.clear();
+    return;
+  }
+  for (const [key, entry] of fileChangeSummaryCache) {
+    if (entry.runId === runId) fileChangeSummaryCache.delete(key);
+  }
+}

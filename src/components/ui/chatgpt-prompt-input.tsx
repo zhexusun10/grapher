@@ -1411,25 +1411,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
           />
-          {(canExpand || isExpanded) && (
-            <button
-              type="button"
-              className="prompt-box-icon-btn prompt-box-expand-btn"
-              aria-label={isExpanded ? t("收起输入框") : t("放大输入框")}
-              title={isExpanded ? t("收起输入框") : t("放大输入框")}
-              aria-expanded={isExpanded}
-              aria-controls={restProps.id ?? textareaId}
-              disabled={disabled || isBusy || isPreparing || isSubmitting}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={(event) => {
-                event.stopPropagation();
-                changeExpanded(!isExpanded);
-                internalTextareaRef.current?.focus({ preventScroll: true });
-              }}
-            >
-              {isExpanded ? <Minimize2 size={compact ? 14 : 16} /> : <Maximize2 size={compact ? 14 : 16} />}
-            </button>
-          )}
         </div>
 
         {/* The shared bottom anchor owns navigation motion. Controls stay in
@@ -1451,6 +1432,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               <Paperclip size={compact ? 15 : 18} />
             </button>
+            {(canExpand || isExpanded) && (
+              <button
+                type="button"
+                className="prompt-box-icon-btn prompt-box-expand-btn"
+                aria-label={isExpanded ? t("收起输入框") : t("放大输入框")}
+                title={isExpanded ? t("收起输入框") : t("放大输入框")}
+                aria-expanded={isExpanded}
+                aria-controls={restProps.id ?? textareaId}
+                disabled={disabled || isBusy || isPreparing || isSubmitting}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  changeExpanded(!isExpanded);
+                  internalTextareaRef.current?.focus({ preventScroll: true });
+                }}
+              >
+                {isExpanded ? <Minimize2 size={compact ? 14 : 16} /> : <Maximize2 size={compact ? 14 : 16} />}
+              </button>
+            )}
           </div>
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}

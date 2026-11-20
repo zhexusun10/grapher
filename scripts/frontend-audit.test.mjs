@@ -3307,8 +3307,22 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
       const originalHeight = (await input.boundingBox()).height;
       const buttonBounds = await expand.boundingBox();
       const inputBounds = await input.boundingBox();
-      assert.ok(buttonBounds.x + buttonBounds.width <= inputBounds.x + inputBounds.width);
-      assert.ok(Math.abs(buttonBounds.y - inputBounds.y) < buttonBounds.height, "toggle is at the input's top right");
+      const containerBounds = await page.locator(".prompt-box-container").boundingBox();
+      assert.ok(buttonBounds.x >= containerBounds.x && buttonBounds.x + buttonBounds.width <= containerBounds.x + containerBounds.width,
+        "toggle stays inside the composer");
+      assert.ok(buttonBounds.y >= inputBounds.y + inputBounds.height, "toggle sits in the actions bar below the textarea");
+      const textEdges = await input.evaluate(element => {
+        const box = element.closest(".prompt-box-container").getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const scrollbar = element.offsetWidth - element.clientWidth;
+        return {
+          left: (rect.left - box.left) + parseFloat(style.paddingLeft),
+          right: (box.right - rect.right) + parseFloat(style.paddingRight) + scrollbar,
+        };
+      });
+      assert.ok(Math.abs(textEdges.left - textEdges.right) <= 1,
+        `textarea text margins stay symmetric: ${JSON.stringify(textEdges)}`);
       await input.evaluate(element => { element.setSelectionRange(5, 12); element.scrollTop = 60; });
       await expand.click();
       await collapse.waitFor();

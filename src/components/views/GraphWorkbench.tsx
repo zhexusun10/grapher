@@ -28,7 +28,7 @@ import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { getDesktopTitlebarInset } from "../../services/apiBase";
 import { deduceRouteType, shouldShowRouteBadge } from "../../services/executionRoute";
-import { activeNodeConversationEvents, localMessagesAfterEdit, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
+import { activeNodeConversationEvents, buildConversationTurns, localMessagesAfterEdit, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
@@ -45,6 +45,7 @@ import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds, reviewPlanningIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINAL_OUTPUT_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture, notifyTranscriptContentGrowth } from "../../services/transcriptScroll";
+import { shouldDeferOlderExecutions } from "../../services/transcriptPaging";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { plannerSteerRows, planningOutputSteerIds, type PlannerSteerRow } from "../../services/plannerSteers";
@@ -850,7 +851,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // newly-created execution id. Neither case creates a separate UI session.
   const nodeTurns = useMemo(() => {
     if (!selectedNode) return [];
-    const turns: Array<{
+    type NodeTurn = {
       id: string;
       isInitial: boolean;
       userMessage?: ChatMessage;
@@ -858,57 +859,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
        * above that execution's transcript, not in a turn of their own. */
       steerMessages?: ChatMessage[];
       executions: ConversationExecution[];
-    }> = [{
-      id: `turn-0-${selectedNode.id}`,
-      isInitial: true,
-      // A replacement for a Steer/follow-up owns its new execution even when
-      // the abandoned attempt was the session's first execution.
-      executions: attempts[0] && !nodeMessages.some(message => message.delivery !== "steered" && message.executionId === attempts[0].id)
-        ? [attempts[0]] : [],
-    }];
-    const assigned = new Set(turns[0].executions.map(item => item.id));
-
-    // Passive node messages are opening input, not in-flight Steers. A claimed
-    // batch owns its response only after the last user bubble in that batch.
-    const lastMessageByExecution = new Map(nodeMessages.filter(message => message.delivery !== "steered" && message.executionId)
-      .map(message => [message.executionId, message.id]));
-    for (const message of nodeMessages) {
-      // A steer has no execution of its own: Pi consumes it inside the running
-      // session. Rendering it as a separate turn puts the user's message below
-      // the response it produced, so keep it with the execution it targets.
-      if (message.delivery === "steered" && message.executionId) {
-        const owner = turns.find(turn => turn.executions.some(exec => exec.id === message.executionId));
-        if (owner) {
-          (owner.steerMessages ??= []).push(message);
-          continue;
-        }
-      }
-      const exact = message.executionId && lastMessageByExecution.get(message.executionId) === message.id
-        ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
-        : undefined;
-      // Merger continuations (`continue_merger`) create a new execution and
-      // emit a `steered` event pointing to that new execution id. When no
-      // earlier turn owns it yet, this message started that execution and must
-      // sit above its output; later steers on the same execution attach above.
-      const continuedExecution = !exact && message.delivery === "steered" && message.executionId &&
-        !lastMessageByExecution.has(message.executionId)
-        ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
-        : undefined;
-      const claimed = exact ?? continuedExecution;
-      let executions: ConversationExecution[] = claimed ? [claimed] : [];
-      if (claimed) {
-        assigned.add(claimed.id);
-      }
-      turns.push({ id: message.id, isInitial: false, userMessage: message, executions });
-    }
-
-    // A browser opened after a run finished may have no durable human event for
-    // an older attempt. Do not hide its output; keep it in the initial turn.
-    const unassigned = attempts.filter(item => !assigned.has(item.id));
-    if (unassigned.length > 0) turns[0].executions.push(...unassigned);
-    turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
-    return turns;
-  }, [selectedNode?.id, attempts, nodeMessages]);
+    };
+    return buildConversationTurns<NodeTurn>({
+      initialTurn: {
+        id: `turn-0-${selectedNode.id}`,
+        isInitial: true,
+        // A replacement for a Steer/follow-up owns its new execution even when
+        // the abandoned attempt was the session's first execution.
+        executions: attempts[0] && !nodeMessages.some(message => message.delivery !== "steered" && message.executionId === attempts[0].id)
+          ? [attempts[0]] : [],
+      },
+      messages: nodeMessages,
+      executions: attempts,
+      allowSteerContinuation: !!selectedMerger,
+      createFollowUpTurn: (message, executions) => ({
+        id: message.id,
+        isInitial: false,
+        userMessage: message,
+        executions,
+      }),
+    });
+  }, [selectedNode?.id, selectedMerger?.id, attempts, nodeMessages]);
   // While a merger is selected its own process decides the working state, not
   // the node status that covers the whole preparation/execution cycle.
   const selectedDependenciesCompleted = !selectedNode ||
@@ -924,6 +895,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     !latestNodeTurn.userMessage?.delivery && !latestNodeTurn.userMessage?.executionId && (isSelectedNodeWorking || pendingRequest);
   // Apply the continuation layout with the optimistic message, rather than
   // waiting for the backend to insert a new execution and its record header.
+  const deferOlderNodeAttempts = useMemo(() => shouldDeferOlderExecutions(attempts), [attempts]);
   const showExecutionRecords = attempts.length > 1 || (waitingForNodeExecution && attempts.length > 0);
   const provisionalRunIdRef = useRef<string | null>(null);
   if (state.runId.startsWith("pending-")) {
@@ -1269,12 +1241,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [readyConversationKey, setReadyConversationKey] = useState("");
   const isConversationReady = readyConversationKey === conversationViewKey;
   const reduceMotion = useReducedMotion();
-  // Fade only scrollable content after history and its initial scroll settle.
-  // The conversation surface and topology chrome paint immediately, independently
-  // of transcript readiness; the composer stays outside this fade too.
+  const livePlanningRunRef = useRef<{ key: string; active: boolean }>({ key: currentRunKey, active: isPlanning });
+  if (livePlanningRunRef.current.key !== currentRunKey) {
+    livePlanningRunRef.current = { key: currentRunKey, active: isPlanning };
+  } else if (isPlanning) {
+    livePlanningRunRef.current.active = true;
+  }
+  const wasLivePlanning = livePlanningRunRef.current.active;
+  // Fade the scroll viewport as one layer after history and its initial scroll
+  // settle, so messages, session details, and result cards reveal together
+  // without a duplicate inner opacity layer.
   const conversationRevealStyle: React.CSSProperties = {
     opacity: isConversationReady ? 1 : 0,
-    transition: isConversationReady && !reduceMotion ? "opacity 0.25s ease-out" : "none",
+    transition: isConversationReady && !reduceMotion ? "opacity 0.22s cubic-bezier(0.22, 1, 0.36, 1)" : "none",
   };
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
@@ -1463,7 +1442,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       return;
     }
 
-    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current && scrollTop > prevScrollTop + 0.5) {
+    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current &&
+        prevScrollTop >= 0 && scrollTop > 0.5 && scrollTop > prevScrollTop + 0.5) {
       userGestureUpRef.current = false;
       setUserScrolledUp(false);
       isScrollingToBottomRef.current = false;
@@ -1638,7 +1618,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           setUserScrolledUp(false);
         }
       }
-      if (e.deltaY < -0.5 && canReadEarlier()) {
+      if (e.deltaY < 0 && canReadEarlier()) {
         userScrolledAwayRef.current = true;
         userGestureUpRef.current = true;
         isScrollingToBottomRef.current = false;
@@ -1897,10 +1877,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         finishResize();
       }, 400);
     } else {
-      // During collapsing, keep auto-scroll suppressed across the collapse animation
-      // and synchronize prevScrollHeight so height shrinkage does not misinterpret
-      // as an intentional user scroll-up.
+      // During collapse, remain bottom-pinned while the card's height shrinks.
+      // Auto-scroll is suppressed for the animation, so without this local
+      // observer the shrinking content can briefly leave a gap below the last
+      // transcript row. A deliberate upward gesture still takes over.
+      const scroll = chatScrollRef.current;
+      const observer = card && followOutput && scroll ? new ResizeObserver(() => {
+        const currentScroll = chatScrollRef.current;
+        if (!currentScroll || !shouldFollowOutput()) return;
+        currentScroll.scrollTop = currentScroll.scrollHeight;
+        lastScrollTopRef.current = currentScroll.scrollTop;
+      }) : null;
+      if (observer && card) {
+        observer.observe(card);
+        expandedCardObserverRef.current = observer;
+      }
       expandedCardTimerRef.current = setTimeout(() => {
+        if (observer) {
+          observer.disconnect();
+          if (expandedCardObserverRef.current === observer) expandedCardObserverRef.current = null;
+        }
         expandedCardTimerRef.current = null;
         finishResize();
       }, 260);
@@ -2206,9 +2202,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [serialNode?.id, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
-  // Successful Serial turns remain an uninterrupted conversation. Add record
-  // controls when unsuccessful history needs an explicit way to reopen it.
-  const showSerialExecutionRecords = serialExecutions.some(exec => !isDefaultAttemptExpanded(exec, serialExecution?.id));
+  const deferOlderSerialExecutions = useMemo(() => shouldDeferOlderExecutions(serialExecutions), [serialExecutions]);
   const serialSession = useMemo(() => executionSessionTiming(allExecutions, serialExecution), [allExecutions, serialExecution]);
   const serialUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, serialExecution),
     [allExecutions, serialExecution]);
@@ -2237,7 +2231,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const serialTurns = useMemo(() => {
     if (routeType !== "serial") return [];
-    const turns: Array<{
+    type SerialTurn = {
       id: string;
       userMessage: ChatMessage;
       isInitial: boolean;
@@ -2245,7 +2239,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
        * the transcript they steered instead of creating a later empty turn. */
       steerMessages?: ChatMessage[];
       executions: ConversationExecution[];
-    }> = [];
+    };
 
     let messages: ChatMessage[] = effectiveMessages.length > 0 ? [...effectiveMessages] : (
       state.graph.originalGoal ? [{
@@ -2312,48 +2306,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     messages.splice(1, 0, ...recorded);
 
-    turns.push({
-      id: messages[0].id,
-      userMessage: messages[0],
-      isInitial: true,
-      executions: serialExecutions[0] && !messages.slice(1).some(message => message.delivery !== "steered" && message.executionId === serialExecutions[0].id)
-        ? [serialExecutions[0]] : [],
-    });
-
-    const assigned = new Set(turns[0].executions.map(execution => execution.id));
     const followUps = numberSteers(messages.slice(1)).filter(message => {
       const key = steerRollbackKey(message);
       return !key || !rolledBackSteerKeys.has(key);
     });
-    const lastMessageByExecution = new Map(followUps.filter(message => message.delivery !== "steered" && message.executionId)
-      .map(message => [message.executionId, message.id]));
-    for (const msg of followUps) {
-      // A steer belongs to the execution that received it, so its response stays
-      // below the user bubble instead of appearing above a separate turn.
-      if (msg.delivery === "steered" && msg.executionId) {
-        const owner = turns.find(turn => turn.executions.some(execution => execution.id === msg.executionId));
-        if (owner) {
-          (owner.steerMessages ??= []).push(msg);
-          continue;
-        }
-      }
-      const next = msg.executionId && lastMessageByExecution.get(msg.executionId) === msg.id
-        ? serialExecutions.find(execution => execution.id === msg.executionId && !assigned.has(execution.id)) : undefined;
-      const execs = next ? [next] : [];
-      if (next) assigned.add(next.id);
-      turns.push({ id: msg.id, userMessage: { ...msg, executionId: next?.id ?? msg.executionId }, isInitial: false, executions: execs });
-    }
-
-    if (serialExecutions.length > 1) {
-      const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
-      const unassigned = serialExecutions.filter((e) => !assigned.has(e.id));
-      if (unassigned.length > 0) {
-        turns[0].executions.push(...unassigned);
-        turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
-      }
-    }
-
-    return turns;
+    return buildConversationTurns<SerialTurn>({
+      initialTurn: {
+        id: messages[0].id,
+        userMessage: messages[0],
+        isInitial: true,
+        executions: serialExecutions[0] && !messages.slice(1).some(message => message.delivery !== "steered" && message.executionId === serialExecutions[0].id)
+          ? [serialExecutions[0]] : [],
+      },
+      messages: followUps,
+      executions: serialExecutions,
+      createFollowUpTurn: (msg, execs) => ({
+        id: msg.id,
+        userMessage: { ...msg, executionId: execs[0]?.id ?? msg.executionId },
+        isInitial: false,
+        executions: execs,
+      }),
+    });
   }, [routeType, serialNode?.id, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events, rolledBackSteerKeys]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
@@ -2595,10 +2568,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
   }, [conversationViewKey, syncViewScroll, setScrollBottomVisible]);
 
-  const foregroundExecutionId = routeType === "serial" ? serialExecutions.at(-1)?.id : attempts.at(-1)?.id;
+  const foregroundExecution = routeType === "serial" ? serialExecutions.at(-1) : attempts.at(-1);
+  const foregroundExecutionId = foregroundExecution?.id;
   // Re-entering the same view must not reuse readiness if an intervening read stalled.
   const foregroundExecutionKey = JSON.stringify([conversationViewKey, conversationGenerationRef.current, foregroundExecutionId]);
   const foregroundExecutionReady = readyForegroundExecution === foregroundExecutionKey;
+  const needsForegroundExecution =
+    Boolean(foregroundExecutionId) &&
+    foregroundExecution?.status !== "running" &&
+    !(Boolean(selectedNode) && showExecutionRecords && collapsedAttemptIds.has(foregroundExecutionId!));
+  const [executionRevealFallbackKey, setExecutionRevealFallbackKey] = useState("");
+  useEffect(() => {
+    if (!needsForegroundExecution || foregroundExecutionReady) return;
+    const key = foregroundExecutionKey;
+    const timer = setTimeout(() => setExecutionRevealFallbackKey(key), 180);
+    return () => clearTimeout(timer);
+  }, [needsForegroundExecution, foregroundExecutionReady, foregroundExecutionKey]);
   const handleExecutionOutputReady = useCallback((execId: string) => {
     // Wait only to activate *automatic* older readers, never to paint the pane.
     // A short first-page placeholder otherwise exposes adjacent old records
@@ -2607,8 +2592,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       syncViewScroll(conversationViewKey);
       setReadyForegroundExecution(foregroundExecutionKey);
     }
-    if (!isConversationReady) revealConversation();
-  }, [foregroundExecutionId, foregroundExecutionKey, conversationViewKey, syncViewScroll, isConversationReady, revealConversation]);
+  }, [foregroundExecutionId, foregroundExecutionKey, conversationViewKey, syncViewScroll]);
 
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
@@ -2645,11 +2629,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       });
     }
 
-    // Planner revisions share one history window. Execution records instead
-    // reveal independently, so the pane can show local loading/error states
-    // immediately and position its viewport before activating older readers.
+    // Planner revisions share one history window. Settled execution views also
+    // wait briefly (bounded by executionRevealFallbackKey) so the transcript
+    // and footer ("工作区与会话信息" / "文件变更") fade in together as one
+    // layer instead of flashing the footer above a loading spinner first.
     const needsPlanner = !selectedNode && routeType !== "serial" && savedPlannerIds.length > 0 && useSavedPlanner;
-    const outputReady = !needsPlanner || readySavedPlannerKey === savedPlannerKey;
+    const executionReady = !needsForegroundExecution || foregroundExecutionReady || executionRevealFallbackKey === foregroundExecutionKey;
+    const outputReady = (!needsPlanner || readySavedPlannerKey === savedPlannerKey) && executionReady;
     if (readyConversationKey !== conversationViewKey && outputReady) revealConversation();
   }, [
     conversationViewKey,
@@ -2661,6 +2647,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     savedPlannerKey,
     readySavedPlannerKey,
     useSavedPlanner,
+    needsForegroundExecution,
+    foregroundExecutionReady,
+    executionRevealFallbackKey,
+    foregroundExecutionKey,
     revealConversation,
     syncViewScroll,
     stopLatestScroll,
@@ -2829,7 +2819,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     <section
       // Keep exit animations and split-width transitions within one Conversation.
       key={currentRunKey}
-      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${narrowGraphVisible && showGraphPane ? "narrow-graph-visible" : ""} ${isPlanning ? "planning-active" : "historical-settled"}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${narrowGraphVisible && showGraphPane ? "narrow-graph-visible" : ""} ${isPlanning ? "planning-active" : "historical-settled"} ${wasLivePlanning ? "was-live-planning" : ""}`}
       ref={workbenchRef}
       style={{
         "--workbench-split-ratio": splitRatio,
@@ -2893,10 +2883,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
             >
-              <div
-                className="chat-messages-stream"
-                style={{ opacity: isConversationReady ? 1 : 0 }}
-              >
+              <div className="chat-messages-stream">
                 <NodeTaskCard
                   key={conversationViewKey}
                   nodeName={selectedNode.id}
@@ -3023,7 +3010,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     runId={state.runId}
                                     execution={exec}
                                     endOffset={exec.historyEndOffset}
-                                    defer={exec.outputBytes !== undefined && exec.id !== attempts.at(-1)?.id && exec.status !== "running" && !openedAttemptIds.has(exec.id)}
+                                    defer={deferOlderNodeAttempts && exec.outputBytes !== undefined && exec.id !== attempts.at(-1)?.id && exec.status !== "running" && !openedAttemptIds.has(exec.id)}
                                     foregroundReady={isConversationReady && foregroundExecutionReady}
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
@@ -3148,7 +3135,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 draftStore={composerDrafts}
                 draftKey={composerDraftKey}
                 onSubmit={handleSendMessageWithScroll}
-                placeholder={completedMergerReadOnly ? t("Merger 已完成") : nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
+                placeholder={completedMergerReadOnly ? t("Merger 已完成") : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.id); onInterrupt(selectedNode?.id); } : undefined}
@@ -3168,10 +3155,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
             >
-              <div
-                className="chat-messages-stream"
-                style={{ opacity: isConversationReady ? 1 : 0 }}
-              >
+              <div className="chat-messages-stream">
                 {routeType === "serial" ? (
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {serialTurns.map((turn, index) => {
@@ -3185,7 +3169,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           {turn.userMessage && (
                             <motion.div
                               className={`chat-message-row user${turn.isInitial ? "" : " planner-follow-up"}`}
-                              initial={isPlanning && turn.isInitial ? { opacity: 0 } : false}
+                              initial={isConversationReady && isPlanning && turn.isInitial ? { opacity: 0 } : false}
                               animate={{ opacity: 1, y: 0, scale: 1 }}
                               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
                             >
@@ -3213,7 +3197,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           {turn.isInitial && showRouteBadge && (
                             <motion.div
                               className="route-decision-pill serial"
-                              initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
+                              initial={isConversationReady && isPlanning ? { opacity: 0, scale: 0.96 } : false}
                               animate={{ opacity: 1, scale: 1 }}
                               transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
                             >
@@ -3223,7 +3207,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           )}
 
                           {turn.executions.map((exec) => {
-                            const isExpanded = !showSerialExecutionRecords || isAttemptExpanded(exec, serialExecution?.id);
                             const ownedSteers = executionSteers(exec, turn.steerMessages ?? []);
                             const executionLiveSteers = liveSteers.filter(item => item.executionId === exec.id &&
                               ownedSteers.some(steer => inlineSteerKey(steer) === item.key));
@@ -3232,7 +3215,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               .map(steer => nodeInstructionText(steer.text))
                               .filter(Boolean);
                             const fallbackSteers = exec.historyEndOffset !== undefined ? [] : ownedSteers.map(steer => ({
-                              steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", isExpanded,
+                              steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", true,
                                 executionLiveSteers.find(item => item.key === inlineSteerKey(steer))),
                             }));
                             return (
@@ -3242,37 +3225,29 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     waiting above or below the transcript they steer. */}
                                 {fallbackSteers.filter(item => item.position === "before").map(item => renderSteerBubble(item.steer))}
                                 <motion.div
-                                  className={`serial-execution-panel${showSerialExecutionRecords ? " execution-record-panel" : ""}`}
+                                  className="serial-execution-panel"
                                   initial={false}
                                   animate={{ opacity: 1 }}
                                   transition={{ duration: 0.15 }}
                                 >
-                                  {showSerialExecutionRecords && (
-                                    <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
-                                      const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
-                                      handleToggleAttempt(exec, serialExecutions, panel);
-                                    }} />
-                                  )}
-                                  {isExpanded && (
-                                    <div style={{ display: "flex", flexDirection: "column", marginTop: showSerialExecutionRecords ? 0 : 4 }}>
-                                      <ExecutionTranscript
-                                        key={exec.id}
-                                        runId={state.runId}
-                                        execution={exec}
-                                        endOffset={exec.historyEndOffset}
-                                        defer={exec.outputBytes !== undefined && exec.id !== serialExecutions.at(-1)?.id && exec.status !== "running" && !openedAttemptIds.has(exec.id)}
-                                        foregroundReady={isConversationReady && foregroundExecutionReady}
-                                        onUserResize={handleExpandableContentChange}
-                                        onInitialOutputReady={handleExecutionOutputReady}
-                                        onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
-                                        onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
-                                        inlineUserTurnTexts={inlineSteerTexts}
-                                        liveSteers={executionLiveSteers}
-                                        onEditUser={editInlineSteer(exec)}
-                                        onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
-                                      />
-                                    </div>
-                                  )}
+                                  <div className="serial-execution-body">
+                                    <ExecutionTranscript
+                                      key={exec.id}
+                                      runId={state.runId}
+                                      execution={exec}
+                                      endOffset={exec.historyEndOffset}
+                                      defer={deferOlderSerialExecutions && exec.outputBytes !== undefined && exec.id !== serialExecutions.at(-1)?.id && exec.status !== "running"}
+                                      foregroundReady={isConversationReady && foregroundExecutionReady}
+                                      onUserResize={handleExpandableContentChange}
+                                      onInitialOutputReady={handleExecutionOutputReady}
+                                      onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
+                                      onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                      inlineUserTurnTexts={inlineSteerTexts}
+                                      liveSteers={executionLiveSteers}
+                                      onEditUser={editInlineSteer(exec)}
+                                      onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
+                                    />
+                                  </div>
                                 </motion.div>
                                 {fallbackSteers.filter(item => item.position === "after").map(item => renderSteerBubble(item.steer))}
                               </React.Fragment>
@@ -3280,7 +3255,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           })}
                           {isWaitingExecution && (
                             <div className="serial-execution-panel" aria-hidden="true">
-                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                              <div className="serial-execution-body">
                                 <ExecutionTranscriptPlaceholder />
                               </div>
                             </div>
@@ -3364,7 +3339,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {(showRouteBadge && (isPlanning || effectiveRouteType !== "undecided")) && (
                       <motion.div
                         className={`route-decision-pill ${effectiveRouteType}`}
-                        initial={isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}
+                        initial={isConversationReady && isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         transition={{ duration: isPlanning ? 0.42 : 0, ease: [0.16, 1, 0.3, 1] }}
                       >
@@ -3600,7 +3575,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 draftStore={composerDrafts}
                 draftKey={composerDraftKey}
                 onSubmit={handleSendMessageWithScroll}
-                placeholder={mainComposerDisabled ? "" : isMainViewWorking ? t("Steer...") : t("Type...")}
+                placeholder={isMainViewWorking ? t("Steer...") : t("Type...")}
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}

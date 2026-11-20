@@ -55,6 +55,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const [heightVersion, setHeightVersion] = useState(0);
   const measuredRevisionRef = useRef(0);
   const committedOffsetsRevisionRef = useRef(0);
+  const resizedRevisionRef = useRef(0);
+  const committedResizedRevisionRef = useRef(0);
   const flushScheduled = useRef(false);
   const syncFlushScheduled = useRef(false);
   const mounted = useRef(false);
@@ -67,6 +69,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     if (height <= 0) return;
     const existing = heights.current.get(id);
     if (existing !== undefined && Math.abs(existing - height) < 1) return;
+    if (existing !== undefined) resizedRevisionRef.current += 1;
     heights.current.set(id, height);
     measuredRevisionRef.current += 1;
     if (sync) syncFlushScheduled.current = true;
@@ -91,11 +94,12 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const previousIds = useRef<string[]>([]);
   const ids = useMemo(() => shareJson(previousIds.current, items.map(item => item.id)), [items]);
   previousIds.current = ids;
-  const { offsets, revision: offsetsRevision } = useMemo(() => ({
+  const { offsets, revision: offsetsRevision, resizeRevision: offsetsResizeRevision } = useMemo(() => ({
     offsets: rowOffsets(ids,
       { get: (id: string) => { const height = heights.current.get(id); return height === undefined ? undefined : height + gap; } },
       (id: string) => estimateTranscriptRowHeight(id) + gap),
     revision: measuredRevisionRef.current,
+    resizeRevision: resizedRevisionRef.current,
   }), [ids, gap, heightVersion]);
   const previousOffsets = useRef(offsets);
   const previousOffsetIds = useRef(ids);
@@ -236,10 +240,11 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       let row = target?.closest<HTMLElement>("[data-transcript-id]");
       if (!row) {
         const y = e.type === "wheel" ? (e as WheelEvent).clientY : (e as TouchEvent).touches[0]?.clientY;
-        row = visibleRowsInConversation().find(candidate => {
+        const visible = visibleRowsInConversation();
+        row = visible.find(candidate => {
           const bounds = candidate.getBoundingClientRect();
           return y !== undefined && y >= bounds.top && y <= bounds.bottom;
-        });
+        }) ?? visible[0];
       }
       const mayScroll = e.type.startsWith("touch") || Math.abs((e as WheelEvent).deltaY) > 0.5;
       captureGestureAnchor(row, mayScroll);
@@ -409,6 +414,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     // compensated right away rather than dropped.
     const hasMeasurementChange = offsetsRevision !== committedOffsetsRevisionRef.current;
     committedOffsetsRevisionRef.current = offsetsRevision;
+    const hasMeasuredResize = offsetsResizeRevision !== committedResizedRevisionRef.current;
+    committedResizedRevisionRef.current = offsetsResizeRevision;
     // A staged transcript is measured inside a zero-height clipped wrapper
     // behind the live stream; it must not scroll the shared conversation pane.
     if (ref.current?.closest("[data-transcript-staged='true']")) {
@@ -507,8 +514,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         } else if (hasMeasurementChange) {
           pendingGestureMeasurementRef.current = true;
         }
-      } else if (hasMeasurementChange && viewport.top > 0) {
-        const index = viewport.top >= before.at(-1)! ? before.length - 1 : rowAt(before, viewport.top);
+      } else if (hasMeasuredResize && lastViewportRef.current.top > 0) {
+        const viewportTop = lastViewportRef.current.top;
+        const index = viewportTop >= before.at(-1)! ? before.length - 1 : rowAt(before, viewportTop);
         if (index < offsets.length) {
           const delta = offsets[index] - before[index];
           const distFromBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
@@ -521,7 +529,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     }
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-  }, [offsets, offsetsRevision, ids, viewport.top, anchor, followingLatest, updateViewport]);
+  }, [offsets, offsetsRevision, offsetsResizeRevision, ids, anchor, followingLatest, updateViewport]);
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
   const height = parent?.clientHeight || viewport.height;
   const totalHeight = offsets.at(-1) ?? 0;

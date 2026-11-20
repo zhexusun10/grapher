@@ -86,6 +86,84 @@ fn retry_git_bootstrap(manager: tauri::State<'_, GitBootstrapManager>) -> GitBoo
     manager.retry()
 }
 
+const MAX_EXTERNAL_URL_BYTES: usize = 4096;
+
+/// Validates an external browser URL for the desktop shell.
+/// Only `http://` and `https://` URLs with a non-empty authority and no control
+/// or whitespace characters are permitted.
+pub fn validate_external_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("External URL is empty".to_string());
+    }
+    if trimmed.len() > MAX_EXTERNAL_URL_BYTES {
+        return Err("External URL exceeds maximum allowed length".to_string());
+    }
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err("External URL contains invalid whitespace or control characters".to_string());
+    }
+    if trimmed.contains('\\') {
+        return Err("External URL contains invalid backslash characters".to_string());
+    }
+    let Some((_, rest)) = trimmed.split_once("://") else {
+        return Err("External URL must use http:// or https://".to_string());
+    };
+    if rest.starts_with('/') {
+        return Err("External URL is missing a valid host".to_string());
+    }
+    let parsed = tauri::Url::parse(trimmed)
+        .map_err(|_| "External URL must be a valid http:// or https:// URL".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!(
+            "Refusing non-HTTP external URL scheme: {}",
+            parsed.scheme()
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("External URL must not contain embedded credentials".to_string());
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err("External URL is missing a valid host".to_string());
+    };
+    if host.is_empty() || host.starts_with('.') {
+        return Err("External URL is missing a valid host".to_string());
+    }
+    Ok(parsed.into())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let validated = validate_external_url(&url)?;
+    // Pass the URL as a single direct argument (no shell interpolation) so
+    // query characters like `&` or `^` cannot alter the command line.
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(&validated);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(&validated);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(&validated);
+        command
+    };
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to open external URL in system browser: {error}"))?;
+    std::thread::Builder::new()
+        .name("grapher-open-external-url".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map_err(|error| format!("Failed to monitor external browser launch: {error}"))?;
+    Ok(())
+}
+
 fn decode_base64_std(input: &str) -> Result<Vec<u8>, &'static str> {
     let compact: Vec<u8> = input
         .bytes()
@@ -308,10 +386,41 @@ fn build_autostart_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> 
     tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None)
 }
 
+#[cfg(target_os = "macos")]
+fn handle_macos_close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
+    if window.label() != "main" {
+        return;
+    }
+    api.prevent_close();
+    // On macOS, calling `window.hide()` while in native fullscreen can leave an
+    // empty fullscreen Space; hiding the app switches Spaces cleanly.
+    if window.is_fullscreen().unwrap_or(false) {
+        let _ = window.app_handle().hide();
+    } else {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_main_window(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.show();
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
+        .on_window_event(|_window, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                handle_macos_close_requested(_window, api);
+            }
+        })
         .setup(|app| {
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
@@ -382,17 +491,28 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_url,
             git_bootstrap_status,
-            retry_git_bootstrap
+            retry_git_bootstrap,
+            open_external_url
         ])
         .build(tauri::generate_context!())
         .expect("error while building Grapher desktop application");
 
-    app.run(|app_handle, event| {
-        if matches!(event, RunEvent::Exit) {
+    app.run(|app_handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            if !has_visible_windows {
+                show_main_window(app_handle);
+            }
+        }
+        RunEvent::Exit => {
             if let Some(state) = app_handle.try_state::<BackendState>() {
                 state.shutdown();
             }
         }
+        _ => {}
     });
 }
 
@@ -530,5 +650,40 @@ mod tests {
         use tauri::plugin::Plugin;
         let plugin = build_autostart_plugin::<tauri::Wry>();
         assert_eq!(plugin.name(), "autostart");
+    }
+
+    #[test]
+    fn validate_external_url_allows_only_clean_http_and_https_urls() {
+        assert_eq!(
+            validate_external_url(" https://github.com/zhexusun10/grapher/releases ").unwrap(),
+            "https://github.com/zhexusun10/grapher/releases"
+        );
+        assert_eq!(
+            validate_external_url("HTTP://example.com/auth?a=1&b=2#top").unwrap(),
+            "http://example.com/auth?a=1&b=2#top"
+        );
+        for rejected in [
+            "",
+            "   ",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<h1>x</h1>",
+            "mailto:test@example.com",
+            "https://",
+            "https:///path",
+            "https://:80/path",
+            "https://user@:80/path",
+            "https://user@.example.com/path",
+            "https://example.com\\path",
+            "https://[invalid/path",
+            "https://example.com/a\nb",
+            "https://example.com/a b",
+            &format!("https://example.com/{}", "a".repeat(MAX_EXTERNAL_URL_BYTES)),
+        ] {
+            assert!(
+                validate_external_url(rejected).is_err(),
+                "expected rejection for {rejected:?}"
+            );
+        }
     }
 }

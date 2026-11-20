@@ -467,7 +467,10 @@ export default function App() {
   // A recovered Planner turn must not lock the composer: the user may still
   // steer the live process or send a follow-up once the turn settles.
   const navigationPending = loadingRunId !== null && loadingRunId !== state.runId;
-  const locked = busy || repositoryBlocked || navigationPending;
+  // Navigation pending already locks the retained workbench via `inert`, so do
+  // not toggle `locked` during a conversation switch (which briefly dims the
+  // composer and buttons to their disabled opacity and causes a visible flash).
+  const locked = busy || repositoryBlocked;
   const persistedRunningPlanning = state.planning?.status === "running";
   const backendPlanning = state.phase === "planning" || persistedRunningPlanning;
   const isAgentWorking = active || isPlanning || backendPlanning;

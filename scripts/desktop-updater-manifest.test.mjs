@@ -728,7 +728,7 @@ test('release workflow enforces least-privilege permissions, desktop + archive b
   assert.match(workflow, /--tauri-conf src-tauri\/tauri\.conf\.json/);
   assert.match(workflow, /--require-pubkey/);
   assert.match(workflow, /--require-all-when-signed/);
-  assert.match(workflow, /node scripts\/desktop-updater-manifest\.mjs \\\n\s+--finalize-assets/);
+  assert.match(workflow, /node scripts\/desktop-updater-manifest\.mjs \\\r?\n\s+--finalize-assets/);
   assert.match(workflow, /SHA256SUMS\.txt/);
   assert.match(workflow, /Refusing to modify a published release/);
   assert.match(workflow, /gh release create "\$RELEASE_TAG" --verify-tag --draft/);

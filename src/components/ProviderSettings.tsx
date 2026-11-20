@@ -1,4 +1,5 @@
 import { t, localizeError } from "../i18n";
+import { openExternalUrl, resolveExternalHttpUrl } from "../services/externalLink";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence, useIsPresent, useReducedMotion } from "motion/react";
 import {
@@ -34,12 +35,7 @@ import {
 let providersExpanded = false;
 
 function safeAuthUrl(url?: string) {
-  if (!url) return null;
-  try {
-    return ["https:", "http:"].includes(new URL(url).protocol) ? url : null;
-  } catch {
-    return null;
-  }
+  return url ? resolveExternalHttpUrl(url) : null;
 }
 
 function AuthLink({ url, label }: { url?: string; label?: string }) {
@@ -148,9 +144,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     setAnswer("");
   }, [login?.prompt?.id]);
 
-  // A remembered section mounts collapsed and opens on the next frame, so
-  // reopening Settings still plays the open animation instead of popping the
-  // body in fully rendered (motion skips the mount animation otherwise).
   useEffect(() => {
     if (providersExpanded) setShowProviders(true);
   }, []);
@@ -168,7 +161,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       openedAuthUrls.current.add(url);
       // Try once per URL, never on every poll. The visible AuthLink remains
       // available when browser popup policy blocks the automatic opening.
-      try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* Use the link instead. */ }
+      void openExternalUrl(url);
     }
   }, [login, selectedMethod, settingsPresent]);
 

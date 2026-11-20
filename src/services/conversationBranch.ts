@@ -288,3 +288,99 @@ export function activeNodeExecutions(state: Snapshot, node: string) {
   const superseded = new Set(state.supersededExecutionIds ?? []);
   return state.executions.filter((execution) => execution.node === node && !superseded.has(execution.id));
 }
+
+export interface ConversationTurnShape {
+  id: string;
+  isInitial: boolean;
+  userMessage?: ChatMessage;
+  steerMessages?: ChatMessage[];
+  executions: ConversationExecution[];
+}
+
+/** Assign executions and steers to conversation turns. Retries and
+ * pause/continue executions carry no new user message, so they follow the
+ * preceding execution's turn instead of jumping back to turns[0]. */
+export function buildConversationTurns<T extends ConversationTurnShape>(options: {
+  initialTurn: T;
+  messages: readonly ChatMessage[];
+  executions: readonly ConversationExecution[];
+  createFollowUpTurn: (message: ChatMessage, executions: ConversationExecution[]) => T;
+  allowSteerContinuation?: boolean;
+}): T[] {
+  const { initialTurn, messages, executions, createFollowUpTurn, allowSteerContinuation = false } = options;
+  const rootTurn: T = {
+    ...initialTurn,
+    executions: [...initialTurn.executions],
+    ...(initialTurn.steerMessages ? { steerMessages: [...initialTurn.steerMessages] } : {}),
+  };
+  const turns: T[] = [rootTurn];
+  const executionIds = new Set(executions.map(execution => execution.id));
+  const order = new Map(executions.map((execution, index) => [execution.id, index]));
+  const assigned = new Set(rootTurn.executions.map(execution => execution.id));
+  // Passive node messages are opening input, not in-flight Steers. A claimed
+  // batch owns its response only after the last user bubble in that batch.
+  const lastMessageByExecution = new Map(
+    messages
+      .filter(message => message.delivery !== "steered" && message.executionId)
+      .map(message => [message.executionId!, message.id])
+  );
+  const pendingSteers: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (message.delivery === "steered" && message.executionId) {
+      // Merger continuations (`continue_merger`) create a new execution and
+      // emit a `steered` event pointing to that new execution id. When no
+      // earlier turn owns it yet, this message started that execution and must
+      // sit above its output; later steers on the same execution attach above.
+      if (
+        allowSteerContinuation &&
+        !assigned.has(message.executionId) &&
+        !lastMessageByExecution.has(message.executionId)
+      ) {
+        const continued = executions.find(item => item.id === message.executionId);
+        if (continued) {
+          assigned.add(continued.id);
+          turns.push(createFollowUpTurn(message, [continued]));
+          continue;
+        }
+      }
+      if (executionIds.has(message.executionId)) {
+        pendingSteers.push(message);
+        continue;
+      }
+    }
+    const exact = message.executionId && lastMessageByExecution.get(message.executionId) === message.id
+      ? executions.find(item => item.id === message.executionId && !assigned.has(item.id))
+      : undefined;
+    const claimed = exact ? [exact] : [];
+    if (exact) assigned.add(exact.id);
+    turns.push(createFollowUpTurn(message, claimed));
+  }
+
+  const ownerByExecutionId = new Map<string, T>();
+  for (const turn of turns) {
+    for (const execution of turn.executions) ownerByExecutionId.set(execution.id, turn);
+  }
+  let currentOwner = turns[0];
+  const touched = new Set<T>();
+  for (const execution of executions) {
+    const existingOwner = ownerByExecutionId.get(execution.id);
+    if (existingOwner) {
+      currentOwner = existingOwner;
+    } else {
+      currentOwner.executions.push(execution);
+      ownerByExecutionId.set(execution.id, currentOwner);
+      touched.add(currentOwner);
+    }
+  }
+  for (const turn of touched) {
+    turn.executions.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  }
+
+  for (const steer of pendingSteers) {
+    const owner = steer.executionId ? ownerByExecutionId.get(steer.executionId) : undefined;
+    if (owner) (owner.steerMessages ??= []).push(steer);
+  }
+
+  return turns;
+}

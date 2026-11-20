@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-external-url"
+description = "Allows the main window to open validated http/https external URLs in the system browser."
+commands.allow = ["open_external_url"]
