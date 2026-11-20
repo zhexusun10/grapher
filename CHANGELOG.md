@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.12] - 2026-11-20
+
+### Changed
+
+- Added a Windows custom-titlebar divider and requested larger native rounded-corner preference for borderless desktop windows, with graceful fallback on unsupported Windows versions (`src/styles.css`, `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml`).
+
+### Fixed
+
+- Removed the transient Workspace card opacity change during workspace switching so the selected card no longer flashes or changes the browser pointer state (`src/styles.css`).
+- Clarified Planner workspace handoff wording to refer to node IDs consistently (`backend/resources/prompts/planner.md`).
+
 ## [1.9.11] - 2026-11-20
 
 ### Fixed

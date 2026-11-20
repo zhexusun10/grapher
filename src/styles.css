@@ -173,6 +173,10 @@ h3 {
   user-select: none;
 }
 
+.desktop-titlebar.is-windows {
+  border-bottom: 1px solid var(--border-default);
+}
+
 .desktop-titlebar-drag-region {
   flex: 1 1 auto;
   min-width: 0;
@@ -721,10 +725,6 @@ h3 {
   min-width: var(--sidebar-content-width, 230px);
   flex-shrink: 0;
   box-sizing: border-box;
-}
-
-.project-workspace-item.is-switching {
-  opacity: 0.65;
 }
 
 .project-workspace-item:hover {

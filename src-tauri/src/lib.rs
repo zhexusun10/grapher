@@ -411,6 +411,35 @@ fn show_main_window(app_handle: &tauri::AppHandle) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn set_windows_corner_preference<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use std::{ffi::c_void, mem::size_of_val};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        eprintln!("[grapher-desktop] Warning: failed to get the Windows window handle for rounded corners");
+        return;
+    };
+    let preference = DWMWCP_ROUND;
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&preference as *const _).cast::<c_void>(),
+            size_of_val(&preference) as u32,
+        )
+    };
+    if result != 0 {
+        // Windows 10 and older Windows 11 builds may not support this DWM
+        // attribute. The app remains usable with the platform default corners.
+        eprintln!(
+            "[grapher-desktop] Warning: failed to set rounded Windows window corners (HRESULT 0x{result:08X})"
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -429,6 +458,7 @@ pub fn run() {
                         "[grapher-desktop] Warning: failed to disable native window decorations on Windows: {error}"
                     );
                 }
+                set_windows_corner_preference(&window);
             }
 
             #[cfg(desktop)]
