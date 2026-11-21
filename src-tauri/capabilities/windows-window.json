@@ -1,10 +1,11 @@
 {
   "identifier": "windows-window",
-  "description": "Least-privilege Windows-only capability enabling borderless window dragging, double-click maximize, custom window controls, and fullscreen/maximize state queries.",
+  "description": "Least-privilege Windows-only capability enabling initial window reveal, borderless window dragging, double-click maximize, custom window controls, and fullscreen/maximize state queries.",
   "local": true,
   "platforms": ["windows"],
   "windows": ["main"],
   "permissions": [
+    "core:window:allow-show",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-minimize",
