@@ -12,9 +12,12 @@ test('startup probe measures verified CLI and Core without prompts and labels th
   assert.equal(result.modelRequests, 0);
   assert.equal(result.coreIsProductionEquivalent, false);
   assert.match(result.note, /required extension policies/);
-  for (const kind of ['cli', 'core']) {
+  for (const kind of ['cli', 'core', 'cold', 'process', 'session']) {
     assert.equal(result.samples[kind].length, 1);
     assert.ok(result.medianMs[kind].startup > 0);
     assert.ok(result.medianMs[kind].readyRpc > 0);
   }
+  assert.ok(result.samples.process[0].preparationMs > 0);
+  assert.ok(result.samples.session[0].preparationMs > 0);
+  assert.match(result.note, /No prompt or model-first-output/);
 });

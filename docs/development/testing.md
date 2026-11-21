@@ -418,6 +418,14 @@ are no timing assertions.
 
 Native suites need the real [platform boundary](../architecture/filesystem-isolation.md#platform-boundaries): bubblewrap/permitted namespaces on Linux, Seatbelt on macOS. Windows environment tests accept `GRAPHER_ENV_TEST_PARENT` for a short path. Environment-native, environment-chain and node-Merger fixtures seed historical runs to test retained private-workspace compatibility; new adaptive behavior lives in workspace-policy/batch tests and shared-native acceptance.
 
+Native extension relocation fixtures select a Python on `PATH` with a file-backed
+`_hashlib` module so they can copy and corrupt a genuine shared library. Other
+environment/probe tests keep the default Python, including builds with built-in
+extensions. Permission fixtures set their required modes explicitly and do not
+require changing the runner's umask. Linux process-drain regressions include
+zombie-only groups and zombie leaders with live threads; the latter builds a
+small pthread fixture with the C compiler already required by the native build.
+
 Offline Conda/ML profiles are opt-in via `GRAPHER_ENV_TEST_CONDA_MANIFEST` or `GRAPHER_ENV_TEST_ML_MANIFEST`; [environment-native.test.ts](../../scripts/environment-native.test.ts) defines inputs. Harbor has separate [Linux prerequisites](../benchmarks/harbor.md#adapter-tests).
 
 ## Files-only publication acceptance

@@ -66,20 +66,30 @@ impl Worker for WarmNode {
 static WARM_NODE: OnceLock<Pool<(NodeKey, u64), WarmNode>> = OnceLock::new();
 #[cfg(not(feature = "fixture"))]
 static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+#[cfg(not(feature = "fixture"))]
+static PLANNING_PREWARM_SELECTION: prewarm::Selection = prewarm::Selection::new();
+
+#[cfg(not(feature = "fixture"))]
+pub fn begin_planning_prewarm() -> u64 {
+    PLANNING_PREWARM_SELECTION.begin()
+}
 
 /// Prepare all three source roles concurrently, without constructing a Run.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_planning_engines(config: Config) {
+    let ticket = begin_planning_prewarm();
     if cfg!(test)
         || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
         || config.repository.trim().is_empty()
     {
         return;
     }
-    crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
-    for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
-        process_prewarm::request(&config, role, false);
-    }
+    PLANNING_PREWARM_SELECTION.dispatch(ticket, || {
+        crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+        for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
+            process_prewarm::request(&config, role, false);
+        }
+    });
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -103,6 +113,7 @@ fn sleep_unless_prewarm_stopping(duration: Duration) -> bool {
 #[cfg(not(feature = "fixture"))]
 pub fn warm_planning_engines_staggered(
     config: Config,
+    ticket: u64,
     initial_delay: Duration,
     step_delay: Duration,
 ) {
@@ -122,12 +133,18 @@ pub fn warm_planning_engines_staggered(
         if index > 0 && !sleep_unless_prewarm_stopping(step_delay) {
             return;
         }
-        process_prewarm::request(&config, role, false);
+        if !PLANNING_PREWARM_SELECTION.dispatch(ticket, || {
+            process_prewarm::request(&config, role, false);
+        }) {
+            return;
+        }
     }
     if !sleep_unless_prewarm_stopping(step_delay) {
         return;
     }
-    crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+    PLANNING_PREWARM_SELECTION.dispatch(ticket, || {
+        crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+    });
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -144,6 +161,7 @@ pub fn stop_partition_prewarm() {
 
 #[cfg(not(feature = "fixture"))]
 pub fn invalidate_prepared_processes() {
+    begin_planning_prewarm();
     process_prewarm::invalidate();
 }
 

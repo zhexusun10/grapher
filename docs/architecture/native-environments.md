@@ -436,6 +436,11 @@ dependencies remain outside this bounded pathname proof.
 Coverage is only the interpreter and explicitly observed native files from the
 existing adapter, not all transitive OS libraries, arbitrary application imports,
 services, credentials or every inactive environment's startup dependencies.
+File-backed `_ssl`/`_hashlib` modules retain their existing ABI inventory. When
+these modules are built into Python, the probe records the executable and, for
+shared builds, the actual loaded libpython image (or Python DLL); it refuses an
+unresolvable carrier rather than guessing an installation path or omitting its
+byte evidence. Existing file-backed bindings and persisted schemas are unchanged.
 Inactive/unbound prefixes can have restorable E bytes without a runnable native
 binding. Existing current-format L/E JSON, checksums, references and execution results are not
 rewritten. This preflight is not a filesystem transaction or protection against

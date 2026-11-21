@@ -1910,6 +1910,7 @@ fn named_pipes_are_reconstructed_and_survive_forks() {
     let fifo = source.join("events");
     let value = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(value.as_ptr(), 0o640) }, 0);
+    fs::set_permissions(&fifo, fs::Permissions::from_mode(0o640)).unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
     let target = slot(&temp, "fifo");
     workspace::prepare(&source, &target, &base, &[]).unwrap();
@@ -2930,6 +2931,7 @@ fn workspace_free_publication_rejects_conflicting_file_metadata() {
 
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
+    fs::set_permissions(source.join("tracked.txt"), fs::Permissions::from_mode(0o644)).unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
     let mut heads = Vec::new();
     for (name, mode) in [("metadata-left", 0o600), ("metadata-right", 0o640)] {

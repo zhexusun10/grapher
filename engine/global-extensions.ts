@@ -213,10 +213,11 @@ export async function executionResources(args: string[], directory: string, role
   const discoverSkills = !args.includes('--no-skills') && !args.includes('-ns');
   const allowed = (role === 'planner' || role === 'node') && (discoverExtensions || discoverSkills);
   if (allowed) {
-    const global = await resolveGlobal();
     const settingsManager = SettingsManager.create(process.cwd(), directory, { projectTrusted: args.includes('--approve') });
     const manager = new DefaultPackageManager({ cwd: process.cwd(), agentDir: directory, settingsManager, builtinExtensions: builtins });
-    const local = await manager.resolve(async () => 'skip');
+    // Independent discovery only. Both inputs remain fresh for this binding;
+    // precedence and factory initialization are applied after both complete.
+    const [global, local] = await Promise.all([resolveGlobal(), manager.resolve(async () => 'skip')]);
     const globalById = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isBundled(r)).map(r => [identity(r.path), r]));
     const globalByKey = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isBundled(r)).map(r => [resourceKey(r), r]));
     const seenExtensions = new Set<string>();

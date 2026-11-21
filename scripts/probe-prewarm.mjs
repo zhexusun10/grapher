@@ -1,4 +1,4 @@
-// Compare fresh verified CLI startup with a verified bare-Core lower bound.
+// Compare verified CLI/Core and real Serial cold/process/session RPC readiness.
 // No prompts, provider requests, user credentials or native-runtime copies.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { root, source, verifyBaseline } from './pi-baseline.mjs';
 import { verifyPiDependencies } from './pi-dependencies.mjs';
 
@@ -26,17 +27,32 @@ async function sample(kind, index) {
   for (const path of [repository, agent, sessions]) await mkdir(path, { recursive: true });
   const prompt = join(own, 'system-prompt.md');
   await writeFile(prompt, 'Select serial or parallel.');
-  const args = kind === 'cli' ? [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc',
-    '--no-prompt-templates', '--no-themes', '--no-extensions', '--no-skills', '--no-approve',
-    '--no-tools', '--no-context-files', '--model', 'openai-codex/gpt-6-sol', '--thinking', 'off',
-    '--system-prompt', prompt, '--session-dir', sessions]
-    : ['--import', pathToFileURL(join(source, 'packages/coding-agent/src/experimental/source-resolver.ts')).href,
+  const serial = ['cold', 'process', 'session'].includes(kind);
+  const role = serial ? 'node' : 'partition';
+  const taskArgs = serial ? ['--mode', 'rpc', '--no-prompt-templates', '--no-themes', '--approve',
+    '--model', 'openai-codex/gpt-6-sol', '--thinking', 'off', '--session-id', randomUUID(), '--session-dir', sessions]
+    : [];
+  let args;
+  if (kind === 'core') {
+    args = ['--import', pathToFileURL(join(source, 'packages/coding-agent/src/experimental/source-resolver.ts')).href,
       join(root, 'scripts/fixtures/prewarm-core-probe.ts')];
+  } else if (kind === 'process') {
+    args = [join(root, 'engine/entrypoint.mjs'), '--grapher-prewarm', role];
+  } else if (serial) {
+    args = [join(root, 'engine/entrypoint.mjs'), ...taskArgs];
+  } else {
+    args = [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc',
+      '--no-prompt-templates', '--no-themes', '--no-extensions', '--no-skills', '--no-approve',
+      '--no-tools', '--no-context-files', '--model', 'openai-codex/gpt-6-sol', '--thinking', 'off',
+      '--system-prompt', prompt, '--session-dir', sessions];
+  }
   const started = performance.now();
   const child = spawn(process.execPath, args, {
     cwd: repository, detached: process.platform !== 'win32',
     env: { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_ISOLATED_PI_MODELS: '1',
-      GRAPHER_GLOBAL_PI_AGENT_DIR: join(own, 'global-agent'), GRAPHER_MODE: 'partition',
+      GRAPHER_RUNTIME_CACHE_DIR: undefined, GRAPHER_BASELINE_CONTEXT: undefined, GRAPHER_VERIFIED_BASELINE: undefined,
+      PI_OFFLINE: '1', GRAPHER_GLOBAL_PI_AGENT_DIR: join(own, 'global-agent'), GRAPHER_MODE: role,
+      ...(serial ? { GRAPHER_AGENT_KIND: 'serial', GRAPHER_ACTIVE_RUN_ID: `probe-${kind}-${index}` } : {}),
       GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: repository,
       GRAPHER_WORKSPACE_ROOT: repository, GRAPHER_ORIGINAL_ROOT: repository },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -63,13 +79,13 @@ async function sample(kind, index) {
     if (event.success) callback.resolve(event);
     else callback.reject(new Error(JSON.stringify(event)));
   });
-  const probe = async id => {
+  const probe = async (id, message = { type: 'get_state' }) => {
     let timer;
     try {
       return await new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
         timer = setTimeout(() => reject(new Error(`${kind} RPC probe timed out\n${diagnostics}`)), 30000);
-        child.stdin.write(`${JSON.stringify({ id, type: 'get_state' })}\n`, error => { if (error) reject(error); });
+        child.stdin.write(`${JSON.stringify({ ...message, id })}\n`, error => { if (error) reject(error); });
       });
     } finally {
       clearTimeout(timer);
@@ -77,15 +93,30 @@ async function sample(kind, index) {
     }
   };
   try {
+    let taskStarted = started;
+    let preparationMs = 0;
+    if (kind === 'process') {
+      await probe('prepare', { type: 'grapher_prepare', role });
+      preparationMs = performance.now() - started;
+      taskStarted = performance.now();
+      await probe('bind', { type: 'grapher_bind', role, cwd: repository, args: taskArgs,
+        environment: { GRAPHER_MODE: role, GRAPHER_AGENT_KIND: 'serial', GRAPHER_EXECUTION_KIND: 'source',
+          GRAPHER_SOURCE_ALIAS: repository, GRAPHER_WORKSPACE_ROOT: repository, GRAPHER_ORIGINAL_ROOT: repository,
+          GRAPHER_ACTIVE_RUN_ID: `probe-${kind}-${index}` } });
+    } else if (kind === 'session') {
+      await probe('prepare-session');
+      preparationMs = performance.now() - started;
+      taskStarted = performance.now();
+    }
     await probe('startup');
-    const startupMs = performance.now() - started;
+    const startupMs = performance.now() - taskStarted;
     const ready = performance.now();
     await probe('ready');
     const readyRpcMs = performance.now() - ready;
     child.stdin.end();
     const [code] = await closed;
     assert.equal(code, 0, diagnostics);
-    return { startupMs, readyRpcMs };
+    return { startupMs, readyRpcMs, preparationMs };
   } finally {
     if (child.pid && child.exitCode === null && child.signalCode === null) {
       if (process.platform === 'win32') {
@@ -100,14 +131,14 @@ async function sample(kind, index) {
 }
 
 try {
-  const samples = { cli: [], core: [] };
+  const samples = { cli: [], core: [], cold: [], process: [], session: [] };
   for (let index = 0; index < runs; index++) {
-    for (const kind of ['cli', 'core']) samples[kind].push(await sample(kind, index));
+    for (const kind of Object.keys(samples)) samples[kind].push(await sample(kind, index));
   }
   const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
   console.log(JSON.stringify({ platform: process.platform, node: process.version, runs,
     modelRequests: 0, coreIsProductionEquivalent: false,
-    note: 'Fresh-process timings include baseline/dependency verification. Core excludes provider/auth, persisted sessions and required extension policies; it is only a lower bound, not a replacement.',
+    note: 'Fresh-process timings include baseline/dependency verification. Core excludes provider/auth, persisted sessions and required extension policies; it is only a lower bound, not a replacement. Cold/process/session use the same isolated Serial policies. Process excludes preparation and includes bind through session readiness; session measures an already-ready shell. No prompt or model-first-output latency is measured.',
     medianMs: Object.fromEntries(Object.entries(samples).map(([kind, values]) => [kind, {
       startup: median(values.map(value => value.startupMs)), readyRpc: median(values.map(value => value.readyRpcMs)),
     }])), samples }, null, 2));

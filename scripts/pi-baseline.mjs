@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { enableCompileCache, registerHooks } from "node:module";
+import { enableCompileCache, flushCompileCache, registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extname, join, resolve, sep } from "node:path";
@@ -197,7 +197,10 @@ let activeResolverState = null;
 // source-runtime `jiti` resolution (avoiding dist alias collisions and dual
 // module instances), so workspace aliases always resolve to `pi/packages/*/src`.
 export function installPiRuntimeResolver({ installationRoot = root } = {}) {
-  try { enableCompileCache(); } catch {}
+  // Private launches retain session-local temp paths. The host primes this
+  // runtime-owned directory before exposing it read-only inside their sandbox.
+  const cacheRoot = process.env.GRAPHER_RUNTIME_CACHE_DIR;
+  try { enableCompileCache(cacheRoot ? join(cacheRoot, "compile") : undefined); } catch {}
   if (activeResolverState?.key === installationRoot) return;
   const piRoot = join(installationRoot, "pi");
   const tsconfigPath = resolve(piRoot, "tsconfig.json");
@@ -262,6 +265,12 @@ export function installPiRuntimeResolver({ installationRoot = root } = {}) {
       return nextResolve(specifier, context);
     },
   });
+}
+
+// Resident hosts may not exit for hours. Publish imported code now so later
+// hosts can reuse it; unavailable/read-only caches must never prevent startup.
+export function flushRuntimeCompileCache() {
+  try { flushCompileCache(); } catch {}
 }
 
 function resolvePiGitDir(piDir) {
@@ -378,7 +387,9 @@ export function verifyRuntimeBaseline({ installationRoot = root, baseline = lock
     return { verified: true, cached: true };
   }
 
-  const cacheDir = join(tmpdir(), "grapher-pi-baseline-cache");
+  const cacheDir = process.env.GRAPHER_RUNTIME_CACHE_DIR
+    ? join(process.env.GRAPHER_RUNTIME_CACHE_DIR, "baseline")
+    : join(tmpdir(), "grapher-pi-baseline-cache");
   const stampKey = createHash("sha256")
     .update(`v2\0${contextKey}\0${installationRoot}\0${fingerprint}`)
     .digest("hex");
@@ -432,7 +443,10 @@ export function verifyRuntimeBaseline({ installationRoot = root, baseline = lock
       writeFileSync(tempStamp, `${JSON.stringify({ verified: true, timestamp: Date.now() })}\n`);
       renameSync(tempStamp, stampFile);
       const now = Date.now();
-      for (const name of readdirSync(cacheDir)) {
+      // Other live backends may still consume their host-primed stamps through
+      // a read-only engine mount. Reclaim these with the leased runtime, not
+      // an age-based sweep performed by a newer backend.
+      for (const name of process.env.GRAPHER_RUNTIME_CACHE_DIR ? [] : readdirSync(cacheDir)) {
         if (name === `${stampKey}.json` || name === `${stampKey}.lock`) continue;
         try {
           const candidate = join(cacheDir, name);

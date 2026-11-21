@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn rooted_project_native_mismatch_is_rejected_before_missing_w_descriptor_reconstruction() {
-    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(),
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic_with_native_module(),
         "const {execFileSync}=await import('node:child_process');execFileSync('git',['add','--','vendor/native']);");
     let execution = runtime.jobs().unwrap().remove(0);
     run_created_at_with(

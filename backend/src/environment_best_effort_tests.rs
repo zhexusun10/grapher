@@ -28,6 +28,21 @@ fn automatic() -> EnvironmentConfig {
     config
 }
 
+// These fixtures deliberately move a real shared module into project history.
+// Keep the ordinary automatic() tests on the default (possibly built-in) Python.
+fn automatic_with_native_module() -> EnvironmentConfig {
+    let mut config = automatic();
+    let python = crate::python_test_support::file_backed_python();
+    let entry = python.to_string_lossy().into_owned();
+    config.launch.entry = entry.clone();
+    config.launch.path.insert(
+        0,
+        python.parent().unwrap().to_string_lossy().into_owned(),
+    );
+    config.baseline = vec![entry, "--version".into()];
+    config
+}
+
 fn store(runtime: &Runtime) -> Environments {
     Environments::new(
         &runtime.root,
@@ -108,7 +123,8 @@ fn run_created_at_with(
                 state.join(prefix)
             };
             assert!(!venv.exists(), "unportable input must not be copied");
-            let bootstrap = automatic().launch.entry;
+            let bootstrap = runtime.state.config.as_ref().unwrap()
+                .environment.as_ref().unwrap().launch.entry.clone();
             let code = crate::environment_discovery::tool(vec![
                 context.to_string_lossy().into(),
                 "python".into(),
@@ -1245,7 +1261,7 @@ fs.writeFileSync(process.env.HOME+'/recorded-config','S config');
 
 #[test]
 fn rooted_project_native_dependency_uses_coderef_not_e_and_runs_after_missing_w_recovery() {
-    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(),
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic_with_native_module(),
         "const {execFileSync}=await import('node:child_process');execFileSync('git',['add','--','vendor/native']);");
     let job = runtime.jobs().unwrap().remove(0);
     run_created_at_with(

@@ -26,6 +26,8 @@ mod path_identity;
 mod path_safety;
 pub mod pi_extensions;
 pub mod process_control;
+#[cfg(test)]
+mod python_test_support;
 pub mod provider_auth;
 pub mod runtime;
 pub mod runtime_lock;

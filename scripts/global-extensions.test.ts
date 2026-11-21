@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { bundledTrim, bundledContinuity, bundledWebSearch, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, webSearchId, webSearchExtension, workspacePolicyName } from '../engine/global-extensions.ts';
 import workspacePolicy from '../engine/prompt-extension.ts';
 import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
-import { loadMcpConfig } from '../engine/pi-compat.ts';
+import { DefaultPackageManager, loadMcpConfig } from '../engine/pi-compat.ts';
 import { buildSystemPromptState, normalizeBuildSystemPromptOptions, diffSystemPromptSections } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -30,6 +30,34 @@ function fixture() {
     rmSync(base, { recursive: true, force: true });
   } };
 }
+
+test('task discovery overlaps global and local reads without running factories', { timeout: 10000 }, async () => {
+  const f = fixture();
+  const original = DefaultPackageManager.prototype.resolve;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  DefaultPackageManager.prototype.resolve = async function (...args) {
+    if (++calls === 2) release();
+    await gate;
+    return original.apply(this, args);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const resources = await Promise.race([
+      executionResources([], f.own, 'node'),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Discovery serialized behind the first read')), 5000); }),
+    ]);
+    assert.equal(calls, 2);
+    assert.ok(resources.args.includes(f.extension), 'fresh discovery retains the throwing factory without executing it');
+    assert.ok(resources.args.includes(bundledTrim));
+  } finally {
+    clearTimeout(timer);
+    release();
+    DefaultPackageManager.prototype.resolve = original;
+    f.close();
+  }
+});
 
 test('global auto-discovery, deletion and restore persist without editing global settings/files', async () => {
   const f = fixture();

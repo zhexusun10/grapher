@@ -21,6 +21,67 @@ fn observed(paths: &[&Path], roots: &[(&str, &Path)]) -> RuntimeEvidence {
 }
 
 #[test]
+fn native_module_carriers_remain_required_byte_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path().join("W");
+    fs::create_dir(&work).unwrap();
+    git2::Repository::init(&work).unwrap();
+    let prefix = work.join("env");
+    let mut create = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" });
+    create.args(["-m", "venv", "--without-pip"]).arg(&prefix);
+    crate::environment::controlled_output(create).unwrap();
+    let roots = [("workspace", work.as_path())];
+    let binding =
+        super::super::verify(&work, "workspace", "env", "venv", false, &roots, Some(3)).unwrap();
+    let mut launch = crate::environment_automatic::resolve(&work, false)
+        .unwrap()
+        .0
+        .unwrap()
+        .launch;
+    let python = super::super::interpreter(&prefix, "venv");
+    launch.entry = text(&python);
+    launch.path.insert(0, text(python.parent().unwrap()));
+    launch.environment = Some(binding.clone());
+    super::super::validate_launch(&work, &launch, false).unwrap();
+    let evidence = binding.runtime_evidence.as_ref().unwrap();
+    let mut query = std::process::Command::new(&python);
+    query.args([
+        "-I",
+        "-B",
+        "-c",
+        r#"import _ssl,_hashlib,ctypes,json,pathlib,sys
+files=[m.__file__ for m in [_ssl,_hashlib] if getattr(m,'__file__',None)]
+if sys.platform.startswith('linux') and len(files)<2:
+ address=ctypes.cast(ctypes.pythonapi.Py_GetVersion,ctypes.c_void_p).value
+ for line in pathlib.Path('/proc/self/maps').read_text().splitlines():
+  parts=line.split(None,5); start,end=[int(n,16) for n in parts[0].split('-')]
+  if start<=address<end: files.append(parts[5]); break
+if not files: files.append(getattr(sys,'_base_executable',sys.executable))
+print(json.dumps([str(pathlib.Path(p).resolve()) for p in files]))"#,
+    ]);
+    let carriers: Vec<String> =
+        serde_json::from_slice(&crate::environment::controlled_output(query).unwrap()).unwrap();
+    for carrier in &carriers {
+        assert!(evidence.files.iter().any(|file|
+            matches!(file, RuntimeFile::External { path, .. } if crate::path_identity::same_path(Path::new(path), Path::new(carrier)))
+        ), "actual native carrier missing from byte evidence: {carrier}");
+    }
+    let carrier = evidence.files.iter().find(|file|
+        matches!(file, RuntimeFile::External { path, .. } if crate::path_identity::same_path(Path::new(path), Path::new(&carriers[0])))
+    ).unwrap().clone();
+    let mut corrupted = binding;
+    let files = &mut corrupted.runtime_evidence.as_mut().unwrap().files;
+    let file = files.iter_mut().find(|file| **file == carrier).unwrap();
+    match file {
+        RuntimeFile::External { blob, .. } | RuntimeFile::Root { blob, .. } => {
+            *blob = "0".repeat(40)
+        }
+    }
+    launch.environment = Some(corrupted);
+    assert!(super::super::validate_launch(&work, &launch, false).is_err());
+}
+
+#[test]
 fn native_runtime_protocol_preserves_abi_bytes_and_rejects_missing_binding_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("native-input");
@@ -311,7 +372,7 @@ fn native_runtime_startup_requires_file_evidence_and_rejects_sibling_inputs() {
     fs::create_dir_all(&sibling).unwrap();
     git2::Repository::init(&work).unwrap();
     let prefix = work.join("env");
-    let mut create = Command::new(if cfg!(windows) { "python" } else { "python3" });
+    let mut create = Command::new(crate::python_test_support::file_backed_python());
     create
         .args(["-m", "venv", "--copies", "--without-pip"])
         .arg(&prefix);

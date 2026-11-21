@@ -466,6 +466,9 @@ mod tests {
         for path in [&session, &engine, &pi_dir] {
             fs::create_dir_all(path).unwrap();
         }
+        let cache = engine.join(".grapher-runtime-cache/baseline");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("seed.json"), "verified").unwrap();
         fs::create_dir_all(&source).unwrap();
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
         fs::write(source.join("secret"), "protected").unwrap();
@@ -479,9 +482,9 @@ mod tests {
         let mut probe = Command::new(BWRAP);
         let result = probe.args(&args[..args.len()-2]).args([
             "/bin/sh", "-c",
-            "set -e; : <>/dev/null; test ! -r \"$1\"; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; echo ok > \"$2/new\"",
+            "set -e; : <>/dev/null; test ! -r \"$1\"; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; test \"$(cat \"$3/seed.json\")\" = verified; ! (echo bad > \"$3/seed.json\") 2>/dev/null; ! (echo bad > \"$3/new.json\") 2>/dev/null; echo ok > \"$2/new\"",
             "probe",
-        ]).args([&source, &session]).current_dir(&current).output().unwrap();
+        ]).args([&source, &session, &cache]).current_dir(&current).output().unwrap();
         assert!(
             result.status.success(),
             "{}",
