@@ -3175,27 +3175,23 @@ export default function App() {
           <main className="main">
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
-              {desktopBackend.isDesktop && modal !== "settings" && (desktopBackend.phase === "connecting" || desktopBackend.phase === "error") && (
+              {desktopBackend.isDesktop && modal !== "settings" && desktopBackend.phase === "error" && (
                 <div
-                  className={`workbench-module-status desktop-backend-status${desktopBackend.phase === "error" ? " is-error" : ""}`}
-                  role={desktopBackend.phase === "error" ? "alert" : "status"}
+                  className="workbench-module-status desktop-backend-status is-error"
+                  role="alert"
                   data-testid="desktop-backend-status"
                   data-phase={desktopBackend.phase}
                 >
                   <span className="desktop-backend-status-text">
-                    {desktopBackend.phase === "error"
-                      ? localizeError(desktopBackend.error || t("无法连接桌面后端服务，请重试或重启应用。"))
-                      : t("正在连接桌面后端…")}
+                    {localizeError(desktopBackend.error || t("无法连接桌面后端服务，请重试或重启应用。"))}
                   </span>
-                  {desktopBackend.phase === "error" && (
-                    <button
-                      type="button"
-                      className="desktop-backend-retry"
-                      onClick={() => void retryDesktopBackend()}
-                    >
-                      {t("重试")}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="desktop-backend-retry"
+                    onClick={() => void retryDesktopBackend()}
+                  >
+                    {t("重试")}
+                  </button>
                 </div>
               )}
               {hostPreflight && !hostPreflight.gitAvailable && modal !== "settings" && (

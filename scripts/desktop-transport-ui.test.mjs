@@ -96,14 +96,16 @@ async function setupContext({
   recheckHostPreflight = null,
   autostartConfig = null,
   saveConfigError = null,
+  initialWindowShowFailures = 0,
+  reducedMotion = "reduce",
 } = {}) {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 960 },
     locale: "en-US",
-    reducedMotion: "reduce",
+    reducedMotion,
   });
 
-  await context.addInitScript(({ tauriMode, platformOverride, initialBackendResult, repository, autostartConfig }) => {
+  await context.addInitScript(({ tauriMode, platformOverride, initialBackendResult, repository, autostartConfig, initialWindowShowFailures }) => {
     if (platformOverride) {
       Object.defineProperty(navigator, "platform", { value: platformOverride.platform, configurable: true });
       Object.defineProperty(navigator, "userAgent", { value: platformOverride.userAgent, configurable: true });
@@ -194,6 +196,9 @@ async function setupContext({
         fullscreen: false,
         maximized: false,
         calls: [],
+        shownShells: [],
+        showAttempts: 0,
+        showFailuresRemaining: initialWindowShowFailures,
       };
       window.__TEST_WINDOW__ = {
         state: windowState,
@@ -209,6 +214,19 @@ async function setupContext({
         },
         invoke(cmd) {
           invokedCommands.push(cmd);
+          if (cmd === "plugin:window|show") {
+            windowState.showAttempts += 1;
+            if (windowState.showFailuresRemaining > 0) {
+              windowState.showFailuresRemaining -= 1;
+              return Promise.reject("Window IPC temporarily unavailable");
+            }
+            windowState.shownShells.push({
+              shellMounted: Boolean(document.querySelector(".app-shell.is-tauri-windows")),
+              titlebarMounted: Boolean(document.querySelector(".desktop-titlebar.is-windows")),
+              inset: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
+            });
+            return Promise.resolve(null);
+          }
           if (cmd === "plugin:window|is_fullscreen") {
             return Promise.resolve(windowState.fullscreen);
           }
@@ -269,7 +287,7 @@ async function setupContext({
         },
       };
     }
-  }, { tauriMode, platformOverride, initialBackendResult, repository, autostartConfig });
+  }, { tauriMode, platformOverride, initialBackendResult, repository, autostartConfig, initialWindowShowFailures });
 
   const requests = [];
   const pageErrors = [];
@@ -377,59 +395,128 @@ test("browser mode keeps relative /api URLs, SSE path, localStorage settings, an
   }
 });
 
-test("Tauri mode shows desktop readiness while awaiting backend_url, routes all requests and SSE to dynamic port, and preserves localStorage", async () => {
-  const dynamicOrigin = "http://127.0.0.1:45123";
+for (const platformOverride of [
+  { platform: "Win32", uaPlatform: "Windows", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+  { platform: "MacIntel", uaPlatform: "macOS", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" },
+]) {
+  test(`${platformOverride.uaPlatform} startup stays quiet while awaiting backend_url, routes all requests and SSE to dynamic port, and preserves localStorage`, async () => {
+    const dynamicOrigin = "http://127.0.0.1:45123";
+    const { context, page, requests, pageErrors } = await setupContext({
+      tauriMode: true,
+      platformOverride,
+      initialBackendResult: { kind: "pending" },
+    });
+    try {
+      await page.goto(origin, { waitUntil: "domcontentloaded" });
+
+      const statusBanner = page.locator('[data-testid="desktop-backend-status"]');
+      await page.waitForFunction(() => window.__TEST_TAURI__.invokedCommands.includes("backend_url"));
+      await page.locator(".desktop-titlebar").waitFor({ state: "visible" });
+      if (platformOverride.uaPlatform === "Windows") {
+        // A pending backend must not strand the initially hidden Windows shell.
+        await page.waitForFunction(() => window.__TEST_WINDOW__.state.shownShells.length === 1);
+        assert.deepEqual(await page.evaluate(() => window.__TEST_WINDOW__.state.shownShells), [{
+          shellMounted: true,
+          titlebarMounted: true,
+          inset: "30px",
+        }]);
+      } else {
+        assert.deepEqual(await page.evaluate(() => window.__TEST_WINDOW__.state.shownShells), []);
+      }
+
+      // Before backend_url resolves, zero /api requests or EventSource connections may fire.
+      await page.waitForTimeout(150);
+      assert.equal(await statusBanner.count(), 0, "pending backend connection must not show a loading banner");
+      assert.equal(requests.length, 0);
+      assert.equal(await page.evaluate(() => window.__TEST_EVENT_SOURCES__.length), 0);
+
+      // Resolve narrow backend_url IPC.
+      await page.evaluate(url => window.__TEST_TAURI__.resolvePending(url), dynamicOrigin);
+      await statusBanner.waitFor({ state: "hidden" });
+      await page.waitForFunction(() => window.__TEST_EVENT_SOURCES__.some(es => es.readyState === 1));
+
+      const nonPluginCommands = await page.evaluate(
+        () => window.__TEST_TAURI__.invokedCommands.filter(cmd => !cmd.startsWith("plugin:")),
+      );
+      assert.deepEqual(nonPluginCommands, ["backend_url"]);
+
+      // Open Settings to verify provider_auth and pi_extensions also hit the dynamic backend.
+      await page.getByRole("button", { name: "Settings" }).click();
+      await page.waitForSelector(".modal-content, [role='dialog']");
+      await page.waitForTimeout(150);
+
+      const commands = new Set(requests.map(r => r.command));
+      assert.ok(commands.has("bootstrap"), "bootstrap ran against dynamic backend");
+      assert.ok(commands.has("provider_auth"), "provider_auth ran against dynamic backend");
+      assert.ok(commands.has("pi_extensions"), "pi_extensions ran against dynamic backend");
+      assert.ok(
+        requests.every(r => r.origin === dynamicOrigin),
+        `expected all Tauri requests on ${dynamicOrigin}, got ${requests.map(r => r.url).join(", ")}`,
+      );
+
+      const backendUrlCalls = await page.evaluate(
+        () => window.__TEST_TAURI__.invokedCommands.filter(cmd => cmd === "backend_url"),
+      );
+      assert.deepEqual(backendUrlCalls, ["backend_url"]);
+
+      const eventSourceUrls = await page.evaluate(() => window.__TEST_EVENT_SOURCES__.map(es => es.url));
+      assert.deepEqual(eventSourceUrls, [`${dynamicOrigin}/api/events`]);
+
+      const storedDataPath = await page.evaluate(() => localStorage.getItem("grapher_data_path"));
+      assert.equal(storedDataPath, "/mock/desktop-data");
+      assert.deepEqual(pageErrors, []);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("Windows startup retries transient window IPC failures with animations enabled while backend IPC remains pending", async () => {
   const { context, page, requests, pageErrors } = await setupContext({
     tauriMode: true,
+    platformOverride: { platform: "Win32", uaPlatform: "Windows", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
     initialBackendResult: { kind: "pending" },
+    initialWindowShowFailures: 2,
+    reducedMotion: "no-preference",
   });
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__TEST_WINDOW__.state.shownShells.length === 1);
+    assert.deepEqual(await page.evaluate(() => ({
+      attempts: window.__TEST_WINDOW__.state.showAttempts,
+      shells: window.__TEST_WINDOW__.state.shownShells,
+    })), { attempts: 3, shells: [{ shellMounted: true, titlebarMounted: true, inset: "30px" }] });
+    assert.equal(requests.length, 0, "window reveal must not depend on backend IPC");
+    assert.equal(await page.locator('[data-testid="desktop-backend-status"]').count(), 0);
 
-    const statusBanner = page.locator('[data-testid="desktop-backend-status"]');
-    await statusBanner.waitFor({ state: "visible" });
-    assert.equal(await statusBanner.getAttribute("data-phase"), "connecting");
-    assert.match(await statusBanner.textContent() || "", /Connecting to the desktop backend/);
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("resize"));
+    });
+    await page.waitForTimeout(700);
+    assert.equal(await page.evaluate(() => window.__TEST_WINDOW__.state.showAttempts), 3, "successful reveal stops retries even after window events");
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await context.close();
+  }
+});
 
-    // Before backend_url resolves, zero /api requests or EventSource connections may fire.
-    await page.waitForTimeout(150);
-    assert.equal(requests.length, 0);
-    assert.equal(await page.evaluate(() => window.__TEST_EVENT_SOURCES__.length), 0);
-
-    // Resolve narrow backend_url IPC.
-    await page.evaluate(url => window.__TEST_TAURI__.resolvePending(url), dynamicOrigin);
-    await statusBanner.waitFor({ state: "hidden" });
-    await page.waitForFunction(() => window.__TEST_EVENT_SOURCES__.some(es => es.readyState === 1));
-
-    const nonPluginCommands = await page.evaluate(
-      () => window.__TEST_TAURI__.invokedCommands.filter(cmd => !cmd.startsWith("plugin:")),
-    );
-    assert.deepEqual(nonPluginCommands, ["backend_url"]);
-
-    // Open Settings to verify provider_auth and pi_extensions also hit the dynamic backend.
-    await page.getByRole("button", { name: "Settings" }).click();
-    await page.waitForSelector(".modal-content, [role='dialog']");
-    await page.waitForTimeout(150);
-
-    const commands = new Set(requests.map(r => r.command));
-    assert.ok(commands.has("bootstrap"), "bootstrap ran against dynamic backend");
-    assert.ok(commands.has("provider_auth"), "provider_auth ran against dynamic backend");
-    assert.ok(commands.has("pi_extensions"), "pi_extensions ran against dynamic backend");
-    assert.ok(
-      requests.every(r => r.origin === dynamicOrigin),
-      `expected all Tauri requests on ${dynamicOrigin}, got ${requests.map(r => r.url).join(", ")}`,
-    );
-
-    const backendUrlCalls = await page.evaluate(
-      () => window.__TEST_TAURI__.invokedCommands.filter(cmd => cmd === "backend_url"),
-    );
-    assert.deepEqual(backendUrlCalls, ["backend_url"]);
-
-    const eventSourceUrls = await page.evaluate(() => window.__TEST_EVENT_SOURCES__.map(es => es.url));
-    assert.deepEqual(eventSourceUrls, [`${dynamicOrigin}/api/events`]);
-
-    const storedDataPath = await page.evaluate(() => localStorage.getItem("grapher_data_path"));
-    assert.equal(storedDataPath, "/mock/desktop-data");
+test("Windows startup stops retrying persistent window IPC failures without unhandled rejections", async () => {
+  const { context, page, pageErrors } = await setupContext({
+    tauriMode: true,
+    platformOverride: { platform: "Win32", uaPlatform: "Windows", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    initialWindowShowFailures: 99,
+  });
+  const diagnostics = [];
+  page.on("console", message => {
+    if (message.type() === "error" && message.text().includes("Failed to show the Grapher window")) diagnostics.push(message.text());
+  });
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__TEST_WINDOW__.state.showAttempts === 3);
+    await page.waitForTimeout(700);
+    assert.equal(await page.evaluate(() => window.__TEST_WINDOW__.state.showAttempts), 3);
+    assert.equal(diagnostics.length, 1, "failure is diagnosed once; native watchdog handles the fallback");
     assert.deepEqual(pageErrors, []);
   } finally {
     await context.close();
@@ -441,6 +528,7 @@ test("Tauri mode surfaces closed backend feedback with Retry recovery and reconn
   const rotatedOrigin = "http://127.0.0.1:45125";
   const { context, page, requests, pageErrors } = await setupContext({
     tauriMode: true,
+    platformOverride: { platform: "Win32", uaPlatform: "Windows", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
     initialBackendResult: {
       kind: "error",
       error: "Grapher backend exited before becoming ready (exit status: 1).",
@@ -452,6 +540,7 @@ test("Tauri mode surfaces closed backend feedback with Retry recovery and reconn
     const statusBanner = page.locator('[data-testid="desktop-backend-status"]');
     await statusBanner.waitFor({ state: "visible" });
     assert.equal(await statusBanner.getAttribute("data-phase"), "error");
+    await page.waitForFunction(() => window.__TEST_WINDOW__.state.shownShells.length === 1);
     const errorText = await statusBanner.textContent() || "";
     assert.match(errorText, /The desktop backend stopped running: Grapher backend exited before becoming ready/);
     assert.doesNotMatch(errorText, /npm run backend/);
@@ -654,6 +743,7 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
     // Entering fullscreen on Windows also collapses the titlebar.
     await win.page.evaluate(() => window.__TEST_WINDOW__.setFullscreen(true));
     await winTitlebar.waitFor({ state: "hidden" });
+    assert.equal(await win.page.evaluate(() => window.__TEST_WINDOW__.state.shownShells.length), 1, "window state changes must not reveal the window again");
     assert.deepEqual(win.pageErrors, []);
   } finally {
     await win.context.close();

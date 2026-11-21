@@ -75,6 +75,21 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
     titleBarStyles.includes(mainWindow.titleBarStyle),
     `Expected titleBarStyle "${mainWindow.titleBarStyle}" in schema enum [${titleBarStyles.join(', ')}]`,
   );
+  // Tauri replaces arrays when merging the platform config: retain the main
+  // window's geometry while creating Windows borderless and initially hidden.
+  const windowsConf = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.windows.conf.json'), 'utf8'));
+  assert.equal(windowsConf.app.windows.length, 1);
+  const windowsWindow = windowsConf.app.windows[0];
+  for (const key of ['label', 'title', 'width', 'height', 'minWidth', 'minHeight', 'resizable', 'fullscreen']) {
+    assert.equal(windowsWindow[key], mainWindow[key], `Windows window must retain ${key}`);
+  }
+  assert.equal(windowsWindow.decorations, false);
+  assert.equal(windowsWindow.visible, false);
+  assert.equal(windowsWindow.backgroundColor, '#FFFFFF');
+  assert.equal(windowProps.visible.type, 'boolean');
+  assert.equal(windowProps.decorations.type, 'boolean');
+  assert.ok(windowProps.backgroundColor);
+  assert.notEqual(mainWindow.visible, false, 'macOS keeps its native startup visibility');
   assert.ok(conf.app.security.csp.includes('http://127.0.0.1:*'));
   assert.deepEqual(conf.bundle.targets, ['app', 'dmg', 'nsis']);
   assert.equal(conf.bundle.resources['resources/runtime'], 'runtime');
@@ -159,6 +174,7 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
   assert.deepEqual(windowsWindowCap.platforms, ['windows']);
   assert.deepEqual(windowsWindowCap.windows, ['main']);
   assert.deepEqual(windowsWindowCap.permissions, [
+    'core:window:allow-show',
     'core:window:allow-start-dragging',
     'core:window:allow-internal-toggle-maximize',
     'core:window:allow-minimize',

@@ -8,6 +8,10 @@ Tailwind v4 uses `@tailwindcss/vite` and `src/tailwind.css`, imported by `src/ma
 
 `src/components/ui/dot-pattern.tsx` uses `useId` and needs no provider or image assets. See it for props and `src/components/views/LandingView.tsx` for home-screen usage.
 
+## Desktop startup
+
+On Windows, [tauri.windows.conf.json](../../src-tauri/tauri.windows.conf.json) creates the main window hidden, borderless and with the same white background as the app. [useDesktopTitlebar](../../src/components/layout/DesktopTitlebar.tsx) reveals it once React has committed the shell and titlebar inset, without waiting for backend IPC or animation frames in a hidden WebView2. It retries transient window IPC failures twice. A native watchdog in [lib.rs](../../src-tauri/src/lib.rs) reveals a still-hidden window after five seconds if the renderer or its IPC failed; visible, minimized and closed windows are left alone. This avoids changing native decorations on an already visible window. macOS retains its overlay titlebar and native startup visibility. Normal backend connection waits stay quiet; connection failures still show a diagnostic and Retry. [Desktop transport browser tests](../../scripts/desktop-transport-ui.test.mjs) cover pending/error connections, window IPC retries, reveal ordering and platform titlebar behavior; the watchdog and native Windows compositor behavior require verification on Windows.
+
 ## Sidebar navigation
 
 Workspace and Conversation cards are native buttons with current/loading states and full accessible names. Sidebar text is not mouse-selectable, avoiding accidental selection while dragging; paths and prompts remain available through the context menu. Collapsed lists become inert immediately, including during their exit transition; keyboard focus rings stay inside the clipped list viewport. An explicit `Run not found` response while opening or deleting a conversation retires its stale card and persisted browser indexes; network errors and rejected deletions retain the card for retry.

@@ -41,6 +41,34 @@ export function useDesktopTitlebar(): DesktopTitlebarState {
     };
   }, [visible]);
 
+  useEffect(() => {
+    if (platform !== "windows") return;
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // Windows starts hidden and borderless. Reveal only after React has
+    // committed the shell and titlebar inset, independently of backend readiness.
+    // Do not wait for animation frames: hidden WebView2 windows can throttle them.
+    const reveal = async (attempt = 0) => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        if (active) await getCurrentWindow().show();
+      } catch (error) {
+        if (!active) return;
+        if (attempt < 2) {
+          retryTimer = setTimeout(() => { void reveal(attempt + 1); }, attempt === 0 ? 150 : 500);
+        } else {
+          // The native startup watchdog can still reveal a failed renderer.
+          console.error("Failed to show the Grapher window", error);
+        }
+      }
+    };
+    void reveal();
+    return () => {
+      active = false;
+      clearTimeout(retryTimer);
+    };
+  }, [platform]);
+
   const syncWindowState = useCallback(async () => {
     if (!platform) return;
     const seq = ++syncSeqRef.current;

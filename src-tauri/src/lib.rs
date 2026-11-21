@@ -412,6 +412,37 @@ fn show_main_window(app_handle: &tauri::AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
+fn schedule_windows_startup_reveal(app_handle: &tauri::AppHandle) {
+    let fallback_handle = app_handle.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("grapher-startup-window".to_string())
+        .spawn(move || {
+            // The frontend normally shows the window after mounting its shell.
+            // A failed JS import/IPC must not leave an invisible running app.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let Some(window) = fallback_handle.get_webview_window("main") else {
+                return;
+            };
+            // Never restore a window the user has already minimized. Failed
+            // state queries also leave its current visibility untouched.
+            if matches!(window.is_visible(), Ok(false))
+                && matches!(window.is_minimized(), Ok(false))
+            {
+                eprintln!("[grapher-desktop] Frontend window reveal timed out; showing the main window");
+                if let Err(error) = window.show() {
+                    eprintln!("[grapher-desktop] Failed to show the main window: {error}");
+                }
+            }
+        })
+    {
+        eprintln!("[grapher-desktop] Failed to start window reveal watchdog: {error}");
+        if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.show();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn set_windows_corner_preference<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use std::{ffi::c_void, mem::size_of_val};
     use windows_sys::Win32::Graphics::Dwm::{
@@ -453,11 +484,6 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window.set_decorations(false) {
-                    eprintln!(
-                        "[grapher-desktop] Warning: failed to disable native window decorations on Windows: {error}"
-                    );
-                }
                 set_windows_corner_preference(&window);
             }
 
@@ -516,6 +542,8 @@ pub fn run() {
             }
             app.manage(state);
             app.manage(git_bootstrap);
+            #[cfg(target_os = "windows")]
+            schedule_windows_startup_reveal(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
