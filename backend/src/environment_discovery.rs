@@ -1191,17 +1191,44 @@ def observe_file(filename):
  path=pathlib.Path(filename); resolved=str(path.resolve())
  files.add(resolved)
  if record_selectors: references[str(path.absolute())]=resolved
-for filename in [sys.executable,getattr(sys,'_base_executable',sys.executable),_ssl.__file__,_hashlib.__file__,getattr(zlib,'__file__',None)]:
+module_files=[]; builtin_native=False
+for module in [_ssl,_hashlib]:
+ filename=getattr(module,'__file__',None)
+ if filename: module_files.append(filename)
+ elif getattr(getattr(module,'__spec__',None),'origin',None)=='built-in': builtin_native=True
+ else: raise RuntimeError('Native module has no verifiable code carrier: '+module.__name__)
+for filename in [sys.executable,getattr(sys,'_base_executable',sys.executable),*module_files,getattr(zlib,'__file__',None)]:
  if filename: observe_file(filename)
+# File-backed builds retain their exact legacy ABI inventory. Previously
+# unsupported built-in modules are covered by the executable or the actual
+# loaded libpython image, never a guessed sysconfig installation path.
+if builtin_native and sysconfig.get_config_var('Py_ENABLE_SHARED') and sys.platform!='win32':
+ import ctypes
+ class DlInfo(ctypes.Structure):
+  _fields_=[('filename',ctypes.c_char_p),('base',ctypes.c_void_p),('symbol',ctypes.c_char_p),('address',ctypes.c_void_p)]
+ loader=ctypes.CDLL(None)
+ try: locate=loader.dladdr
+ except AttributeError:
+  if not sys.platform.startswith('linux'): raise
+  loader=ctypes.CDLL('libdl.so.2'); locate=loader.dladdr
+ locate.argtypes=[ctypes.c_void_p,ctypes.POINTER(DlInfo)]; locate.restype=ctypes.c_int
+ image=DlInfo()
+ if not locate(ctypes.cast(ctypes.pythonapi.Py_GetVersion,ctypes.c_void_p),ctypes.byref(image)) or not image.filename:
+  raise RuntimeError('Cannot locate loaded libpython for built-in native modules')
+ observe_file(image.filename.decode(sys.getfilesystemencoding()))
 if sys.platform=='win32':
  import ctypes
  kernel=ctypes.WinDLL('kernel32',use_last_error=True); kernel.GetModuleHandleW.argtypes=[ctypes.c_wchar_p]; kernel.GetModuleHandleW.restype=ctypes.c_void_p; kernel.GetModuleFileNameW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_uint32]
+ python_image=False
  for name in ['python3.dll','python%d%d.dll'%sys.version_info[:2],'libssl-3-x64.dll','libssl-3.dll','libcrypto-3-x64.dll','libcrypto-3.dll','zlib1.dll','zlib.dll','libzlib.dll']:
   handle=kernel.GetModuleHandleW(name)
   if handle:
    buffer=ctypes.create_unicode_buffer(32768)
    if not kernel.GetModuleFileNameW(handle,buffer,len(buffer)): raise OSError('Cannot resolve loaded native library '+name)
    observe_file(buffer.value)
+   if name.startswith('python'): python_image=True
+ if builtin_native and sysconfig.get_config_var('Py_ENABLE_SHARED') and not python_image:
+  raise RuntimeError('Cannot locate loaded Python DLL for built-in native modules')
 digests={}; native_blobs={}
 for filename in sorted(files):
  digest=hashlib.sha256()

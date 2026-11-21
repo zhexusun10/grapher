@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Prevented delayed startup prewarming from replacing a newer project's prepared workers by guarding every staggered dispatch with its original selection generation (`backend/src/engine.rs`, `backend/src/engine/prewarm.rs`, `backend/src/server.rs`).
+- Supported Python builds with built-in `_ssl`/`_hashlib` modules by recording their executable/loaded Python-library byte evidence instead of assuming every native module has `__file__`. Real shared-extension relocation fixtures select a suitable Python on `PATH`; ordinary environment tests continue to exercise the default interpreter (`backend/src/environment_discovery.rs`, `backend/src/python_test_support.rs`, native environment tests).
+- Allowed Linux process groups containing only zombies to finish drain checks even when container init does not reap them, while retaining refusal for live threads, unstable membership or unreadable process evidence (`backend/src/process_control.rs`).
+- Made FIFO and metadata-conflict tests independent of the caller's umask by setting their intended starting permissions explicitly (`backend/src/workspace_view_tests.rs`).
 
 ## [1.9.13] - 2026-11-21
 

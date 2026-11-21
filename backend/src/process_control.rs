@@ -386,11 +386,166 @@ fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std:
 /// zombies (for example the leader was already reaped by `wait`). Grapher's
 /// own descendants stay under the same UID, so a live child remains signalable;
 /// the EPERM outcome means no writer under this lifecycle boundary is left to
-/// terminate. Linux reports ESRCH for the same state.
+/// terminate. Linux may still report success for zombie-only groups; its live
+/// member checks additionally inspect /proc.
 #[cfg(unix)]
 fn no_signalable_members(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(libc::ESRCH)
         || cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn group_has_live_members(pid: u32) -> std::io::Result<bool> {
+    if unsafe { libc::kill(-(pid as i32), 0) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return if no_signalable_members(&error) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // A container's PID 1 may never reap orphaned children. Signal 0 then
+        // keeps succeeding after SIGKILL although no writer can run. Require
+        // two stable, nonempty zombie-only snapshots before declaring drain.
+        let first = linux_zombie_members(pid)?;
+        return match first {
+            Some(members) if !members.is_empty() => {
+                // hidepid can omit other-UID members entirely, rather than
+                // making stat reads fail. Keep the signal-based refusal when
+                // this mount cannot provide a complete membership inventory.
+                let mounts = std::fs::read_to_string("/proc/self/mountinfo")?;
+                if !linux_proc_visible(&mounts) {
+                    return Ok(true);
+                }
+                Ok(linux_zombie_members(pid)?.as_ref() != Some(&members))
+            }
+            _ => Ok(true),
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_proc_visible(mounts: &str) -> bool {
+    let mut found = false;
+    for line in mounts.lines() {
+        let Some((mount, filesystem)) = line.split_once(" - ") else {
+            return false;
+        };
+        let fields = mount.split_ascii_whitespace().collect::<Vec<_>>();
+        let filesystem = filesystem.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 || filesystem.len() < 3 {
+            return false;
+        }
+        if fields[4] == "/proc" {
+            if filesystem[0] != "proc" {
+                return false;
+            }
+            found = true;
+            for option in fields[5].split(',').chain(filesystem[2].split(',')) {
+                if option
+                    .strip_prefix("hidepid=")
+                    .is_some_and(|value| value != "0")
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(bytes: &[u8]) -> std::io::Result<(u8, u32, u64)> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid /proc process stat",
+        )
+    };
+    // comm can contain whitespace, parentheses and non-UTF-8 bytes. Only the
+    // numeric/state suffix after its final ')' has the kernel's ASCII grammar.
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(invalid)?;
+    let suffix = std::str::from_utf8(&bytes[end + 1..]).map_err(|_| invalid())?;
+    let fields = suffix.split_ascii_whitespace().collect::<Vec<_>>();
+    if fields.len() < 20 || fields[0].len() != 1 {
+        return Err(invalid());
+    }
+    Ok((
+        fields[0].as_bytes()[0],
+        fields[2].parse().map_err(|_| invalid())?,
+        fields[19].parse().map_err(|_| invalid())?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_zombie_members(group: u32) -> std::io::Result<Option<BTreeSet<(u32, u64)>>> {
+    let mut members = BTreeSet::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Some((state, pgid, started)) = linux_stat_at(&entry.path())? else {
+            continue;
+        };
+        if pgid == group {
+            if !matches!(state, b'Z' | b'X' | b'x') {
+                return Ok(None);
+            }
+            members.insert((pid, started));
+            // pthread_exit can leave a zombie leader with live writer threads.
+            // /proc's top-level entries enumerate leaders, not those threads.
+            let tasks = match std::fs::read_dir(entry.path().join("task")) {
+                Ok(tasks) => tasks,
+                // Some kernels hide task entries after pthread_exit. Losing
+                // that visibility cannot establish that every thread exited.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let mut observed_leader = false;
+            for task in tasks {
+                let task = task?;
+                let Ok(tid) = task.file_name().to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                if let Some((state, pgid, started)) = linux_stat_at(&task.path())? {
+                    if pgid == group {
+                        observed_leader |= tid == pid;
+                        if !matches!(state, b'Z' | b'X' | b'x') {
+                            return Ok(None);
+                        }
+                        members.insert((tid, started));
+                    }
+                }
+            }
+            if !observed_leader {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(members))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stat_at(directory: &std::path::Path) -> std::io::Result<Option<(u8, u32, u64)>> {
+    match std::fs::read(directory.join("stat")) {
+        Ok(bytes) => linux_process_stat(&bytes).map(Some),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            Ok(None)
+        }
+        // An unreadable process must not be assumed to have exited.
+        Err(error) => Err(error),
+    }
 }
 
 fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
@@ -500,8 +655,8 @@ impl ProcessTree {
             info.active_processes > 0
         }
         #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.0.pid as i32), 0) == 0
+        {
+            group_has_live_members(self.0.pid).unwrap_or(true)
         }
     }
 
@@ -526,18 +681,8 @@ impl ProcessTree {
                 info.active_processes > 0
             };
             #[cfg(unix)]
-            let active = unsafe {
-                let result = libc::kill(-(self.0.pid as i32), 0);
-                if result == 0 {
-                    true
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    if !no_signalable_members(&error) {
-                        return Err(format!("Cannot confirm native process drain: {error}"));
-                    }
-                    false
-                }
-            };
+            let active = group_has_live_members(self.0.pid)
+                .map_err(|error| format!("Cannot confirm native process drain: {error}"))?;
             if !active {
                 return Ok(());
             }
@@ -844,7 +989,7 @@ mod tests {
     use super::*;
     use std::process::Stdio;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn zombie_only_process_group_is_drained_and_repeated_cleanup_is_idempotent() {
         let mut command = Command::new("sh");
@@ -856,14 +1001,109 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
         let tree = track(&child).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        // The leader is a zombie before wait(); Darwin reports EPERM for its
-        // process group even though no live writer remains.
+        // Observe exit without reaping, independent of scheduling/load. Linux
+        // still reports this zombie-only process group as existing to signal 0.
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
         tree.ensure_drained()
             .expect("a zombie-only group must not fail drain");
+        assert!(!tree.has_live_members());
         tree.terminate();
         tree.terminate(); // Owner cleanup, shutdown and Drop may all run.
         let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_names_cannot_forge_process_group_or_state() {
+        let own = std::fs::read("/proc/self/stat").unwrap();
+        let expected = linux_process_stat(&own).unwrap();
+        assert_eq!(expected.1, unsafe { libc::getpgrp() } as u32);
+        let end = own.iter().rposition(|byte| *byte == b')').unwrap();
+        let mut unusual = b"123 (name ) Z 1 999\n\xff)".to_vec();
+        unusual.extend_from_slice(&own[end + 1..]);
+        assert_eq!(linux_process_stat(&unusual).unwrap(), expected);
+        for invalid in [b"".as_slice(), b"123 (missing suffix)", b"123 (name) Z 1"] {
+            assert!(linux_process_stat(invalid).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn incomplete_proc_visibility_cannot_authorize_a_zombie_drain() {
+        let visible = "20 1 0:5 / /proc rw,nosuid,nodev - proc proc rw";
+        assert!(linux_proc_visible(visible));
+        for hidden in [
+            "hidepid=1",
+            "hidepid=2",
+            "hidepid=invisible",
+            "hidepid=ptraceable",
+        ] {
+            assert!(!linux_proc_visible(&format!("{visible},{hidden}")));
+        }
+        assert!(!linux_proc_visible(""));
+        assert!(!linux_proc_visible("unparseable mount table"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn zombie_leader_with_live_writer_thread_is_not_drained() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("writer.c");
+        let program = temp.path().join("writer");
+        std::fs::write(&source, r#"
+#include <pthread.h>
+#include <unistd.h>
+static void *writer(void *unused) { for (;;) usleep(10000); return 0; }
+int main(void) { pthread_t thread; if (pthread_create(&thread, 0, writer, 0)) return 1; pthread_exit(0); }
+"#).unwrap();
+        let output = Command::new("cc")
+            .args(["-pthread", "-o"])
+            .arg(&program)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut command = Command::new(&program);
+        configure_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let state = linux_stat_at(&std::path::PathBuf::from(format!("/proc/{}", child.id())))
+                .unwrap()
+                .unwrap()
+                .0;
+            if state == b'Z' {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "leader did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let active = tree.has_live_members();
+        let drained = tree.ensure_drained();
+        // Reclaim the genuine writer even if an assertion below fails.
+        tree.terminate();
+        let _ = child.wait();
+        assert!(active, "a zombie leader can still own a live writer thread");
+        assert!(
+            drained.is_err(),
+            "live threads must continue to block sealing"
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -149,7 +149,7 @@ No other Bash startup option is injected: Grapher does not add `set -e` or `pipe
 
 ## Process lifecycle
 
-Unix uses process groups; Windows attaches suspended children to kill-on-close Job Objects before resuming them. Cancellation, timeout, and shutdown use these lifecycle mechanisms. A Job Object is not a filesystem access policy.
+Unix uses process groups; Windows attaches suspended children to kill-on-close Job Objects before resuming them. Cancellation, timeout, and shutdown use these lifecycle mechanisms. A Job Object is not a filesystem access policy. Linux checks live process/thread states in `/proc` when a group still exists: with complete membership visibility, two stable zombie-only snapshots can drain even when a container init has not reaped the processes. A zombie leader with live threads still blocks handoff; restricted `/proc` visibility or unreadable process evidence does not authorize sealing.
 
 Tests cover specific descendant writers and interruption cases. They do not establish a universal barrier against detached descendants, arbitrary third-party services, shared host state, or every crash scenario.
 

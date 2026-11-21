@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn rooted_returning_native_selector_recovers_w_and_s_without_live_prefixes() {
     for workspace_owned in [true, false] {
-        let (temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+        let (temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic_with_native_module(), "");
         let alias = temp.path().join("selected-native");
         let captured = std::cell::RefCell::new(None);
         let job = runtime.jobs().unwrap().remove(0);
