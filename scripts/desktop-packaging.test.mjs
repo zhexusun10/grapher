@@ -511,6 +511,10 @@ test('pruneNodeModulesBloat removes declarations, sourcemaps, and docs while pre
 });
 
 test('stageLeanPiRuntime omits .git, devDependencies, dist/test/docs/apps, and workspace duplicates while staying verifiable', t => {
+  if (!Object.values(DESKTOP_TARGETS).some(target => target.platform === process.platform && target.arch === process.arch)) {
+    t.skip('Runtime staging requires a supported desktop build host');
+    return;
+  }
   // Only run when the workspace Pi checkout has its dependencies installed.
   try {
     verifyPiDependencies(root);

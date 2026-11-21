@@ -296,3 +296,28 @@ test('an interrupted Planner with no receipt retains its operation identity and 
     });
   } finally { globalThis.fetch = original; resetApiBaseForTest(); }
 });
+
+test('cancelling a Planner stream preserves the cancellation reason without querying a receipt', async () => {
+  const original = globalThis.fetch;
+  resetApiBaseForTest();
+  const controller = new AbortController();
+  const cancelled = new DOMException('owner left', 'AbortError');
+  const calls: string[] = [];
+  globalThis.fetch = async url => {
+    const command = String(url).split('/').at(-1)!;
+    calls.push(command);
+    if (command === 'snapshot') return response(emptySnapshot, {
+      'x-grapher-instance': '66666666-6666-4666-8666-666666666666',
+    });
+    return new Response(new ReadableStream({ start(stream) {
+      controller.abort(cancelled);
+      stream.error(cancelled);
+    } }), { headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  try {
+    await runtimeService.snapshot();
+    await assert.rejects(runtimeService.planGoalStream('goal', {} as never, () => {}, undefined, controller.signal),
+      error => error === cancelled);
+    assert.deepEqual(calls, ['snapshot', 'plan_goal_stream']);
+  } finally { globalThis.fetch = original; resetApiBaseForTest(); }
+});
