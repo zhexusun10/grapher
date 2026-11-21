@@ -21,9 +21,13 @@ use std::{
 use uuid::Uuid;
 
 mod activity;
+#[cfg(test)]
+mod api_protocol_tests;
+mod api_transport;
 mod composer;
 mod open_file;
 mod project_discovery;
+mod snapshot_delta;
 mod sse;
 mod transcript;
 #[path = "workspace_attachments.rs"]
@@ -5707,8 +5711,17 @@ fn get_planning_output(
         crate::path_safety::real_child_path(&root, &directory.join(format!("{role}.jsonl")), true)?;
     if file_path.is_none() && running && offset == 0 {
         return Ok(
-            serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
-            "nextOffset": 0, "totalBytes": 0, "complete": true, "running": true }),
+            serde_json::to_value(crate::api_contract::PlanningOutputPage {
+                planning_id,
+                role,
+                content: String::new(),
+                start_offset: 0,
+                next_offset: 0,
+                total_bytes: 0,
+                complete: true,
+                running: true,
+            })
+            .map_err(|e| e.to_string())?,
         );
     }
     let file_path = file_path.ok_or("Planning output not found")?;
@@ -5725,9 +5738,10 @@ fn get_planning_output(
     if tail {
         let end = before.unwrap_or(total_bytes).min(total_bytes);
         if end == 0 {
-            return Ok(serde_json::json!({ "planningId": planning_id, "role": role,
-                "content": "", "startOffset": 0, "nextOffset": 0, "totalBytes": total_bytes,
-                "complete": total_bytes == 0, "running": running }));
+            return serde_json::to_value(crate::api_contract::PlanningOutputPage {
+                planning_id, role, content: String::new(), start_offset: 0, next_offset: 0,
+                total_bytes, complete: total_bytes == 0, running,
+            }).map_err(|e| e.to_string());
         }
         let candidate = end.saturating_sub(limit);
         // Include the line containing the candidate when it is cheap to do so.
@@ -5774,9 +5788,10 @@ fn get_planning_output(
         // before the reads may already be stale; re-sample so totalBytes covers
         // what this page actually observed.
         let total_bytes = total_bytes.max(file.metadata().map(|meta| meta.len()).unwrap_or(0));
-        return Ok(serde_json::json!({ "planningId": planning_id, "role": role,
-            "content": content, "startOffset": start, "nextOffset": next_offset,
-            "totalBytes": total_bytes, "complete": next_offset >= total_bytes, "running": running }));
+        return serde_json::to_value(crate::api_contract::PlanningOutputPage {
+            planning_id, role, content: content.into(), start_offset: start, next_offset,
+            total_bytes, complete: next_offset >= total_bytes, running,
+        }).map_err(|e| e.to_string());
     }
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
@@ -5800,9 +5815,10 @@ fn get_planning_output(
     let total_bytes = total_bytes
         .max(file.metadata().map(|meta| meta.len()).unwrap_or(0))
         .max(next_offset);
-    Ok(serde_json::json!({ "planningId": planning_id, "role": role,
-        "content": content, "startOffset": offset, "nextOffset": next_offset, "totalBytes": total_bytes,
-        "complete": next_offset >= total_bytes, "running": running }))
+    serde_json::to_value(crate::api_contract::PlanningOutputPage {
+        planning_id, role, content: content.into(), start_offset: offset, next_offset,
+        total_bytes, complete: next_offset >= total_bytes, running,
+    }).map_err(|e| e.to_string())
 }
 
 fn list_plannings(
@@ -6017,66 +6033,78 @@ pub fn dispatch(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
+    if command == "operation_status" {
+        return Ok(api_transport::operation_status(&argument::<String>(
+            &body,
+            "operationId",
+        )?));
+    }
     let compact = body
         .get("compact")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let metadata = body.get("detail").and_then(serde_json::Value::as_str) == Some("metadata");
     if command == "snapshot_if_changed" {
-        // Read transient activity before trying the Run lock: a long
-        // source/workspace snapshot must not hide the progress indicator.
-        let activity_run = body
-            .get("runId")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let activity = activity_run
-            .as_deref()
-            .map(run_activity)
-            .unwrap_or_default();
-        let requested = body
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        use crate::api_contract::{SnapshotPollRequest, SnapshotPollResponse};
+        let poll: SnapshotPollRequest =
+            serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
+        let activity = poll.run_id.as_deref().map(run_activity).unwrap_or_default();
+        let requested = poll.version.as_deref().unwrap_or_default();
         let Ok(runtime) = service.runtime.try_lock() else {
-            // The Run mutex is held by long filesystem work. Report progress
-            // instead of queueing this poll behind the lock, and tell the client
-            // to retry soon rather than wait for another change notification.
-            return Ok(serde_json::json!({
-                "version": requested,
-                "snapshot": null,
-                "activity": activity,
-                "busy": true
-            }));
+            return to_value(SnapshotPollResponse {
+                version: requested.into(),
+                snapshot: None,
+                delta: None,
+                activity,
+                busy: Some(true),
+            })
+            .map_err(|e| e.to_string());
         };
         let version = runtime.snapshot_version();
-        if body.get("version").and_then(serde_json::Value::as_str) == Some(version.as_str()) {
-            return Ok(
-                serde_json::json!({ "version": version, "snapshot": null, "activity": activity }),
-            );
+        if poll.version.as_deref() == Some(version.as_str()) {
+            return to_value(SnapshotPollResponse {
+                version,
+                snapshot: None,
+                delta: None,
+                activity,
+                busy: None,
+            })
+            .map_err(|e| e.to_string());
         }
-        // Capture version and projection together. Reuse a per-version browser
-        // projection, but clone/serialize the response outside the Run mutex.
+        let base = (poll.delta && metadata)
+            .then(|| runtime.browser_delta_base(requested))
+            .flatten();
         let captured = if metadata {
             runtime.browser_metadata()?
         } else {
             Arc::new(serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?)
         };
         drop(runtime);
-        let mut value = Arc::unwrap_or_clone(captured);
-        if compact {
-            if let Some(events) = value
-                .get_mut("events")
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                events.retain(|event| {
-                    event.get("type").and_then(serde_json::Value::as_str) != Some("output")
-                });
+        let delta = base
+            .as_ref()
+            .and_then(|base| snapshot_delta::between(requested, &version, base, &captured));
+        let snapshot = if delta.is_some() {
+            None
+        } else {
+            let mut value = Arc::unwrap_or_clone(captured);
+            if compact {
+                if let Some(events) = value
+                    .get_mut("events")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    events.retain(|event| event["type"] != "output");
+                }
             }
-        }
-        return Ok(
-            serde_json::json!({ "version": version, "snapshot": value, "activity": activity }),
-        );
+            Some(value)
+        };
+        return to_value(SnapshotPollResponse {
+            version,
+            snapshot,
+            delta,
+            activity,
+            busy: None,
+        })
+        .map_err(|e| e.to_string());
     }
     if command == "snapshot" && metadata {
         let captured = service
@@ -6743,11 +6771,7 @@ fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
     is_trusted_origin_for(origin, backend_port, false)
 }
 
-fn is_trusted_origin_for(
-    origin: &str,
-    backend_port: u16,
-    allow_desktop_origins: bool,
-) -> bool {
+fn is_trusted_origin_for(origin: &str, backend_port: u16, allow_desktop_origins: bool) -> bool {
     let local = ["localhost", "127.0.0.1"];
     if local.iter().any(|host| {
         origin == format!("http://{host}:{backend_port}") || origin == format!("http://{host}:1420")
@@ -6876,9 +6900,8 @@ pub fn run_with_options(options: ServerOptions) -> Result<(), String> {
         .unwrap_or_else(|_| "1421".into())
         .parse()
         .map_err(|_| "Invalid GRAPHER_PORT")?;
-    let server = Arc::new(
-        Server::http(("127.0.0.1", requested_port)).map_err(|error| error.to_string())?,
-    );
+    let server =
+        Arc::new(Server::http(("127.0.0.1", requested_port)).map_err(|error| error.to_string())?);
     let bound_port = bound_server_port(&server)?;
     // Hold macOS sleep/screen-saver assertions only after this backend owns its
     // port, so a failed second launch cannot keep the host awake.
@@ -7121,10 +7144,40 @@ fn status_reason(status: u16) -> &'static str {
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         415 => "Unsupported Media Type",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
     }
+}
+
+fn respond_api_json(
+    request: tiny_http::Request,
+    status: u16,
+    body: &serde_json::Value,
+    origin: Option<&str>,
+    request_id: &str,
+    replayed: bool,
+) {
+    let payload = body.to_string();
+    let mut headers = vec![
+        ("Cache-Control", "no-store"),
+        ("Content-Type", "application/json"),
+        ("X-Grapher-Events", "1"),
+        ("X-Grapher-Instance", api_transport::instance()),
+        ("X-Grapher-Request-Id", request_id),
+        ("X-Grapher-Replayed", if replayed { "1" } else { "0" }),
+    ];
+    if let Some(origin) = origin {
+        headers.push(("Access-Control-Allow-Origin", origin));
+        headers.push((
+            "Access-Control-Expose-Headers",
+            "X-Grapher-Events, X-Grapher-Instance, X-Grapher-Request-Id, X-Grapher-Replayed",
+        ));
+    }
+    respond_closed(request, status, &headers, payload.as_bytes());
 }
 
 /// tiny_http 0.12's internal TaskPool checks `waiting_tasks == 0` without
@@ -7133,12 +7186,7 @@ fn status_reason(status: u16) -> &'static str {
 /// behind idle keep-alive readers for several seconds. `Response::add_header`
 /// also ignores `Connection`, so write `Connection: close` directly to let
 /// loopback clients release the connection immediately after each response.
-fn respond_closed(
-    request: tiny_http::Request,
-    status: u16,
-    headers: &[(&str, &str)],
-    body: &[u8],
-) {
+fn respond_closed(request: tiny_http::Request, status: u16, headers: &[(&str, &str)], body: &[u8]) {
     let head = request.method() == &tiny_http::Method::Head;
     let version = if *request.http_version() >= tiny_http::HTTPVersion(1, 1) {
         "HTTP/1.1"
@@ -7221,10 +7269,26 @@ fn handle_http_request_with_options(
         );
         return;
     }
+    let request_id = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Grapher-Request-Id"))
+        .map(|h| h.value.as_str())
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let operation_id = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Grapher-Operation"))
+        .map(|h| h.value.as_str().to_owned());
     if request.method() == &tiny_http::Method::Options {
         let mut headers = vec![
             ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type"),
+            (
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-Grapher-Request-Id, X-Grapher-Operation",
+            ),
         ];
         if let Some(ref origin) = req_origin {
             headers.push(("Access-Control-Allow-Origin", origin.as_str()));
@@ -7325,26 +7389,52 @@ fn handle_http_request_with_options(
             }) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    let payload = serde_json::json!({"error": err}).to_string();
-                    let mut headers = vec![("Content-Type", "application/json")];
-                    if let Some(ref origin) = req_origin {
-                        headers.push(("Access-Control-Allow-Origin", origin.as_str()));
-                    }
-                    respond_closed(request, 400, &headers, payload.as_bytes());
+                    let (status, body) = api_transport::classify(err, &request_id);
+                    respond_api_json(
+                        request,
+                        status,
+                        &body,
+                        req_origin.as_deref(),
+                        &request_id,
+                        false,
+                    );
                     return;
                 }
             };
 
             if let Err(err) = validate_planning_preflight(&config, plan_mode.as_deref()) {
-                let payload = serde_json::json!({"error": err}).to_string();
-                let mut headers = vec![("Content-Type", "application/json")];
-                if let Some(ref origin) = req_origin {
-                    headers.push(("Access-Control-Allow-Origin", origin.as_str()));
-                }
-                respond_closed(request, 400, &headers, payload.as_bytes());
+                let (status, body) = api_transport::classify(err, &request_id);
+                respond_api_json(
+                    request,
+                    status,
+                    &body,
+                    req_origin.as_deref(),
+                    &request_id,
+                    false,
+                );
                 return;
             }
 
+            let receipt_body: serde_json::Value =
+                serde_json::from_str(&input).expect("validated stream input");
+            let stream_receipt = if let Some(token) = &operation_id {
+                match api_transport::begin(token, command, &receipt_body, port, &request_id) {
+                    api_transport::Begin::New(guard) => Some(guard),
+                    api_transport::Begin::Reply(status, body) => {
+                        respond_api_json(
+                            request,
+                            status,
+                            &body,
+                            req_origin.as_deref(),
+                            &request_id,
+                            true,
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let (tx, rx) = std::sync::mpsc::channel();
             let service_clone = match revision_run_id.as_deref() {
                 Some(run_id) => service_for_run(service, run_id, false),
@@ -7353,12 +7443,18 @@ fn handle_http_request_with_options(
             let service_clone = match service_clone {
                 Ok(service) => service,
                 Err(error) => {
-                    let payload = serde_json::json!({"error": error}).to_string();
-                    let mut headers = vec![("Content-Type", "application/json")];
-                    if let Some(ref origin) = req_origin {
-                        headers.push(("Access-Control-Allow-Origin", origin.as_str()));
+                    let (status, body) = api_transport::classify(error, &request_id);
+                    if let Some(receipt) = stream_receipt {
+                        receipt.finish(status, &body);
                     }
-                    respond_closed(request, 400, &headers, payload.as_bytes());
+                    respond_api_json(
+                        request,
+                        status,
+                        &body,
+                        req_origin.as_deref(),
+                        &request_id,
+                        false,
+                    );
                     return;
                 }
             };
@@ -7380,18 +7476,9 @@ fn handle_http_request_with_options(
                         send_sse_event(&tx, "run_started", &serde_json::json!({"runId": run_id}))
                     },
                     |line| {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-                            send_sse_event(
-                                &tx_part,
-                                "partitioner",
-                                &serde_json::json!({ "raw": line, "event": parsed }),
-                            );
-                        } else {
-                            send_sse_event(
-                                &tx_part,
-                                "partitioner",
-                                &serde_json::json!({ "raw": line }),
-                            );
+                        let frame = crate::api_contract::PlannerOutputFrame::from_line(line);
+                        if let Ok(value) = serde_json::to_value(frame) {
+                            send_sse_event(&tx_part, "partitioner", &value);
                         }
                     },
                     |route| {
@@ -7402,37 +7489,46 @@ fn handle_http_request_with_options(
                         );
                     },
                     |line| {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-                            send_sse_event(
-                                &tx_plan,
-                                "planner",
-                                &serde_json::json!({ "raw": line, "event": parsed }),
-                            );
-                        } else {
-                            send_sse_event(
-                                &tx_plan,
-                                "planner",
-                                &serde_json::json!({ "raw": line }),
-                            );
+                        let frame = crate::api_contract::PlannerOutputFrame::from_line(line);
+                        if let Ok(value) = serde_json::to_value(frame) {
+                            send_sse_event(&tx_plan, "planner", &value);
                         }
                     },
                 );
 
                 match result {
-                    Ok(snapshot) => {
-                        send_sse_event(
-                            &tx,
-                            "complete",
-                            &serde_json::json!({ "snapshot": snapshot }),
-                        );
-                    }
-                    Err((err, summary)) => {
-                        let mut err_payload = serde_json::json!({ "error": err });
-                        if let Some(s) = summary {
-                            err_payload["planningId"] = serde_json::json!(s.planning_id);
-                            err_payload["summary"] = serde_json::json!(s);
+                    Ok(snapshot) => match snapshot_metadata(&snapshot) {
+                        Ok(projected) => {
+                            if let Some(receipt) = stream_receipt {
+                                receipt.finish(
+                                    200,
+                                    &serde_json::json!({"result":{"snapshot":projected}}),
+                                );
+                            }
+                            send_sse_event(
+                                &tx,
+                                "complete",
+                                &serde_json::json!({ "snapshot": projected }),
+                            );
                         }
-                        send_sse_event(&tx, "error", &err_payload);
+                        Err(error) => {
+                            let (status, body) = api_transport::classify(error, &request_id);
+                            if let Some(receipt) = stream_receipt {
+                                receipt.finish(status, &body);
+                            }
+                            send_sse_event(&tx, "error", &body);
+                        }
+                    },
+                    Err((err, summary)) => {
+                        let (status, mut body) = api_transport::classify(err, &request_id);
+                        if let Some(summary) = summary {
+                            body["planningId"] = serde_json::json!(summary.planning_id);
+                            body["summary"] = serde_json::json!(summary);
+                        }
+                        if let Some(receipt) = stream_receipt {
+                            receipt.finish(status, &body);
+                        }
+                        send_sse_event(&tx, "error", &body);
                     }
                 }
                 let _ = tx.send(Vec::new());
@@ -7460,14 +7556,15 @@ fn handle_http_request_with_options(
             }
             let body: serde_json::Value =
                 serde_json::from_str(&input).map_err(|e| e.to_string())?;
-            let scoped = api_service(service, command, &body)?;
-            Ok((scoped, body))
+            Ok(body)
         });
         // Raster previews keep the JSON-only POST/Host/Origin boundary. A model
         // <img src="/api/..."> cannot trigger a filesystem read via a GET.
         if command == "get_workspace_image" {
-            let result = parsed
-                .and_then(|(scoped, body)| workspace_images::get_workspace_image(&scoped, &body));
+            let result = parsed.and_then(|body| {
+                let scoped = api_service(service, command, &body)?;
+                workspace_images::get_workspace_image(&scoped, &body)
+            });
             let (bytes, mime, status) = match result {
                 Ok((bytes, mime)) => (bytes, mime, 200),
                 Err(error) => (
@@ -7487,25 +7584,47 @@ fn handle_http_request_with_options(
             respond_closed(request, status, &headers, &bytes);
             return;
         }
-        let result = parsed.and_then(|(scoped, body)| dispatch(&scoped, command, body));
-        let (status, body) = match result {
+        let mut receipt = None;
+        let mut replay = None;
+        let result = parsed.and_then(|body| {
+            // Withdrawals already have a durable, requestId-scoped receipt which
+            // also restores large image drafts after a backend restart.
+            let durable_withdrawal = command == "composer_command" && body["operation"] == "withdraw"
+                && body.get("requestId").and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok());
+            if !crate::api_contract::is_read(command, &body) && !durable_withdrawal {
+                if let Some(token) = &operation_id {
+                    match api_transport::begin(token, command, &body, port, &request_id) {
+                        api_transport::Begin::New(guard) => receipt = Some(guard),
+                        api_transport::Begin::Reply(status, body) => {
+                            replay = Some((status, body));
+                            return Ok(serde_json::Value::Null);
+                        }
+                    }
+                }
+            }
+            let scoped = api_service(service, command, &body)?;
+            dispatch(&scoped, command, body)
+        });
+        let replayed = replay.is_some();
+        let (status, body) = replay.unwrap_or_else(|| match result {
             Ok(value) => (200, serde_json::json!({"result": value})),
             Err(error) => match busy_snapshot_poll(command, &input, &error) {
                 Some(result) => (200, serde_json::json!({"result": result})),
-                None => (400, serde_json::json!({"error": error})),
+                None => api_transport::classify(error, &request_id),
             },
-        };
-        let payload = body.to_string();
-        let mut headers = vec![
-            ("Cache-Control", "no-store"),
-            ("Content-Type", "application/json"),
-            ("X-Grapher-Events", "1"),
-        ];
-        if let Some(ref origin) = req_origin {
-            headers.push(("Access-Control-Allow-Origin", origin.as_str()));
-            headers.push(("Access-Control-Expose-Headers", "X-Grapher-Events"));
+        });
+        if let Some(receipt) = receipt {
+            receipt.finish(status, &body);
         }
-        respond_closed(request, status, &headers, payload.as_bytes());
+        respond_api_json(
+            request,
+            status,
+            &body,
+            req_origin.as_deref(),
+            &request_id,
+            replayed,
+        );
     } else {
         let Some(path) = static_asset_path(web_root, &url) else {
             respond_closed(request, 404, &[], b"");

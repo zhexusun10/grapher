@@ -31,7 +31,7 @@ export const suites = {
         'workbench-split-ratio.test.ts', 'workspace-conversations.test.ts',
         'workspace-path-display.test.ts', 'runtime-completions.test.ts',
         'request-timeout.test.ts', 'extension-settings.test.ts',
-        'desktop-api-transport.test.ts',
+        'desktop-api-transport.test.ts', 'api-protocol.test.ts',
       ),
       tsxTests(
         'model-settings.test.ts', 'transcript-cache.test.ts', 'thinking-transcript.test.ts',

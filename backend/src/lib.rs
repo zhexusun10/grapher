@@ -1,3 +1,4 @@
+pub mod api_contract;
 mod attachment_inputs;
 pub mod cleanup;
 #[cfg(test)]

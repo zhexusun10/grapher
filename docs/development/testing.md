@@ -9,6 +9,7 @@ These are alternatives, not steps to run in order:
 | Change | Example |
 | --- | --- |
 | TypeScript types | `npm run check` |
+| Browser wire DTOs | `npm run api:generate`, then `npm run api:check`; `node scripts/node-ts.mjs --test scripts/api-protocol.test.ts` |
 | JS behavior or a browser flow | `node --test --test-name-pattern="<case>" scripts/<file>.test.mjs` |
 | TypeScript behavior | `node scripts/node-ts.mjs --test scripts/<file>.test.ts` (use `node --import tsx --test` for the tsx groups in [test-suites.mjs](../../scripts/test-suites.mjs)) |
 | Rust library behavior | `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib <filter>` |

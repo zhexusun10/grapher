@@ -593,6 +593,58 @@ Run repository. Resolution uses the same real-child safety boundary, so
 traversal, absolute paths and symlinked descendants are rejected; deleted rows
 are not actionable.
 
+### Browser API contracts and operation outcomes
+
+The browser read DTOs in [api_contract.rs](../../backend/src/api_contract.rs) and
+[snapshot_view.rs](../../backend/src/snapshot_view.rs) own the Snapshot, Execution,
+activity, poll, transcript-page and error wire shapes. `npm run api:generate`
+regenerates [the TypeScript bindings](../../src/services/apiContract.generated.ts);
+`npm run api:check` and the Rust contract test reject stale output. These are read
+projections, not replacements for the persisted event/checkpoint schema. Browser
+entry validation rejects malformed graph identity, unsupported node states and
+non-increasing event sequences before publishing a snapshot.
+
+[apiClient.ts](../../src/services/apiClient.ts) shares JSON decoding, error handling,
+correlation and request deadlines between Runtime, Provider/Auth and Extensions.
+The generated command/operation policy distinguishes repeatable reads from writes;
+unknown commands are conservatively writes. Only a declared read may be retried
+after desktop `backend_url` changes. Planning streams and writes are never
+transport-replayed to a new port. Metadata reads and extension settings have
+bounded waits; OAuth/credential interaction and long Runtime mutations retain
+their own deadlines. Cancellation and timeout preserve their original error type.
+
+JSON command errors keep the display `error` string and add an `errorInfo` object
+with stable `code`, `message`, `retryable` and `requestId`. HTTP 404 identifies
+missing entities, 409 identifies conflicts or uncertain operations, 429 rejects
+receipt capacity exhaustion before dispatch, and recognized internal failures
+use 500. The frontend uses `RUN_NOT_FOUND`, not display wording, to retire a Run.
+`X-Grapher-Request-Id` correlates a request with its response; browser callers may
+read it and the backend instance/receipt headers through the explicit CORS list.
+
+After bootstrap advertises `X-Grapher-Instance`, writes carry
+`X-Grapher-Operation: <instance>:<issued-ms>:<uuid>`. The HTTP boundary reserves the
+receipt before Run/service creation. A matching duplicate receives its original
+response or `OPERATION_IN_PROGRESS`; reusing a token for another command/body is
+`IDEMPOTENCY_CONFLICT`. Request fingerprints, not credential bodies, are retained.
+`operation_status` is a read and reports `pending`, `completed` or `unknown`, with
+the original response when available. After a transport/JSON-body failure the
+client may read this receipt without resubmitting the write, and snapshot-bearing
+replays revalidate current Run state rather than overwriting it with an older
+receipt snapshot. Aborted/deadline-expired owners do not start recovery reads.
+
+Receipts are bounded process-local transport evidence: tokens expire after 15
+minutes, at most 4096 are retained, and cached responses use at most 8 MiB, with a
+1 MiB per-response ceiling. Pending entries are never evicted to make a duplicate
+look new. Large/completed uncached results and unwound requests remain explicit
+uncertain outcomes for replay purposes. A restart changes the instance ID and
+rejects old tokens before dispatch; it cannot prove whether an earlier write
+committed. Callers must inspect current state when the outcome is unknown, and
+must retain the explicit operation token when retrying an uncertain write. This
+adds no persisted format, migration or replay behavior.
+Queue withdrawals retain their existing durable `requestId` receipt as the
+replay authority, bypassing this transport cache. Restoring a large image draft
+must still work after a restart or when its reply exceeds the transport budget.
+
 ### Paging and request coordination
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
@@ -610,7 +662,17 @@ and Store write locks, and commit rechecks deletion before inserting log chunks.
 Tool/file-change recovery belongs to its separate scoped API. Derived legacy
 counters are parsed outside the Run lock and applied without making the HTTP
 reader wait behind another Run operation. Repeated browser metadata reads share
-a versioned projection invalidated by `Runtime::touch`. Run-wide and per-node
+a versioned projection invalidated by `Runtime::touch`. A metadata
+`snapshot_if_changed` request may opt into `delta: true`. A retained matching base
+returns top-level replacements/removals and only appended projected events,
+scoped by `baseVersion`, `version` and the previous last event sequence. Graph,
+configuration and old event payloads are not resent when unchanged. Missing bases,
+restarts or a changed historical event prefix return a full projection. Busy
+polls acknowledge no version. The browser keeps a bounded LRU of immutable bases,
+checks Run/version/sequence ownership, and fetches a full projection after any
+invalid delta. Polls without a cached base still use their version to avoid
+repeated full reads of unchanged Runs. SSE/watchdog behavior remains independent
+of this optimization. Run-wide and per-node
 recovery hints share [one indexed pass](../../backend/src/model/recovery_hints.rs)
 over executions, supersession, preparation/failure events, dependencies and
 Merger evidence. Scheduler mutation predicates remain authoritative.
@@ -683,7 +745,11 @@ so its session panel refreshes before the turn settles. See
 [ExecutionTranscript.tsx](../../src/components/ExecutionTranscript.tsx).
 
 Planning attempts retain requests, graph candidates, summaries, and Pi JSONL
-streams. The planning SSE `complete` event is terminal even if the HTTP transport
+streams. Parsed Planner/Partitioner lines send only their structured `event`;
+non-JSON diagnostics send only `raw`. The final `complete.snapshot` uses the same
+browser metadata projection as HTTP reads, excluding transcript output and heavy
+event payloads. Durable logs remain available through the byte-page APIs. The
+planning SSE `complete` event is terminal even if the HTTP transport
 remains open: the client releases the reader and supersedes in-flight draft polls
 with the committed snapshot. This applies to appended Planner revisions as well
 as first plans. A displayed live Planner remains eligible for watchdog reads even

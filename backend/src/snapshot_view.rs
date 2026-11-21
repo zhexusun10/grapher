@@ -3,28 +3,42 @@
 use crate::model::{Event, EventKind, Execution, Snapshot};
 use serde::Serialize;
 use serde_json::{json, Value};
+use ts_rs::TS;
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-struct ExecutionMetadata<'a> {
+#[ts(rename = "Execution")]
+pub(crate) struct ExecutionMetadata<'a> {
     id: &'a str,
     node: &'a str,
+    #[ts(type = "number")]
     revision: usize,
+    #[ts(type = "number")]
     attempt: usize,
     session_id: &'a str,
     worktree: &'a str,
     before: &'a str,
     after: &'a Option<String>,
     workspace_lineage: &'a Vec<String>,
+    #[ts(type = "unknown")]
     input: &'a Option<crate::environment::CompositeResult>,
+    #[ts(type = "unknown")]
     result: &'a Option<crate::environment::CompositeResult>,
     status: &'a str,
+    #[ts(type = "number")]
     started_at: u64,
+    #[ts(type = "number | null")]
     completed_at: Option<u64>,
     output: &'static str,
+    #[ts(type = "number")]
     output_bytes: usize,
+    #[ts(type = "number | null")]
     pid: Option<u64>,
+    #[ts(type = "ExecutionMetrics | null")]
     metrics: &'a Option<crate::model::ExecutionMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = "FileChangeSummary", optional)]
+    file_changes: Option<Value>,
 }
 
 fn execution_metadata(execution: &Execution) -> ExecutionMetadata<'_> {
@@ -51,6 +65,7 @@ fn execution_metadata(execution: &Execution) -> ExecutionMetadata<'_> {
         },
         pid: execution.pid,
         metrics: &execution.metrics,
+        file_changes: None,
     }
 }
 
@@ -139,6 +154,76 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
     })
 }
 
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Snapshot")]
+pub(crate) struct SnapshotMetadata<'a> {
+    run_id: &'a str,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[ts(optional = nullable)]
+    isolated_workspaces: Option<bool>,
+    #[ts(optional)]
+    private_batch: Option<&'a Vec<String>>,
+    #[ts(type = "{ recoveryExecutionIds: string[] } | null", optional)]
+    batch_handoff: Option<&'a crate::model::BatchHandoff>,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planning_id: Option<&'a str>,
+    #[ts(type = "PlanningSummary | null", optional)]
+    planning: Option<&'a crate::model::PlanningSummary>,
+    #[ts(type = "Graph")]
+    graph: &'a crate::model::Graph,
+    #[ts(type = "Config | null")]
+    config: &'a Option<crate::model::Config>,
+    #[ts(type = "ConversationModelConfig | null", optional)]
+    model_config: Option<&'a crate::model::RunModelConfig>,
+    #[ts(type = "Plan | null")]
+    plan: &'a Option<crate::model::Plan>,
+    #[ts(type = "Record<string, NodeState>")]
+    nodes: &'a std::collections::BTreeMap<String, crate::model::NodeState>,
+    executions: Vec<ExecutionMetadata<'a>>,
+    #[ts(optional)]
+    mergers: Option<Vec<ExecutionMetadata<'a>>>,
+    #[ts(optional)]
+    superseded_execution_ids: Option<&'a Vec<String>>,
+    #[ts(type = "Publication | null", optional)]
+    publication: Option<&'a crate::model::Publication>,
+    #[ts(type = "GraphEvent[]")]
+    events: Vec<EventMetadata<'a>>,
+    approved: bool,
+    paused: bool,
+    #[ts(optional)]
+    can_resume: Option<bool>,
+    phase: &'a str,
+    base: &'a str,
+    #[ts(type = "Record<string, number>")]
+    feedback_counts: &'a std::collections::BTreeMap<String, usize>,
+    #[ts(skip)]
+    environment_policy: &'a Option<String>,
+    #[ts(skip)]
+    environment_baseline: &'a Option<crate::environment::CompositeResult>,
+    #[ts(skip)]
+    published_result: &'a Option<crate::environment::ResultDescriptor>,
+    #[ts(type = "{ status: string } | null", optional)]
+    result_execution: Option<&'a crate::model::ResultExecution>,
+    #[ts(type = "RunMetrics | null", optional)]
+    run_metrics: Option<&'a crate::model::RunMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = "'serial' | 'graph'", optional)]
+    plan_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    file_changes_omitted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = "FileChangeSummary", optional)]
+    file_changes: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    stop_requested: Option<bool>,
+}
+
 pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     let events = state
         .events
@@ -158,23 +243,41 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
     let (can_resume, resumable) = state.recovery_hints();
-    let mut metadata = json!({
-        "privateBatch": state.private_batch,
-        "isolatedWorkspaces": state.isolated_workspaces,
-        "batchHandoff": state.batch_handoff,
-        "runId": state.run_id, "title": state.title, "planningId": state.planning_id, "planning": state.planning,
-        "graph": state.graph, "config": state.config, "modelConfig": state.model_config,
-        "plan": state.plan, "nodes": state.nodes,
-        "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
-        "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
-        "supersededExecutionIds": state.superseded_execution_ids,
-        "publication": state.publication, "events": events, "approved": state.approved,
-        "paused": state.paused, "canResume": can_resume, "phase": state.phase, "base": state.base, "feedbackCounts": state.feedback_counts,
-        "environmentPolicy": state.environment_policy,
-        "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
-        "resultExecution": state.result_execution,
-        "runMetrics": state.run_metrics
-    });
+    let mut metadata = serde_json::to_value(SnapshotMetadata {
+        run_id: &state.run_id,
+        title: state.title.as_deref(),
+        isolated_workspaces: state.isolated_workspaces,
+        private_batch: Some(&state.private_batch),
+        batch_handoff: state.batch_handoff.as_ref(),
+        planning_id: state.planning_id.as_deref(),
+        planning: state.planning.as_ref(),
+        graph: &state.graph,
+        config: &state.config,
+        model_config: state.model_config.as_ref(),
+        plan: &state.plan,
+        nodes: &state.nodes,
+        executions: state.executions.iter().map(execution_metadata).collect(),
+        mergers: Some(state.mergers.iter().map(execution_metadata).collect()),
+        superseded_execution_ids: Some(&state.superseded_execution_ids),
+        publication: state.publication.as_ref(),
+        events,
+        approved: state.approved,
+        paused: state.paused,
+        can_resume: Some(can_resume),
+        phase: &state.phase,
+        base: &state.base,
+        feedback_counts: &state.feedback_counts,
+        environment_policy: &state.environment_policy,
+        environment_baseline: &state.environment_baseline,
+        published_result: &state.published_result,
+        result_execution: state.result_execution.as_ref(),
+        run_metrics: state.run_metrics.as_ref(),
+        plan_type: state.plan_type.as_deref(),
+        file_changes_omitted: (!state.run_id.is_empty()).then_some(true),
+        file_changes: None,
+        stop_requested: None,
+    })
+    .map_err(|e| e.to_string())?;
     // Persist failure events as recorded; expose user interruptions as a
     // distinct UI state. Ordinary provider errors stay failed.
     let running_merge_targets: std::collections::BTreeSet<_> = state

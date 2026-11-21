@@ -1,5 +1,4 @@
 use super::notify_snapshot_changed;
-use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Mutex, OnceLock},
@@ -26,14 +25,7 @@ struct ActivityBoard {
     runs: Mutex<ActivityRuns>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct RuntimeActivity {
-    pub(super) kind: String,
-    pub(super) nodes: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) phase: Option<String>,
-}
+pub(super) use crate::api_contract::RuntimeActivity;
 
 static ACTIVITY: OnceLock<ActivityBoard> = OnceLock::new();
 

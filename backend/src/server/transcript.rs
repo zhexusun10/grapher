@@ -149,11 +149,17 @@ pub(super) fn read_execution_output(
             },
         );
     }
-    Ok(
-        serde_json::json!({ "runId": read.run_id, "executionId": read.execution_id,
-        "content": page.content, "startOffset": page.start_offset, "nextOffset": page.next_offset,
-        "totalBytes": page.total_bytes, "complete": page.complete, "status": read.status }),
-    )
+    serde_json::to_value(crate::api_contract::ExecutionOutputPage {
+        run_id: read.run_id,
+        execution_id: read.execution_id,
+        content: page.content,
+        start_offset: page.start_offset,
+        next_offset: page.next_offset,
+        total_bytes: page.total_bytes,
+        complete: page.complete,
+        status: read.status,
+    })
+    .map_err(|e| e.to_string())
 }
 
 struct ReadMetadata {

@@ -1,4 +1,4 @@
-import { fetchApi } from './apiBase';
+import { jsonRequest } from './apiClient';
 
 export interface PiExtension {
   id: string;
@@ -19,13 +19,7 @@ export interface ExtensionCatalog {
   webSearch?: WebSearchExtensionStatus;
 }
 async function call(operation: string, fields: Record<string, unknown> = {}): Promise<ExtensionCatalog> {
-  const response = await fetchApi('/api/pi_extensions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-    body: JSON.stringify({ version: 1, operation, ...fields }),
-  });
-  const body = await response.json().catch(() => null);
-  if (!response.ok || !body || body.error) throw new Error(body?.error || 'Pi extension operation failed');
-  return body.result;
+  return jsonRequest<ExtensionCatalog>('pi_extensions', { version: 1, operation, ...fields }, { timeoutMs: 15_000 });
 }
 // Settings unmounts while it is closed, so every reopen started from a one-line
 // "reading extensions" placeholder and only then built the real rows. That late
