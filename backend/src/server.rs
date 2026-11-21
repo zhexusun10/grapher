@@ -6811,6 +6811,9 @@ fn warm_selected_engines(service: &Arc<Service>) {
 
 #[cfg(not(feature = "fixture"))]
 fn warm_selected_engines_on_startup(service: &Arc<Service>, stop: &AtomicBool) {
+    // Reserve before sleeping or reading config: a save during either gap
+    // supersedes this producer, including roles it has not submitted yet.
+    let ticket = crate::engine::begin_planning_prewarm();
     // Yield briefly after port bind so Vite/browser initial asset fetches and
     // bootstrap complete on uncontended CPU before spawning Node/Pi workers.
     for _ in 0..3 {
@@ -6831,6 +6834,7 @@ fn warm_selected_engines_on_startup(service: &Arc<Service>, stop: &AtomicBool) {
     if let Some(config) = config {
         crate::engine::warm_planning_engines_staggered(
             config,
+            ticket,
             std::time::Duration::from_millis(200),
             std::time::Duration::from_millis(150),
         );

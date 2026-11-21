@@ -264,12 +264,57 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     )?;
     drop(session);
     let root = runtime.directory.clone();
+    // Cache population is host-owned. Private processes can read these files
+    // through the existing read-only engine mount/profile without sharing
+    // writable temp directories or trusting a session's verification stamp.
+    if let Err(error) = prime_runtime_cache(&root) {
+        eprintln!("[Grapher] Native runtime cache preparation unavailable: {error}");
+    }
     eprintln!(
         "[Grapher] Shared Graph runtime ready: {}",
         host_path(&root).display()
     );
     *cached = Some(runtime);
     Ok(root)
+}
+
+fn prime_runtime_cache(engine: &Path) -> Result<(), String> {
+    let mut command = Command::new(trusted_node()?);
+    command
+        .arg(host_path(&engine.join("engine/entrypoint.mjs")))
+        .arg("--grapher-prepare-runtime-cache")
+        .current_dir(host_path(engine))
+        .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    clear_git_environment(&mut command);
+    bind_trusted_git(&mut command)?;
+    bind_baseline_context(&mut command);
+    bind_runtime_cache(&mut command, engine);
+    crate::process_control::configure_command(&mut command);
+    let output = crate::process_control::with_owner("native-runtime", || {
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let tree = crate::process_control::track(&child).inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
+        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+            tree.terminate();
+        }
+        child.wait_with_output().map_err(|error| error.to_string())
+    })?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(())
+}
+
+fn bind_runtime_cache(command: &mut Command, engine: &Path) {
+    command.env(
+        "GRAPHER_RUNTIME_CACHE_DIR",
+        host_path(&engine.join(".grapher-runtime-cache")),
+    );
 }
 
 fn run_runtime_preparation(
@@ -953,6 +998,7 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
     command.env_remove("GRAPHER_AGENT_KIND");
+    command.env_remove("GRAPHER_RUNTIME_CACHE_DIR");
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
     bind_baseline_context(&mut command);
@@ -1175,6 +1221,7 @@ pub(crate) fn execution_command_scoped(
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
         bind_baseline_context(&mut command);
+        bind_runtime_cache(&mut command, &engine);
         bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
@@ -1209,6 +1256,7 @@ pub(crate) fn execution_command_scoped(
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
         bind_baseline_context(&mut command);
+        bind_runtime_cache(&mut command, &engine);
         bind_source_case(&mut command, &source);
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
@@ -1237,6 +1285,7 @@ fn unsandboxed_command(engine: &Path, current: &Path) -> Result<Command, String>
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
     bind_baseline_context(&mut command);
+    bind_runtime_cache(&mut command, engine);
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
 }

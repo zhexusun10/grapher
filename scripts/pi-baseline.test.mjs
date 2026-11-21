@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import {
   buildBundledPiManifest,
@@ -109,7 +110,7 @@ test('Pi verification rejects an uninitialized checkout', t => {
   assert.throws(f.verify, /Cannot inspect Pi checkout/);
 });
 
-test('verifyRuntimeBaseline deduplicates Git/dependency scans per backend context and invalidates on context or input drift', t => {
+function runtimeFixture(t) {
   const f = fixture(t);
   const version = '1.5.0';
   f.write('pi/.gitignore', 'dist/\nnode_modules/\npackages/ai/src/providers/data/\n');
@@ -134,6 +135,12 @@ test('verifyRuntimeBaseline deduplicates Git/dependency scans per backend contex
   }
   f.write('engine/pi-dependencies/package-lock.json', JSON.stringify({ name: manifest.name, version, lockfileVersion: 3, packages }));
   f.write('pi/node_modules/.grapher-pi-dependencies.json', JSON.stringify(dependencyProfileHashes(f.root)));
+
+  return f;
+}
+
+test('verifyRuntimeBaseline deduplicates Git/dependency scans per backend context and invalidates on context or input drift', t => {
+  const f = runtimeFixture(t);
 
   const prevContext = process.env.GRAPHER_BASELINE_CONTEXT;
   const prevVerified = process.env.GRAPHER_VERIFIED_BASELINE;
@@ -169,6 +176,30 @@ test('verifyRuntimeBaseline deduplicates Git/dependency scans per backend contex
   delete process.env.GRAPHER_BASELINE_CONTEXT;
   delete process.env.GRAPHER_VERIFIED_BASELINE;
   assert.throws(() => verifyRuntimeBaseline({ installationRoot: f.root, baseline: f.baseline }), /Cannot inspect Pi checkout/);
+});
+
+test('host-primed baseline stamps survive private temp changes and still reject fingerprint drift', t => {
+  const f = runtimeFixture(t);
+  const cache = join(f.root, 'runtime-cache');
+  const context = `private-cache:${f.root}`;
+  const probe = (session, cached, backendContext = context) => {
+    const temp = join(f.root, session);
+    mkdirSync(temp);
+    const env = { ...process.env, TMPDIR: temp, TMP: temp, TEMP: temp,
+      GRAPHER_RUNTIME_CACHE_DIR: cache, GRAPHER_BASELINE_CONTEXT: backendContext };
+    delete env.GRAPHER_VERIFIED_BASELINE;
+    if (cached) env.GRAPHER_TRUSTED_GIT = join(f.root, 'missing-git');
+    const code = `import { verifyRuntimeBaseline } from ${JSON.stringify(pathToFileURL(join(realRoot, 'scripts/pi-baseline.mjs')).href)};
+      console.log(JSON.stringify(verifyRuntimeBaseline({ installationRoot: ${JSON.stringify(f.root)}, baseline: ${JSON.stringify(f.baseline)} })));`;
+    return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  };
+  assert.deepEqual(probe('session-a', false), { verified: true, cached: false });
+  const old = new Date(Date.now() - 3600000);
+  for (const name of readdirSync(join(cache, 'baseline'))) utimesSync(join(cache, 'baseline', name), old, old);
+  assert.deepEqual(probe('new-backend', false, `${context}:next`), { verified: true, cached: false });
+  assert.deepEqual(probe('session-b', true), { verified: true, cached: true });
+  f.write('pi/package-lock.json', '{"drift":true}\n');
+  assert.throws(() => probe('session-c', true), /Command failed/);
 });
 
 test('bundled desktop manifest verification replaces .git and rejects drift, missing, or extra files', t => {

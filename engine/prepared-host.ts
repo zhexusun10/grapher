@@ -3,6 +3,7 @@
 import { applyDisabledProviders } from './agent-dir.mjs';
 import { preparePiCli } from './pi-compat.ts';
 import { samePath } from './path-identity.mjs';
+import { flushRuntimeCompileCache } from '../scripts/pi-baseline.mjs';
 
 const roles = new Set(['partition', 'planner', 'node']);
 const bindingEnvironment = new Set([
@@ -19,6 +20,7 @@ const clearedEnvironment = new Set([
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS', 'GIT_CEILING_DIRECTORIES', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_SOURCE_CASE_INSENSITIVE',
   'GRAPHER_BASELINE_CONTEXT', 'GRAPHER_VERIFIED_BASELINE',
+  'GRAPHER_RUNTIME_CACHE_DIR',
   'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_FEEDBACK_SOURCE', 'GRAPHER_FEEDBACK_ENABLED',
 ]);
 const valueArguments = new Set([
@@ -109,6 +111,7 @@ export async function bindPreparedHost(role: string): Promise<string[] | null> {
   // Do not inherit an outer Run's identity. Factories are only loaded after bind.
   for (const key of ['GRAPHER_AGENT_KIND', 'GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES', 'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_PLANNER_FOLLOWUP', 'GRAPHER_PLANNER_WORKSPACES', 'GRAPHER_PLANNER_WORKSPACES_FILE', 'GRAPHER_PLANNER_WRITE_TOOLS', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME', 'GRAPHER_COMPILER_PATH', 'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_FEEDBACK_SOURCE', 'GRAPHER_FEEDBACK_ENABLED']) delete process.env[key];
   await preparePiCli();
+  flushRuntimeCompileCache();
   const first = await controlLine();
   if (first === null) return null;
   const prepare = JSON.parse(first);

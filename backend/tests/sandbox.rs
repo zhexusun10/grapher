@@ -97,6 +97,9 @@ fn grapher_installation_and_shared_engine_are_write_protected() {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("marker"), "original").unwrap();
     }
+    let cache = engine.join(".grapher-runtime-cache/baseline");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("marker"), "original").unwrap();
     let profile = base.join("profile.sb");
     sandbox::write_execution_profile(
         &profile,
@@ -109,7 +112,7 @@ fn grapher_installation_and_shared_engine_are_write_protected() {
         &installation,
     )
     .unwrap();
-    for target in [&engine, &installation] {
+    for target in [&engine, &installation, &cache] {
         // Linked dependencies need read access, not write access.
         let read = run(&profile, &current, "/bin/cat \"$1/marker\"", &[target]);
         assert!(read.status.success(), "read blocked: {}", target.display());

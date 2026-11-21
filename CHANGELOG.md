@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Primed baseline verification and V8 CLI compilation caches in the verified shared native runtime so private Graph/Planner/Merger launches can reuse them across session-local temp directories. macOS/Linux retain read-only engine access, context/fingerprint checks and independent session state; cache failures retain normal verification. Resident Provider/Auth and prepared-role hosts now flush compiled code before reporting ready (`backend/src/native.rs`, `scripts/pi-baseline.mjs`, `engine/execution-cli.ts`, `engine/prepared-host.ts`, `engine/provider-host.ts`).
+- Parallelized global/project extension and skill discovery after task binding while preserving fresh settings, project precedence and deferred factory initialization. Extended `probe:prewarm` with comparable Serial cold, process-bind and already-ready-session RPC measurements without model calls (`engine/global-extensions.ts`, `scripts/probe-prewarm.mjs`).
+
+### Fixed
+
+- Prevented delayed startup prewarming from replacing a newer project's prepared workers by guarding every staggered dispatch with its original selection generation (`backend/src/engine.rs`, `backend/src/engine/prewarm.rs`, `backend/src/server.rs`).
+
 ## [1.9.13] - 2026-11-21
 
 ### Changed

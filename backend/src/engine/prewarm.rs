@@ -61,6 +61,31 @@ pub(crate) struct Pool<K, W> {
     shared: Arc<Shared<K, W>>,
 }
 
+/// Serialize selection changes with dispatch, so a delayed startup producer
+/// cannot submit an old project after a newer config save or invalidation.
+pub(crate) struct Selection(Mutex<u64>);
+
+impl Selection {
+    pub const fn new() -> Self {
+        Self(Mutex::new(0))
+    }
+
+    pub fn begin(&self) -> u64 {
+        let mut generation = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        *generation += 1;
+        *generation
+    }
+
+    pub fn dispatch(&self, ticket: u64, action: impl FnOnce()) -> bool {
+        let generation = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if *generation != ticket {
+            return false;
+        }
+        action();
+        true
+    }
+}
+
 impl<K: Clone + Eq + Send + 'static, W: Worker> Pool<K, W> {
     pub fn new(label: &'static str) -> Self {
         Self {
@@ -475,6 +500,27 @@ fn probe(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn delayed_startup_prewarm_cannot_replace_a_newer_selection() {
+        let selection = Arc::new(Selection::new());
+        let startup = selection.begin();
+        let (resume, delayed) = mpsc::channel();
+        let (submitted, received) = mpsc::channel();
+        let old_selection = selection.clone();
+        let worker = thread::spawn(move || {
+            delayed.recv().unwrap();
+            assert!(!old_selection.dispatch(startup, || submitted.send("old").unwrap()));
+        });
+        let current = selection.begin();
+        assert!(selection.dispatch(current, || {}));
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(received.try_recv().is_err());
+        // Also guard the gap between roles in a staggered producer.
+        selection.begin();
+        assert!(!selection.dispatch(current, || panic!("stale next role")));
+    }
 
     struct FakeWorker(usize, Arc<AtomicUsize>);
     impl Worker for FakeWorker {

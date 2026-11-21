@@ -100,6 +100,9 @@ test('cache identity follows engine inputs, not workspace, cache parent or insta
   });
   assert.equal(f.key(relocated), initial);
   assert.equal(f.key(f.root, f.parent, relocated), initial, 'cached artifacts are checked by the installed verifier');
+  mkdirSync(join(relocated, '.grapher-runtime-cache/baseline'), { recursive: true });
+  writeFileSync(join(relocated, '.grapher-runtime-cache/baseline/seed.json'), '{}');
+  assert.equal(f.key(f.root, f.parent, relocated), initial, 'host-owned runtime caches do not change code identity');
   mkdirSync(join(relocated, 'engine/.grapher-masks-active/empty'), { recursive: true });
   assert.equal(f.key(f.root, f.parent, relocated), initial, 'Linux mount staging is not an engine input');
   writeFileSync(join(relocated, 'engine/entrypoint.mjs'), 'modified cached adapter');

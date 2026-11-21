@@ -5,7 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -54,6 +54,48 @@ function host(role, cwd, env) {
   return { child, events, request, wait, stop, get diagnostics() { return diagnostics; } };
 }
 
+test('runtime cache priming creates no session and a new private temp can consume read-only seeds', { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'grapher-cache-seed-'));
+  const source = join(directory, 'source');
+  const cache = join(directory, 'runtime-cache');
+  const agent = join(directory, 'agent');
+  const temp = join(directory, 'private-temp');
+  for (const path of [source, agent, temp]) await mkdir(path);
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: agent,
+    GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1', GRAPHER_BASELINE_CONTEXT: `seed:${randomUUID()}`,
+    GRAPHER_RUNTIME_CACHE_DIR: cache };
+  delete env.GRAPHER_VERIFIED_BASELINE;
+  const entries = [];
+  let value;
+  try {
+    execFileSync(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--grapher-prepare-runtime-cache'], {
+      cwd: source, env, timeout: 30000, stdio: 'pipe',
+    });
+    assert.deepEqual(await readdir(source), [], 'priming must not write to the project');
+    assert.ok((await readdir(join(cache, 'baseline'))).some(name => name.endsWith('.json')));
+    assert.ok((await readdir(join(cache, 'compile'), { recursive: true })).length > 1);
+    assert.ok(!(await readdir(agent)).includes('sessions'), 'priming must not create a Pi session');
+    const protect = async path => {
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) await protect(child);
+        else { entries.push([child, 0o644]); await chmod(child, 0o444); }
+      }
+      entries.push([path, 0o755]);
+      await chmod(path, 0o555);
+    };
+    if (process.platform !== 'win32') await protect(cache);
+    value = host('partition', source, { ...env, TMPDIR: temp, TMP: temp, TEMP: temp,
+      GRAPHER_TRUSTED_GIT: join(directory, 'missing-git') });
+    assert.equal((await value.request({ type: 'grapher_prepare', role: 'partition' })).success, true);
+    assert.deepEqual(await readdir(temp), [], 'read-only seeds must avoid per-session baseline/compile caches');
+  } finally {
+    await value?.stop();
+    for (const [path, mode] of entries.reverse()) await chmod(path, mode);
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
+
 test('prepared host loads the latest Pi overlay from the task binding', { timeout: 45000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-prepared-overlay-'));
   const source = join(directory, 'source');
@@ -62,12 +104,16 @@ test('prepared host loads the latest Pi overlay from the task binding', { timeou
   const sessions = join(directory, 'sessions');
   for (const path of [source, agent, sessions]) await mkdir(path);
   await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: {} }));
+  const cache = join(directory, 'runtime-cache');
   const env = { ...process.env, HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: agent,
+    GRAPHER_RUNTIME_CACHE_DIR: cache,
     GRAPHER_ISOLATED_PI_MODELS: '0', PI_OFFLINE: '1' };
   delete env.GRAPHER_UPSTREAM_PI_MODELS;
   const value = host('partition', source, env);
   try {
     assert.equal((await value.request({ type: 'grapher_prepare', role: 'partition' })).success, true);
+    const compiled = await readdir(join(cache, 'compile'), { recursive: true });
+    assert.ok(compiled.some(name => /(?:^|[/\\])[0-9a-f]{8,}$/i.test(name)), 'ready must publish compiled code while the prepared host is still alive');
     // This file and its binding only appear after the process is prepared.
     await writeFile(upstream, JSON.stringify({ providers: { 'prepared-overlay': {
       baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'fixture', models: [{ id: 'latest' }],

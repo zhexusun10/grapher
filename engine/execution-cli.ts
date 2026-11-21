@@ -1,6 +1,7 @@
 // Install Grapher's process-local policy before upstream constructs a session.
 import { configureExecutionRetries } from './retry-policy.ts';
-import { runPiCli } from './pi-compat.ts';
+import { runPiCli, preparePiCli } from './pi-compat.ts';
+import { flushRuntimeCompileCache } from '../scripts/pi-baseline.mjs';
 import { executionResources } from './global-extensions.ts';
 import { applyLaunchBinding, managedLaunch, managedBusinessEnvironment } from './launch-binding.mjs';
 import { execFileSync, spawn } from 'node:child_process';
@@ -8,6 +9,13 @@ import { execFileSync, spawn } from 'node:child_process';
 configureExecutionRetries();
 process.env.PYTHONDONTWRITEBYTECODE = '1';
 let args = process.argv.slice(2);
+// Host-only cache priming after the shared runtime has been verified. Import
+// ordinary CLI code without resources, factories, sessions or model requests.
+if (args.length === 1 && args[0] === '--grapher-prepare-runtime-cache') {
+  await preparePiCli();
+  flushRuntimeCompileCache();
+  process.exit(0);
+}
 if (args[0] === '--grapher-prewarm') {
   if (args.length !== 2) throw new Error('Invalid prepared-host arguments');
   const { bindPreparedHost } = await import('./prepared-host.ts');
