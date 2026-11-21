@@ -1,6 +1,6 @@
 [package]
 name = "grapher-desktop"
-version = "1.9.12"
+version = "1.9.13"
 description = "Grapher desktop shell"
 edition = "2021"
 license = "MIT"

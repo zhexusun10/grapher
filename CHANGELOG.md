@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.13] - 2026-11-21
+
+### Fixed
+
+- Prevented newly loaded sidebar conversation cards from briefly showing a scrollbar during their entrance animation (`src/components/layout/Sidebar.tsx`, `src/styles.css`).
+- Stabilized the first Settings open by prefetching the Provider/Auth catalog at startup and keeping the configured-credentials header mounted while it loads. A stalled catalog no longer blocks the foreground Run (`src/App.tsx`, `src/components/ProviderSettings.tsx`, `scripts/bootstrap-settings-ui.test.mjs`).
+
 ## [1.9.12] - 2026-11-20
 
 ### Changed
