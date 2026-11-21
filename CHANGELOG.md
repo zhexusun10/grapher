@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recovered interrupted Planner streams from completed operation receipts after response headers or an early EOF, refreshed the receipt's Run before publishing completion, and retained operation identity when the outcome remains unknown (`src/services/runtime.ts`, `scripts/api-protocol.test.ts`).
 - Prevented automatic replay of writes and planning streams after a desktop backend port change. Added backend-instance-scoped operation receipts, duplicate-request conflict checks and read-only outcome lookup; lost write responses can recover from a receipt and revalidate current snapshots without submitting the write again. Restarted, expired or unavailable outcomes remain explicit instead of implying rollback (`backend/src/server/api_transport.rs`, `src/services/apiBase.ts`, `src/services/apiClient.ts`, `src/services/runtime.ts`).
 - Included `startOffset: 0` when a live Planner log has not been created yet, keeping empty initial pages aligned with the transcript cursor contract (`backend/src/server.rs`).
 - Prevented delayed startup prewarming from replacing a newer project's prepared workers by guarding every staggered dispatch with its original selection generation (`backend/src/engine.rs`, `backend/src/engine/prewarm.rs`, `backend/src/server.rs`).

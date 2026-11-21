@@ -226,6 +226,26 @@ export const runtimeService = {
     historyRequests.clear();
     const streamBody = { goal, config, mode, images, revisionRunId, continuePlanningId };
     const { headers, requestId, operationId } = requestHeaders("plan_goal_stream", streamBody);
+    const completeFromReceipt = async (response: Response): Promise<Snapshot> => {
+      const body = await response.json();
+      if (!response.ok) throw responseError(body, response.status, requestId, operationId);
+      const snapshot = normalizeSnapshot(body?.result?.snapshot);
+      if (!snapshot.runId || (revisionRunId && snapshot.runId !== revisionRunId)) {
+        throw new Error("Invalid planning receipt Run");
+      }
+      const fresh = await runtimeService.snapshotForRun(snapshot.runId, signal);
+      historyRequests.clear();
+      onEvent({ type: "complete", snapshot: fresh });
+      return fresh;
+    };
+    const recoverInterruptedStream = async (error: unknown): Promise<Snapshot> => {
+      const recovered = !signal?.aborted && operationId ? await recoverOperationResponse(operationId, signal) : null;
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (recovered) return completeFromReceipt(recovered);
+      if (isTauriDesktop()) error = await probeDesktopBackendError(error, signal) ?? error;
+      if (error instanceof Error && Object.isExtensible(error)) Object.assign(error, { requestId, operationId, outcomeUnknown: true });
+      throw error;
+    };
     let response: Response;
     try {
       response = await fetchApi("/api/plan_goal_stream", {
@@ -246,11 +266,7 @@ export const runtimeService = {
       throw responseError(body, response.status, requestId, operationId);
     }
     if (response.headers.get("content-type")?.includes("application/json")) {
-      const body = await response.json();
-      const snapshot = normalizeSnapshot(body?.result?.snapshot);
-      const fresh = await runtimeService.snapshotForRun(snapshot.runId, signal);
-      onEvent({ type: "complete", snapshot: fresh });
-      return fresh;
+      return completeFromReceipt(response);
     }
 
     const reader = response.body?.getReader();
@@ -269,11 +285,7 @@ export const runtimeService = {
         try {
           chunk = await reader.read();
         } catch (readError) {
-          if (!signal?.aborted && isTauriDesktop()) {
-            const desktopError = await probeDesktopBackendError(readError, signal);
-            if (desktopError) throw desktopError;
-          }
-          throw readError;
+          return recoverInterruptedStream(readError);
         }
         const { done: completed, value } = chunk;
         if (completed) break;
@@ -332,11 +344,7 @@ export const runtimeService = {
           }
         }
       }
-      if (!signal?.aborted && isTauriDesktop()) {
-        const desktopError = await probeDesktopBackendError(undefined, signal);
-        if (desktopError) throw desktopError;
-      }
-      throw new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。"));
+      return recoverInterruptedStream(new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。")));
     } finally {
       void reader.cancel().catch(() => { });
       reader.releaseLock();

@@ -232,3 +232,67 @@ test('a truncated write response recovers from the receipt and revalidates the r
     assert.deepEqual(calls, ['snapshot', 'control', 'operation_status', 'snapshot']);
   } finally { globalThis.fetch = original; resetApiBaseForTest(); }
 });
+
+test('an interrupted Planner response recovers its completed receipt without starting another Run', async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const failure of ['read-error', 'early-eof']) {
+      resetApiBaseForTest();
+      const runId = `stream-receipt-${failure}`;
+      const calls: string[] = [];
+      const events: string[] = [];
+      let operationId: string | null = null;
+      globalThis.fetch = async (url, init) => {
+        const command = String(url).split('/').at(-1)!;
+        calls.push(command);
+        if (calls.length === 1) return response(emptySnapshot, {
+          'x-grapher-instance': '44444444-4444-4444-8444-444444444444',
+        });
+        if (command === 'plan_goal_stream') {
+          operationId = new Headers(init?.headers).get('X-Grapher-Operation');
+          return new Response(new ReadableStream({ start(controller) {
+            if (failure === 'read-error') controller.error(new TypeError('stream response lost'));
+            else controller.close();
+          } }), { headers: { 'Content-Type': 'text/event-stream' } });
+        }
+        if (command === 'operation_status') {
+          assert.ok(operationId);
+          assert.equal(JSON.parse(String(init?.body)).operationId, operationId);
+          return response({ state: 'completed', response: { status: 200,
+            body: { result: { snapshot: { ...emptySnapshot, runId, phase: 'paused' } } },
+          } });
+        }
+        assert.equal(command, 'snapshot');
+        assert.equal(JSON.parse(String(init?.body)).runId, runId);
+        return response({ ...emptySnapshot, runId, phase: 'completed' });
+      };
+      await runtimeService.snapshot();
+      const result = await runtimeService.planGoalStream('goal', {} as never, event => events.push(event.type));
+      assert.equal(result.phase, 'completed');
+      assert.deepEqual(events, ['complete']);
+      assert.deepEqual(calls, ['snapshot', 'plan_goal_stream', 'operation_status', 'snapshot']);
+    }
+  } finally { globalThis.fetch = original; resetApiBaseForTest(); }
+});
+
+test('an interrupted Planner with no receipt retains its operation identity and uncertain outcome', async () => {
+  const original = globalThis.fetch;
+  resetApiBaseForTest();
+  let operationId: string | null = null;
+  globalThis.fetch = async (url, init) => {
+    const command = String(url).split('/').at(-1)!;
+    if (command === 'snapshot') return response(emptySnapshot, {
+      'x-grapher-instance': '55555555-5555-4555-8555-555555555555',
+    });
+    if (command === 'operation_status') return response({ state: 'unknown', response: null });
+    operationId = new Headers(init?.headers).get('X-Grapher-Operation');
+    return new Response('', { headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  try {
+    await runtimeService.snapshot();
+    await assert.rejects(runtimeService.planGoalStream('goal', {} as never, () => {}), error => {
+      const uncertain = error as Error & { operationId?: string; outcomeUnknown?: boolean };
+      return !!operationId && uncertain.operationId === operationId && uncertain.outcomeUnknown === true;
+    });
+  } finally { globalThis.fetch = original; resetApiBaseForTest(); }
+});

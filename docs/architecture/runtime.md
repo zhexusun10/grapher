@@ -628,7 +628,10 @@ response or `OPERATION_IN_PROGRESS`; reusing a token for another command/body is
 `IDEMPOTENCY_CONFLICT`. Request fingerprints, not credential bodies, are retained.
 `operation_status` is a read and reports `pending`, `completed` or `unknown`, with
 the original response when available. After a transport/JSON-body failure the
-client may read this receipt without resubmitting the write, and snapshot-bearing
+client may read this receipt without resubmitting the write, including a Planner
+stream that fails or ends before its terminal event after headers arrive. If the
+receipt is unavailable, the stream error retains its operation ID for lookup.
+Snapshot-bearing
 replays revalidate current Run state rather than overwriting it with an older
 receipt snapshot. Aborted/deadline-expired owners do not start recovery reads.
 
