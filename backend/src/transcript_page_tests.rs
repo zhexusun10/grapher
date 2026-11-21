@@ -445,3 +445,24 @@ fn browser_metadata_is_reused_only_until_the_next_projection_version() {
     assert!(!Arc::ptr_eq(&changed, &other));
     assert_eq!(other["runId"], "another-run");
 }
+
+#[test]
+fn planner_missing_first_log_returns_a_complete_zero_byte_cursor_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = Uuid::new_v4().to_string();
+    let directory = temp.path().join("planning").join(&id);
+    fs::create_dir_all(&directory).unwrap();
+    record_test_planning(&directory, &id, temp.path());
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open_lazy(temp.path()).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused"),
+    });
+    let page: crate::api_contract::PlanningOutputPage = serde_json::from_value(
+        get_planning_output(id, "planner".into(), 0, false, None, None, &service).unwrap(),
+    ).unwrap();
+    assert_eq!((page.start_offset, page.next_offset, page.total_bytes), (0, 0, 0));
+    assert!(page.content.is_empty() && page.complete && page.running);
+}

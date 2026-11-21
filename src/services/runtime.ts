@@ -1,7 +1,10 @@
 import { t } from "../i18n";
+import { BoundedLruCache, utf8Bytes } from "../lib/BoundedLruCache";
 import { DesktopBackendError, fetchApi, isTauriDesktop, probeDesktopBackendError } from "./apiBase";
 import { invalidateTranscriptCaches } from "./transcriptCache";
-import { enableRuntimeEvents } from "./runtimeEvents";
+import { ApiRequestError, jsonRequest, observeApiResponse, requestHeaders, responseError, recoverOperationResponse } from "./apiClient";
+import type { SnapshotPollRequest, SnapshotPollResponse, ExecutionOutputPage, PlanningOutputPage, OperationStatus } from "./apiContract.generated";
+import { applySnapshotDelta, validateSnapshot } from "./snapshotDelta";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
 import type { Bootstrap, Config, FileChangeSummary, Graph, HostPreflight, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
@@ -25,7 +28,7 @@ const boundedCommands = new Set([
   "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
   "open_workspace_file",
   "provider_auth", "pi_extensions", "list_skills", "list_files",
-  "get_merger_prompt",
+  "get_merger_prompt", "operation_status",
 ]);
 const metadataTimeoutMs = 15_000;
 
@@ -40,14 +43,7 @@ export class RunNotFoundError extends Error {
   }
 }
 
-// Validate current node states without translating historical status names.
-function normalizeSnapshot(snapshot: Snapshot): Snapshot {
-  const statuses = new Set(["waiting", "running", "completed", "failed", "blocked", "dirty", "paused"]);
-  for (const node of Object.values(snapshot.nodes ?? {})) {
-    if (!statuses.has(node.status)) throw new Error("Unsupported node status");
-  }
-  return snapshot;
-}
+function normalizeSnapshot(snapshot: Snapshot): Snapshot { return validateSnapshot(snapshot); }
 
 function normalizeSnapshotResult<T>(result: T): T {
   if (!result || typeof result !== "object") return result;
@@ -64,49 +60,52 @@ function normalizeSnapshotResult<T>(result: T): T {
 }
 
 function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
-  if (!boundedCommands.has(command)) return requestBody<T>(command, body, signal);
-  const message = command === "save_config" || command === "composer_models"
-    ? t("保存设置请求超时，请刷新确认是否已生效后再重试。")
-    : t("后端响应超时，请稍后重试。");
-  return withRequestTimeout(deadline => requestBody<T>(command, body, deadline), metadataTimeoutMs, message, signal);
+  return requestBody<T>(command, body, signal, boundedCommands.has(command) ? metadataTimeoutMs : null);
 }
 
-async function requestBody<T>(command: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-  // A post-action reader must not join a metadata request begun before the action.
+async function refreshReplayedResult<T>(result: T, signal?: AbortSignal): Promise<T> {
+  if (!result || typeof result !== "object") return result;
+  const wrapped = "snapshot" in result;
+  const state = (wrapped ? (result as { snapshot: unknown }).snapshot : result) as Snapshot | null;
+  if (!state || typeof state.runId !== "string" || !("graph" in state)) return result;
+  const refresh = async () => {
+    const snapshot = await request<Snapshot>("snapshot", state.runId ? { runId: state.runId } : {}, signal);
+    if (state.runId && snapshot.runId !== state.runId) throw new Error(t("执行记录与请求不匹配"));
+    return snapshot;
+  };
+  if ("conversations" in result && wrapped) {
+    const bootstrap = await request<Bootstrap>("bootstrap", {}, signal);
+    return (state.runId ? { ...bootstrap, snapshot: await refresh() } : bootstrap) as T;
+  }
+  const fresh = await refresh();
+  return (wrapped ? { ...result, snapshot: fresh } : fresh) as T;
+}
+
+async function requestBody<T>(command: string, body: Record<string, unknown>, signal?: AbortSignal, timeoutMs: number | null = null): Promise<T> {
   const mutatesSnapshot = snapshotMutations.has(command) || (command === "composer_command" && body.operation === "withdraw");
   if (mutatesSnapshot) historyRequests.clear();
-  let response: Response;
   try {
-    response = await fetchApi(`/api/${command}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, compact: true, detail: "metadata" }),
-      signal,
+    return await jsonRequest<T>(command, { ...body, compact: true, detail: "metadata" }, {
+      signal, timeoutMs,
+      timeoutMessage: command === "save_config" || command === "composer_models"
+        ? t("保存设置请求超时，请刷新确认是否已生效后再重试。") : undefined,
+      operationKey: typeof body.requestId === "string" ? `${command}:${body.runId ?? ""}:${body.requestId}` : undefined,
+      validate: result => normalizeSnapshotResult(result as T),
+      revalidateReplay: refreshReplayedResult,
     });
   } catch (error) {
-    if (mutatesSnapshot) historyRequests.clear();
-    if (signal?.aborted) throw error;
-    if (error instanceof DesktopBackendError) throw error;
-    throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
-  }
-  if (response.headers?.get("x-grapher-events") === "1") {
-    enableRuntimeEvents();
-  }
-  const data = await response.json().catch(() => {
-    if (mutatesSnapshot) historyRequests.clear();
-    throw new Error(isTauriDesktop()
-      ? t("桌面后端未返回有效响应 ({0})，请重试或重启应用。", response.status)
-      : t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
-  });
-  if (mutatesSnapshot) historyRequests.clear();
-  if (!response.ok || data.error) {
-    if (data.error === "Run not found" && typeof body.runId === "string" && body.runId) {
+    if (error instanceof ApiRequestError && error.code === "RUN_NOT_FOUND" && typeof body.runId === "string" && body.runId) {
       throw new RunNotFoundError(body.runId);
     }
-    throw new Error(data.error || t("后端请求失败 ({0})", response.status));
+    throw error;
+  } finally {
+    if (mutatesSnapshot) historyRequests.clear();
   }
-  return normalizeSnapshotResult(data.result as T);
 }
+
+const snapshotBases = new BoundedLruCache<string, { version: string; snapshot: Snapshot; bytes: number }>(entry => entry.bytes, 64, 16 * 1024 * 1024);
+let snapshotTicket = 0;
+const snapshotTickets = new Map<string, number>();
 
 export const runtimeService = {
   bootstrap: async () => {
@@ -142,8 +141,46 @@ export const runtimeService = {
     if (!snapshot || snapshot.runId !== runId) throw new Error(t("执行记录与请求不匹配"));
     return snapshot;
   },
-  snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
-    request<{ version: string; snapshot: Snapshot | null; activity?: RuntimeActivity[]; busy?: boolean }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
+  snapshotIfChanged: async (version: string | null, signal?: AbortSignal, runId?: string) => {
+    const key = runId ?? "";
+    const base = snapshotBases.get(key);
+    const ticket = ++snapshotTicket;
+    snapshotTickets.set(key, ticket);
+    try {
+      const requestedVersion = version;
+      const wantsDelta = !!base && base.version === version;
+      const pollRequest = { version: requestedVersion, delta: wantsDelta, ...(runId ? { runId } : {}) } satisfies SnapshotPollRequest;
+      let result = await request<SnapshotPollResponse>("snapshot_if_changed", pollRequest, signal);
+      if (!result || typeof result.version !== "string") throw new Error("Invalid snapshot poll response");
+      if (result.delta) {
+        try {
+          if (!base || base.version !== requestedVersion) throw new Error("Missing snapshot delta base");
+          result = { ...result, snapshot: applySnapshotDelta(base.snapshot, base.version, result.version, result.delta) };
+        } catch {
+          // A version mismatch/cold cache never guesses how to apply a patch.
+          result = await request<SnapshotPollResponse>("snapshot_if_changed", { version: null, delta: false, ...(runId ? { runId } : {}) } satisfies SnapshotPollRequest, signal);
+          if (!result || typeof result.version !== "string" || !result.snapshot || result.delta) throw new Error("Invalid full snapshot response");
+        }
+      }
+      if (result.snapshot) {
+        if (runId && result.snapshot.runId !== runId) throw new Error("Snapshot Run does not match its requested Run");
+        if (!result.busy && snapshotTickets.get(key) === ticket) {
+          let bytes = base && result.delta ? base.bytes : 2 + Object.entries(result.snapshot).reduce((sum, [key, value]) => sum + utf8Bytes(JSON.stringify({ [key]: value })), 0);
+          if (base && result.delta) {
+            const prior = base.snapshot as unknown as Record<string, unknown>;
+            for (const key of new Set([...Object.keys(result.delta.set), ...result.delta.removed])) {
+              bytes -= Object.hasOwn(prior, key) ? utf8Bytes(JSON.stringify({ [key]: prior[key] })) : 0;
+            }
+            bytes += Object.entries(result.delta.set).reduce((sum, [key, value]) => sum + utf8Bytes(JSON.stringify({ [key]: value })), 0);
+            if (result.delta.events.length) bytes += utf8Bytes(JSON.stringify(result.delta.events)) - 2 + (base.snapshot.events.length ? 1 : 0);
+          }
+          snapshotBases.set(key, { version: result.version, snapshot: result.snapshot, bytes: Math.max(0, bytes) });
+        }
+      }
+      return result;
+    } finally { if (snapshotTickets.get(key) === ticket) snapshotTickets.delete(key); }
+  },
+  operationStatus: (operationId: string, signal?: AbortSignal) => request<OperationStatus>("operation_status", { operationId }, signal),
   history: (runId: string) => {
     const pending = historyRequests.get(runId);
     if (pending) return pending;
@@ -187,23 +224,33 @@ export const runtimeService = {
     continuePlanningId?: string
   ): Promise<Snapshot> {
     historyRequests.clear();
-    const response = await fetchApi("/api/plan_goal_stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, config, mode, images, revisionRunId, continuePlanningId }),
-      signal,
-    });
-
-    if (response.headers?.get("x-grapher-events") === "1") {
-      enableRuntimeEvents();
+    const streamBody = { goal, config, mode, images, revisionRunId, continuePlanningId };
+    const { headers, requestId, operationId } = requestHeaders("plan_goal_stream", streamBody);
+    let response: Response;
+    try {
+      response = await fetchApi("/api/plan_goal_stream", {
+        method: "POST", headers, body: JSON.stringify(streamBody), signal,
+      });
+    } catch (error) {
+      const recovered = !signal?.aborted && operationId ? await recoverOperationResponse(operationId, signal) : null;
+      if (recovered) response = recovered;
+      else {
+        if (error instanceof Error && Object.isExtensible(error)) Object.assign(error, { requestId, operationId, outcomeUnknown: true });
+        throw error;
+      }
     }
+
+    observeApiResponse(response);
     if (!response.ok) {
-      let errMsg = t("规划请求失败 ({0})", response.status);
-      try {
-        const errJson = await response.json();
-        if (errJson.error) errMsg = errJson.error;
-      } catch { }
-      throw new Error(errMsg);
+      const body = await response.json().catch(() => null);
+      throw responseError(body, response.status, requestId, operationId);
+    }
+    if (response.headers.get("content-type")?.includes("application/json")) {
+      const body = await response.json();
+      const snapshot = normalizeSnapshot(body?.result?.snapshot);
+      const fresh = await runtimeService.snapshotForRun(snapshot.runId, signal);
+      onEvent({ type: "complete", snapshot: fresh });
+      return fresh;
     }
 
     const reader = response.body?.getReader();
@@ -278,7 +325,7 @@ export const runtimeService = {
           } else if (eventType === "error") {
             historyRequests.clear();
             onEvent({ type: "error", error: dataObj.error, planningId: dataObj.planningId, summary: dataObj.summary });
-            const err = new Error(dataObj.error || t("规划失败"));
+            const err = responseError(dataObj, 400, requestId, operationId);
             (err as any).planningId = dataObj.planningId;
             (err as any).summary = dataObj.summary;
             throw err;
@@ -296,7 +343,7 @@ export const runtimeService = {
     }
   },
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number) =>
-    request<{ runId: string; executionId: string; content: string; startOffset: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
+    request<ExecutionOutputPage>(
       "get_execution_output", { runId, executionId, offset, full, ...(endOffset !== undefined ? { endOffset } : {}), ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getFileChanges: async (runId: string, execution?: string | string[], signal?: AbortSignal) => {
     const result = await request<{ runId: string; executionId: string | null; executionIds: string[] | null; summary: FileChangeSummary }>(
@@ -333,7 +380,7 @@ export const runtimeService = {
       const response = await fetchApi("/api/get_workspace_image", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runId, path, ...(executionId ? { executionId } : {}) }), signal: deadline,
-      });
+      }, { retrySafe: true });
       if (!response.ok || !/^image\/(?:png|jpeg|gif|webp|bmp)$/i.test(response.headers.get("Content-Type") || "")) {
         throw new Error(t("无法加载图片"));
       }
@@ -348,7 +395,7 @@ export const runtimeService = {
   getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
     request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
   getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal, tail = false, before?: number, limit?: number) =>
-    request<{ planningId: string; role: string; content: string; startOffset: number; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
+    request<PlanningOutputPage>(
       "get_planning_output", { planningId, role, offset, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
   listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),
@@ -391,11 +438,13 @@ export const runtimeService = {
   resetWorkspace: async () => {
     const snapshot = await request<Snapshot>("reset_workspace");
     invalidateTranscriptCaches();
+    snapshotBases.clear(); snapshotTickets.clear();
     return snapshot;
   },
   clearHistory: async () => {
     await request<void>("clear_history");
     invalidateTranscriptCaches();
+    snapshotBases.clear(); snapshotTickets.clear();
   },
   deleteRun: async (runId: string) => {
     try {
@@ -406,10 +455,11 @@ export const runtimeService = {
       if (!(error instanceof RunNotFoundError) || error.runId !== runId) throw error;
     }
     invalidateTranscriptCaches(runId);
+    snapshotBases.delete(runId); snapshotTickets.delete(runId);
   },
   deleteWorkspace: async (repository: string) => {
     const deleted = await request<string[]>("delete_workspace", { repository });
-    for (const runId of deleted) invalidateTranscriptCaches(runId);
+    for (const runId of deleted) { invalidateTranscriptCaches(runId); snapshotBases.delete(runId); snapshotTickets.delete(runId); }
     return deleted;
   },
   listFiles: async (repository?: string, forceRefresh = false): Promise<string[]> => {

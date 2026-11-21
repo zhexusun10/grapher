@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Generated browser Snapshot, Execution, polling, activity, transcript-page and error contracts from Rust DTOs, with a stale-binding check and validation before publishing frontend state (`backend/src/api_contract.rs`, `backend/src/snapshot_view.rs`, `backend/examples/export_api.rs`, `src/services/apiContract.generated.ts`, `src/services/snapshotDelta.ts`).
+- Added opt-in versioned snapshot deltas that reuse unchanged graph/configuration fields and append only new projected events. Missing or invalid bases fall back to a full authoritative projection; busy reads, SSE watchdogs and persisted events retain their existing semantics (`backend/src/runtime.rs`, `backend/src/server/snapshot_delta.rs`, `src/services/runtime.ts`).
+- Reduced Planner stream traffic by sending structured events without duplicate raw JSON and returning browser metadata on completion, while retaining complete durable logs for paged reads (`backend/src/server.rs`, `backend/src/snapshot_view.rs`).
+- Unified Runtime, Provider/Auth and Extensions JSON transport, structured error codes, request correlation and deadlines. Added bounded extension catalog/settings waits while preserving interactive authentication and long-running operation policies (`src/services/apiClient.ts`, `src/services/providerAuth.ts`, `src/services/piExtensions.ts`).
+
+### Fixed
+
+- Prevented automatic replay of writes and planning streams after a desktop backend port change. Added backend-instance-scoped operation receipts, duplicate-request conflict checks and read-only outcome lookup; lost write responses can recover from a receipt and revalidate current snapshots without submitting the write again. Restarted, expired or unavailable outcomes remain explicit instead of implying rollback (`backend/src/server/api_transport.rs`, `src/services/apiBase.ts`, `src/services/apiClient.ts`, `src/services/runtime.ts`).
+- Included `startOffset: 0` when a live Planner log has not been created yet, keeping empty initial pages aligned with the transcript cursor contract (`backend/src/server.rs`).
+
 ## [1.9.13] - 2026-11-21
 
 ### Changed

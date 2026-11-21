@@ -1,5 +1,11 @@
 // Keys retain the existing Chinese UI copy so the Chinese version stays unchanged.
 export const en: Record<string, string> = {
+  "操作仍在处理中，请稍后刷新查看结果。": "The operation is still running. Refresh shortly to check the result.",
+  "操作结果尚未确认，请刷新检查后再重试。": "The operation outcome is unknown. Refresh and check before retrying.",
+  "请求与先前提交的操作不一致，请刷新后再试。": "This request differs from the previously submitted operation. Refresh before retrying.",
+  "后端正在处理过多操作，请稍后重试。": "The backend is handling too many operations. Try again shortly.",
+  "操作请求超时，请刷新确认结果后再重试。": "The operation timed out. Refresh and confirm the result before retrying.",
+  "请求连接中断，操作结果尚未确认，请刷新检查后再重试。": "The connection was interrupted. The operation outcome is unknown; refresh and check before retrying.",
   "全局管理可见模型": "Manage visible models globally",
   "所有可用模型均已隐藏，可在管理可见模型中恢复显示。": "All available models are hidden. Restore them under Manage visible models.",
   "全局可见模型": "Global model visibility",

@@ -70,7 +70,7 @@ fn exercise_sse(http10: bool, advertise_events: bool) {
         advertise_events
     );
     assert_eq!(
-        headers.contains("Access-Control-Expose-Headers: X-Grapher-Events\r\n"),
+        headers.contains("Access-Control-Expose-Headers: X-Grapher-Events, X-Grapher-Instance\r\n"),
         advertise_events
     );
 

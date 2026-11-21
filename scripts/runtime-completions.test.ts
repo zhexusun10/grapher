@@ -411,7 +411,7 @@ test("a durable planning or failed planning Run stays attached to its workspace"
 
 test("a terminal Planner revision completes without waiting for SSE EOF", { timeout: 2000 }, async () => {
   const original = globalThis.fetch;
-  const snapshot = { runId: "revision-run", phase: "awaiting_approval", approved: false } as Snapshot;
+  const snapshot = { ...emptySnapshot, runId: "revision-run", phase: "awaiting_approval", approved: false };
   let cancelled = false;
   const events: string[] = [];
   try {
@@ -435,7 +435,7 @@ test("a terminal Planner revision completes without waiting for SSE EOF", { time
 
 test("planning stream preserves the persisted Run identity through completion", async () => {
   const original = globalThis.fetch;
-  const snapshot = { runId: "saved-run", phase: "awaiting_approval" } as Snapshot;
+  const snapshot = { ...emptySnapshot, runId: "saved-run", phase: "awaiting_approval" };
   const events: string[] = [];
   try {
     globalThis.fetch = async () => new Response(

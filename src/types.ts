@@ -19,7 +19,7 @@ export interface Config { repository: string; model: string; thinkingLevel: Thin
 export interface ConversationModelConfig { model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>> }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; canResume?: boolean; modelConfig?: RoleModelConfig; modelOverride?: boolean; modelRetry?: boolean; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
-interface ExecutionMetrics {
+export interface ExecutionMetrics {
   durationSeconds: number;
   assistantMessages: number;
   tools: number;
@@ -35,7 +35,7 @@ interface ExecutionMetrics {
   thinkingLevel?: string;
 }
 
-interface RunMetrics {
+export interface RunMetrics {
   totalDurationSeconds: number;
   planningDurationSeconds: number;
   executionDurationSeconds: number;
@@ -96,7 +96,8 @@ export interface OpenWorkspaceFileRequest {
   nodes?: string[];
 }
 
-export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null; fileChanges?: FileChangeSummary | null }
+export type { Execution, Snapshot, RuntimeActivity } from "./services/apiContract.generated";
+import type { Execution, Snapshot } from "./services/apiContract.generated";
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; heads?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; queued?: boolean; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; request_id?: string; status?: string; planning?: PlanningSummary; plan_type?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
@@ -150,50 +151,6 @@ export interface SkillItem {
   scope: "workspace" | "global" | "builtin";
 }
 
-export interface Snapshot {
-  runId: string;
-  title?: string | null;
-  isolatedWorkspaces?: boolean | null;
-  privateBatch?: string[];
-  batchHandoff?: { recoveryExecutionIds: string[] } | null;
-  planType?: "serial" | "graph";
-  planningId?: string;
-  planning?: PlanningSummary | null;
-  graph: Graph;
-  config: Config | null;
-  /** Conversation-scoped model selection; absence means use creation settings. */
-  modelConfig?: ConversationModelConfig | null;
-  plan: Plan | null;
-  nodes: Record<string, NodeState>;
-  executions: Execution[];
-  supersededExecutionIds?: string[];
-  mergers?: Execution[];
-  /** Native result launch can remain active independently of the Run phase. */
-  resultExecution?: { status: string } | null;
-  publication?: Publication | null;
-  events: GraphEvent[];
-  approved: boolean;
-  paused: boolean;
-  /** Backend-owned run-wide recovery hint; does not require a model change. */
-  canResume?: boolean;
-  stopRequested?: boolean;
-  phase: string;
-  base: string;
-  feedbackCounts: Record<string, number>;
-  runMetrics?: RunMetrics | null;
-  fileChanges?: FileChangeSummary | null;
-  /** Backend omits `fileChanges` from the snapshot; the browser fetches them
-   * on demand through `get_file_changes` instead of shipping tens of MiB. */
-  fileChangesOmitted?: boolean;
-}
-
-/** Transient backend progress outside durable Run state. */
-export interface RuntimeActivity {
-  kind: "source_capture" | "workspace_prepare" | string;
-  nodes: string[];
-  /** Optional finer-grained step of a long operation (compose/conflict/verify/copy). */
-  phase?: string;
-}
 export interface RepositoryInfo {
   path: string;
   name: string;

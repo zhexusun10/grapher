@@ -282,13 +282,20 @@ pub(super) fn respond_sse(
     if chunked {
         writer.write_all(b"Transfer-Encoding: chunked\r\n")?;
     }
+    write!(
+        writer,
+        "X-Grapher-Instance: {}\r\n",
+        super::api_transport::instance()
+    )?;
     if advertise_events {
         writer.write_all(b"X-Grapher-Events: 1\r\n")?;
     }
     if let Some(origin) = origin {
         write!(writer, "Access-Control-Allow-Origin: {origin}\r\n")?;
         if advertise_events {
-            writer.write_all(b"Access-Control-Expose-Headers: X-Grapher-Events\r\n")?;
+            writer.write_all(
+                b"Access-Control-Expose-Headers: X-Grapher-Events, X-Grapher-Instance\r\n",
+            )?;
         }
     }
     writer.write_all(b"\r\n")?;

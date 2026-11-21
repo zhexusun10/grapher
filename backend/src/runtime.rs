@@ -216,6 +216,7 @@ pub struct Runtime {
     epoch: Uuid,
     revision: u64,
     browser_metadata: std::cell::RefCell<Option<(String, u64, Arc<serde_json::Value>)>>,
+    browser_base: Option<(String, Arc<serde_json::Value>)>,
     pub root: PathBuf,
     _lock: Arc<RuntimeLock>,
 }
@@ -267,6 +268,7 @@ impl Runtime {
             epoch: Uuid::new_v4(),
             revision: 0,
             browser_metadata: Default::default(),
+            browser_base: None,
             root: root.into(),
             _lock: lock,
         };
@@ -336,6 +338,7 @@ impl Runtime {
             epoch: Uuid::new_v4(),
             revision: 0,
             browser_metadata: Default::default(),
+            browser_base: None,
             root,
             _lock: lock,
         };
@@ -459,8 +462,17 @@ impl Runtime {
         Ok(value)
     }
 
+    pub(crate) fn browser_delta_base(&self, version: &str) -> Option<Arc<serde_json::Value>> {
+        self.browser_base
+            .as_ref()
+            .filter(|(base, _)| base == version)
+            .map(|(_, value)| value.clone())
+    }
+
     pub fn touch(&mut self) {
-        self.browser_metadata.get_mut().take();
+        if let Some((_, revision, value)) = self.browser_metadata.get_mut().take() {
+            self.browser_base = Some((format!("{}:{}", self.epoch, revision), value));
+        }
         self.revision = self.revision.wrapping_add(1);
         crate::server::notify_snapshot_changed(&self.state.run_id, &self.snapshot_version());
     }

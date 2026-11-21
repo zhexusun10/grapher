@@ -204,6 +204,7 @@ test("bootstrap renders 24 authoritative summaries with no history or blank-titl
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "snapshot_if_changed": snapshotPolls.push(body.runId); result = { version: "fixed", snapshot: snapshots[body.runId] ?? null }; break;
       case "list_plannings": result = []; break;
+      case "provider_auth": result = { providers: [], models: [], warning: null }; break;
       default: errors.push(`Unexpected API: ${command}`); result = null;
     }
     await route.fulfill({ json: { result } });

@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import type { ThinkingLevel } from "../types";
-import { fetchApi } from "./apiBase";
+import { jsonRequest } from "./apiClient";
 import { withRequestTimeout } from "./requestTimeout";
 
 /**
@@ -48,13 +48,7 @@ function call<T>(operation: string, fields: Record<string, unknown> = {}): Promi
 }
 
 async function callBody<T>(operation: string, fields: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-  const response = await fetchApi("/api/provider_auth", {
-    method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
-    body: JSON.stringify({ version: 1, operation, ...fields }), signal,
-  });
-  const body = await response.json().catch(() => null);
-  if (!response.ok || !body || body.error) throw new Error(body?.error || "Provider/Auth Adapter unavailable");
-  return body.result as T;
+  return jsonRequest<T>("provider_auth", { version: 1, operation, ...fields }, { signal, timeoutMs: null });
 }
 const CATALOG_STORAGE_KEY = "grapher_provider_catalog_cache";
 

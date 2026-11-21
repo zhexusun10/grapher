@@ -57,7 +57,9 @@
     "desktop:icons": "node scripts/desktop-icons.mjs",
     "desktop:stage": "node scripts/desktop-stage.mjs",
     "desktop:build": "node scripts/desktop-build.mjs",
-    "desktop:signing": "node scripts/desktop-signing.mjs"
+    "desktop:signing": "node scripts/desktop-signing.mjs",
+    "api:generate": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --example export_api",
+    "api:check": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --example export_api -- --check"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.6.0",

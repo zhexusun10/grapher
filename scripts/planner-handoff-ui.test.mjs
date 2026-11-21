@@ -675,9 +675,16 @@ test("first-turn Planner handoff fills behind the live stream so a progress-only
           await new Promise(resolve => setTimeout(resolve, 120));
           result = { planningId: body.planningId, role: "planner", content: olderBody,
             startOffset: 0, nextOffset: olderBytes.length, totalBytes, complete: false, running: false };
-        } else {
+        } else if (body.tail) {
           result = { planningId: body.planningId, role: "planner", content: metadataTail,
             startOffset: olderBytes.length, nextOffset: totalBytes, totalBytes, complete: true, running: false };
+        } else {
+          // Terminal rechecks resume from the byte cursor, rather than replaying
+          // the initial tail as a non-contiguous forward page.
+          const bytes = Buffer.concat([olderBytes, tailBytes]);
+          const startOffset = Math.min(body.offset ?? 0, totalBytes);
+          result = { planningId: body.planningId, role: "planner", content: bytes.subarray(startOffset).toString(),
+            startOffset, nextOffset: totalBytes, totalBytes, complete: true, running: false };
         }
         break;
       }

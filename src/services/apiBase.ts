@@ -390,6 +390,7 @@ async function handleFetchFailure(
   init: RequestInit | undefined,
   usedBaseUrl: string | null,
   error: unknown,
+  retrySafe = false,
 ): Promise<Response> {
   const signal = init?.signal ?? undefined;
   if (signal?.aborted || !isTauriDesktop()) throw error;
@@ -401,7 +402,7 @@ async function handleFetchFailure(
     if (signal?.aborted) throw error;
     throw backendError;
   }
-  if (freshBaseUrl && usedBaseUrl && freshBaseUrl !== usedBaseUrl) {
+  if (retrySafe && freshBaseUrl && usedBaseUrl && freshBaseUrl !== usedBaseUrl) {
     try {
       return await fetch(joinApiUrl(freshBaseUrl, path), init);
     } catch (retryError) {
@@ -420,20 +421,20 @@ async function handleFetchFailure(
   );
 }
 
-async function resolveAndFetchApi(path: string, init?: RequestInit): Promise<Response> {
+async function resolveAndFetchApi(path: string, init?: RequestInit, retrySafe = false): Promise<Response> {
   const signal = init?.signal ?? undefined;
   const baseUrl = await resolveBackendBaseUrl({ signal });
   const url = joinApiUrl(baseUrl, path);
   try {
     return await fetch(url, init);
   } catch (error) {
-    return handleFetchFailure(path, init, baseUrl, error);
+    return handleFetchFailure(path, init, baseUrl, error, retrySafe);
   }
 }
 
 /** Centralized `/api/...` fetch transport. Retains synchronous relative URLs
  * in browser/Vite mode and waits for the Tauri `backend_url` IPC in desktop mode. */
-export function fetchApi(path: string, init?: RequestInit): Promise<Response> {
+export function fetchApi(path: string, init?: RequestInit, options: { retrySafe?: boolean } = {}): Promise<Response> {
   const signal = init?.signal ?? undefined;
   const syncUrl = getCachedApiUrl(path);
   if (syncUrl !== null) {
@@ -445,13 +446,15 @@ export function fetchApi(path: string, init?: RequestInit): Promise<Response> {
     try {
       responsePromise = fetch(syncUrl, init);
     } catch (error) {
-      return handleFetchFailure(path, init, usedBaseUrl, error);
+      return handleFetchFailure(path, init, usedBaseUrl, error, options.retrySafe);
     }
     if (!isTauriDesktop()) return responsePromise;
-    return responsePromise.catch(error => handleFetchFailure(path, init, usedBaseUrl, error));
+    return responsePromise.catch(error => handleFetchFailure(path, init, usedBaseUrl, error, options.retrySafe));
   }
-  return resolveAndFetchApi(path, init);
+  return resolveAndFetchApi(path, init, options.retrySafe);
 }
+
+export function getApiTransportGeneration(): number { return resolutionGeneration; }
 
 export function resetApiBaseForTest(): void {
   cachedBaseUrl = null;
