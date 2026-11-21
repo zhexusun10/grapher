@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.9.13] - 2026-11-21
 
+### Changed
+
+- Upgraded the bundled Pi source runtime and extension peer packages from 1.5.2 to the official 1.6.0 release, refreshed the reviewed model catalog and dependency profile, and aligned Undici with the upstream 8.12.4 pin. The catalog adds GPT-6.2 Sol and Astra with provider-specific reasoning capabilities and context windows (`pi`, `engine/pi-lock.json`, `engine/model-data/`, `engine/pi-dependencies/`, `package.json`, `package-lock.json`, `scripts/pi-compat.test.ts`). Restart the whole application after upgrading so existing workers do not retain the previous Pi modules.
+
 ### Fixed
 
 - Prevented newly loaded sidebar conversation cards from briefly showing a scrollbar during their entrance animation (`src/components/layout/Sidebar.tsx`, `src/styles.css`).

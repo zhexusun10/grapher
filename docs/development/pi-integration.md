@@ -143,3 +143,5 @@ Baseline upgrades are separate, explicitly requested maintenance, not part of ro
 3. Select affected adapter, bundled-extension, and platform checks from [Testing](testing.md). Existing processes keep loaded code, so stop the backend, provider host, and every prewarmed Partition/Planner/Node worker before accepting the upgraded runtime; restart the whole application rather than only retrying planning. A process that survives the upgrade can mix an old cached module with new source and fail with a missing-export error such as `ownedSlice`.
 
 Bundled extensions can be updated independently using exact project dependency pins and matching lockfile changes, validated against the current baseline's [SDK contracts](../../scripts/pi-compat.test.ts). A global Pi/package update does not replace Grapher's bundled copy.
+
+Pi terminal components return readonly render output and may reuse the same cached array. Extensions that transform a component's output must copy it before mutation. Grapher's browser command bridge does not render terminal components; check any selected extension's terminal behavior separately when upgrading it.

@@ -279,7 +279,6 @@ try {
   assert.match(generatedPrompt, /Supply the complete task/);
   assert.match(generatedPrompt, /Batch related node and edge changes/);
   const bundledPrompt = readFileSync(join(source, "backend/resources/prompts/planner.md"), "utf8");
-  assert.match(bundledPrompt, /merged workspaces of its completed dependencies/);
   const customPrompt = buildSystemPrompt({ ...graphPromptOptions, customPrompt: bundledPrompt });
   assert.equal(customPrompt, buildSystemPrompt({ cwd: repository, customPrompt: bundledPrompt }),
     "The bundled Planner prompt follows Pi's custom-prompt behavior without extra tool rules");

@@ -624,4 +624,29 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
   assert.equal(runtime.getModel('opencode-go', 'minimax-m3.1-flash')?.api, 'openai-completions');
   assert.equal(runtime.getModel('openai', 'gpt-6.1-terra')?.api, 'openai-responses');
   assert.equal(runtime.getModel('xai', 'grok-4.7')?.api, 'openai-responses');
+  // Pi 1.6.0 requires reasoning on GPT-6.2. Codex retains minimal as an
+  // alias for low; the direct OpenAI and Azure APIs reject it altogether.
+  for (const provider of ['openai', 'azure', 'openai-codex']) {
+    for (const id of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+      const model = runtime.getModel(provider, id);
+      assert.ok(model, `${provider}/${id}`);
+      const capabilities = getModelThinkingCapabilities(model);
+      assert.ok(!capabilities.thinkingLevels.includes('off'), `${provider}/${id}: reasoning is required`);
+      if (provider === 'openai-codex') {
+        assert.equal(model.thinkingLevelMap?.minimal, 'low');
+        assert.equal(capabilities.thinkingLevelFallbacks.off, 'minimal');
+      } else {
+        assert.ok(!capabilities.thinkingLevels.includes('minimal'), `${provider}/${id}: minimal is unsupported`);
+        assert.equal(capabilities.thinkingLevelFallbacks.off, 'low');
+        assert.equal(capabilities.thinkingLevelFallbacks.minimal, 'low');
+      }
+    }
+  }
+  assert.equal(runtime.getModel('openai-codex', 'gpt-6.2-sol')?.contextWindow, 500_000);
+  assert.equal(runtime.getModel('openai-codex', 'gpt-6.2-astra')?.contextWindow, 272_000);
+  for (const provider of ['qwen-token-plan', 'qwen-token-plan-cn']) {
+    for (const id of ['deepseek-v3.2', 'deepseek-v4-flash']) {
+      assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: retired in Pi 1.6.0`);
+    }
+  }
 });
