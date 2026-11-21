@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgraded the bundled Pi source runtime and extension peer packages from 1.5.2 to the official 1.6.0 release, refreshed the reviewed model catalog and dependency profile, and aligned Undici with the upstream 8.12.4 pin. The catalog adds GPT-6.2 Sol and Astra with provider-specific reasoning capabilities and context windows (`pi`, `engine/pi-lock.json`, `engine/model-data/`, `engine/pi-dependencies/`, `package.json`, `package-lock.json`, `scripts/pi-compat.test.ts`). Restart the whole application after upgrading so existing workers do not retain the previous Pi modules.
+- Pi terminal components now return readonly render output and may reuse cached arrays; custom terminal extensions must copy those arrays before modifying them. Grapher's bundled extensions and browser command bridge do not mutate this output (`docs/development/pi-integration.md`).
+- The upstream catalog retires `deepseek-v3.2` and `deepseek-v4-flash` on Qwen Token Plan Team providers. Replace saved selections of these retired IDs with `deepseek-v4-flash-0731` or `deepseek-v4.1-flash`; existing conversation history is preserved (`engine/model-data/qwen-token-plan.json`, `engine/model-data/qwen-token-plan-cn.json`, `scripts/pi-compat.test.ts`).
 
 ### Fixed
 
