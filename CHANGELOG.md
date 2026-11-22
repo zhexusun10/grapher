@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.16] - 2026-11-22
+
 ### Added
 
 - Enabled the workspace terminal in browser clients through the local HTTP backend, sharing the native PTY core with desktop. Added replayable bounded output, idle-session cleanup and navigation close; fixed lost startup/exit events, late-created sessions surviving close, final-output ordering, blocking writes when a shell stops reading, and delayed shell exit when a disowned Unix child retains a PTY descriptor.

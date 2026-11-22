@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "grapher-desktop"
-version = "1.9.15"
+version = "1.9.16"
 dependencies = [
  "cc",
  "libc",
