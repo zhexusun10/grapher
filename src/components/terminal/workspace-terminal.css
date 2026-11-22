@@ -317,6 +317,9 @@
 .workspace-terminal-xterm .xterm-viewport {
   background-color: var(--bg-canvas) !important;
   overscroll-behavior: contain;
+  /* xterm 6 owns scrolling in .xterm-scrollable-element. Its legacy empty
+     viewport must not show a second native scrollbar on Windows/WebView2. */
+  overflow: hidden;
 }
 
 .workspace-terminal-loading,

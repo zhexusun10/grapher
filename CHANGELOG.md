@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed Windows terminal viewport/history corruption across resizing by reporting the host PTY backend and enabling xterm's ConPTY compatibility behavior, including browser clients connected to Windows. Hid xterm 6's unused native viewport scrollbar while preserving its real scrollback scrollbar.
 - Smoothed workspace terminal minimize, maximize and restore transitions: retain the hidden final frame until the panel is hidden, defer xterm/PTY resizing until the animation settles, and continue interrupted transitions from their current presentation.
 - Kept the sidebar Settings icon and label centered when an update is available by positioning the blue update indicator outside the button's flex layout.
 

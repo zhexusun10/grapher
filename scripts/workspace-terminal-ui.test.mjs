@@ -84,7 +84,8 @@ after(async () => {
   await server?.close();
 });
 
-async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedMotion = "reduce", earlyExit = false, createDelay = 0, earlyCursorQuery = false } = {}) {
+async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedMotion = "reduce", earlyExit = false, createDelay = 0, earlyCursorQuery = false, ptyBackend } = {}) {
+  const hostPtyBackend = ptyBackend ?? (platform === "windows" ? "conpty" : "unix");
   const context = await browser.newContext({
     viewport: { width: 1280, height: 840 },
     locale: "en-US",
@@ -95,7 +96,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
     ? { platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", uaPlatform: "Windows", shell: "pwsh" }
     : { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", uaPlatform: "macOS", shell: "zsh" };
 
-  await context.addInitScript(({ tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery }) => {
+  await context.addInitScript(({ tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery, ptyBackend }) => {
     Object.defineProperty(navigator, "platform", { value: platformConfig.platform, configurable: true });
     Object.defineProperty(navigator, "userAgent", { value: platformConfig.userAgent, configurable: true });
     Object.defineProperty(navigator, "userAgentData", {
@@ -171,13 +172,13 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
           if (earlyCursorQuery) {
             window.__terminalTest.emit("grapher://terminal-output", { sessionId, data: btoa("\x1b[6n") });
             await new Promise(resolve => setTimeout(resolve, 50));
-            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath };
+            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath, ptyBackend };
           }
           if (earlyExit) {
             window.__terminalTest.emit("grapher://terminal-output", { sessionId, data: btoa("FAST_STARTUP_ERROR\r\n") });
             window.__terminalTest.emit("grapher://terminal-exit", { sessionId, exitCode: 1 });
             await new Promise(resolve => setTimeout(resolve, 50));
-            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath };
+            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath, ptyBackend };
           }
           // Emit a welcome prompt shortly after creation.
           setTimeout(() => {
@@ -191,6 +192,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
             sessionId,
             shell: platformConfig.shell,
             cwd: args.workspacePath,
+            ptyBackend,
           };
         }
         if (cmd === "terminal_write" || cmd === "terminal_resize" || cmd === "terminal_kill") {
@@ -200,7 +202,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
         return null;
       },
     };
-  }, { tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery });
+  }, { tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery, ptyBackend: hostPtyBackend });
 
   let currentRepo = repoA;
   const snapshotsById = { [runA1.runId]: runA1, [runA2.runId]: runA2 };
@@ -216,7 +218,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
         const sessionId = `web-pty-${webCalls.filter(c => c.command === command).length + 1}`;
         webCalls.push({ command, body, sessionId });
         webSessions.set(sessionId, { chunks: [Buffer.from(`welcome:${body.workspacePath}\r\n$ `).toString("base64")], exitCode: null, exited: false });
-        result = { sessionId, shell: "bash", cwd: body.workspacePath };
+        result = { sessionId, shell: "bash", cwd: body.workspacePath, ptyBackend: hostPtyBackend };
         break;
       }
       case "terminal_read": {
@@ -547,6 +549,54 @@ for (const platform of ["macos", "windows"]) {
     } finally {
       await context.close();
     }
+  });
+}
+
+for (const tauriMode of [true, false]) {
+  test(`${tauriMode ? 'Windows desktop' : 'macOS browser with a Windows host'} retains ConPTY history across viewport repaint`, async () => {
+    const { context, page, webCalls, webSessions, pageErrors } = await setupDesktopPage({
+      platform: tauriMode ? 'windows' : 'macos', tauriMode, ptyBackend: 'conpty',
+    });
+    try {
+      await page.locator('[data-testid="composer-terminal-toggle"]').click();
+      await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('welcome:'));
+      await page.locator('.workspace-terminal-xterm').click();
+      await page.keyboard.press('Shift+PageUp');
+      assert.match(await page.locator('.xterm-rows > div').first().textContent(), /welcome:/,
+        'a fresh terminal must not have blank rows above the startup prompt');
+      const lastRows = async () => tauriMode
+        ? page.evaluate(() => window.__terminalTest.calls.filter(c => c.cmd === 'terminal_resize').at(-1)?.args.rows)
+        : webCalls.filter(c => c.command === 'terminal_resize').at(-1)?.body.rows;
+      const emit = async text => {
+        const data = Buffer.from(text).toString('base64');
+        if (tauriMode) await page.evaluate(data => window.__terminalTest.emit('grapher://terminal-output', { sessionId: 'pty-1', data }), data);
+        else webSessions.get('web-pty-1').chunks.push(data);
+      };
+      const maximize = page.locator('[data-terminal-action="maximize"]');
+      await maximize.click();
+      await page.waitForTimeout(100);
+      const bigRows = await lastRows();
+      assert.ok(bigRows > 20);
+      const lines = Array.from({ length: bigRows }, (_,i) => `WINDOWS_HISTORY_${i}`);
+      await emit('\x1b[2J\x1b[H' + lines.join('\r\n'));
+      await page.waitForFunction(last => document.querySelector('.xterm-rows')?.textContent.includes(last), lines.at(-1));
+      await maximize.click();
+      await page.waitForTimeout(100);
+      const smallRows = await lastRows();
+      assert.ok(smallRows < bigRows);
+      await maximize.click();
+      await page.waitForTimeout(100);
+      // ConPTY keeps rows already sent to scrollback there and redraws its
+      // smaller viewport at the top, leaving new rows below it empty.
+      const visible = lines.slice(-smallRows);
+      await emit('\x1b[H' + visible.join('\r\n') + '\x1b[J');
+      await page.waitForFunction(first => document.querySelector('.xterm-rows > div')?.textContent.trim() === first, visible[0], { timeout: 3000 });
+      await page.locator('.workspace-terminal-xterm').click();
+      await page.keyboard.press('Shift+PageUp');
+      await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('WINDOWS_HISTORY_0'), undefined, { timeout: 3000 });
+      await page.locator('[data-terminal-action="close"]').click();
+      assert.deepEqual(pageErrors, []);
+    } finally { await context.close(); }
   });
 }
 

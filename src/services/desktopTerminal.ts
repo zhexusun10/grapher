@@ -8,6 +8,7 @@ export interface TerminalSessionInfo {
   sessionId: string;
   shell: string;
   cwd: string;
+  ptyBackend?: "conpty" | "unix";
 }
 
 export interface TerminalOutputEvent {
@@ -86,6 +87,7 @@ export async function createDesktopTerminal(
     sessionId: raw.sessionId,
     shell: typeof raw.shell === "string" && raw.shell ? raw.shell : "shell",
     cwd: typeof raw.cwd === "string" && raw.cwd ? raw.cwd : workspacePath,
+    ptyBackend: raw.ptyBackend === "conpty" || raw.ptyBackend === "unix" ? raw.ptyBackend : undefined,
   };
 }
 

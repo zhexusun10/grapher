@@ -1,10 +1,12 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { isWindowsTauriDesktop } from "../../services/apiBase";
 import "@xterm/xterm/css/xterm.css";
 
 interface XtermSurfaceProps {
   instanceId: number;
+  ptyBackend?: "conpty" | "unix";
   visible: boolean;
   animating: boolean;
   focusNonce: number;
@@ -40,6 +42,7 @@ const LIGHT_TERMINAL_THEME = {
 
 export const XtermSurface: React.FC<XtermSurfaceProps> = ({
   instanceId,
+  ptyBackend,
   visible,
   animating,
   focusNonce,
@@ -60,6 +63,12 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
   const onResizeRef = useRef(onResize);
   onResizeRef.current = onResize;
   const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Use the server's PTY, not the browser's OS. The native fallback also
+  // configures startup output before terminal_create returns (older hosts
+  // may omit ptyBackend).
+  const conpty = ptyBackend === "conpty" || (ptyBackend === undefined && isWindowsTauriDesktop());
+  const conptyRef = useRef(conpty);
+  conptyRef.current = conpty;
 
   const fitAndNotify = useRef(() => {
     const host = hostRef.current;
@@ -97,6 +106,7 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
       scrollback: 5000,
       allowProposedApi: false,
       macOptionIsMeta: false,
+      windowsPty: conptyRef.current ? { backend: "conpty" } : {},
       theme: LIGHT_TERMINAL_THEME,
     });
     const fitAddon = new FitAddon();
@@ -168,6 +178,14 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
       lastSizeRef.current = null;
     };
   }, [instanceId, attachOutputListener]);
+
+  useLayoutEffect(() => {
+    if (terminalRef.current) {
+      // ConPTY repaints its own viewport on resize; pulling old scrollback
+      // into that viewport first produces blank/duplicated rows and lost text.
+      terminalRef.current.options.windowsPty = conpty ? { backend: "conpty" } : {};
+    }
+  }, [conpty]);
 
   useEffect(() => {
     if (!visible || animating) return;

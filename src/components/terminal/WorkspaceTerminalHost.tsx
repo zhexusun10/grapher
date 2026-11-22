@@ -401,6 +401,7 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
               <LazyXtermSurface
                 key={entry.instanceId}
                 instanceId={entry.instanceId}
+                ptyBackend={entry.ptyBackend}
                 visible={isInteractive}
                 animating={animating}
                 focusNonce={focusNonce}

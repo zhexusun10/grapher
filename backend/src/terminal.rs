@@ -36,6 +36,7 @@ pub struct TerminalSessionInfo {
     pub session_id: String,
     pub shell: String,
     pub cwd: String,
+    pub pty_backend: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -428,6 +429,7 @@ impl TerminalManager {
             session_id,
             shell: shell_label,
             cwd: cwd.to_string_lossy().to_string(),
+            pty_backend: if cfg!(windows) { "conpty" } else { "unix" },
         })
     }
 
