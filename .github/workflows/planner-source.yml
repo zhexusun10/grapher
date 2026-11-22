@@ -329,3 +329,17 @@ jobs:
           path: ${{ runner.temp }}/macos-browser.log
           if-no-files-found: ignore
           retention-days: 7
+
+  windows-upgrade-cleanup:
+    name: Windows upgrade cleanup
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
+      # No Rust/Pi/npm setup: exercise real process-image scoping early, even
+      # when a longer native suite fails before reaching desktop packaging.
+      - name: Verify upgrade cleanup preserves other installations and CLI sessions
+        run: node --test scripts/windows-upgrade-cleanup.test.mjs

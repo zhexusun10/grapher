@@ -189,7 +189,7 @@ export const suites = {
   desktop: {
     description: 'Tauri v2 desktop shell tests, legacy migration, sidecar lifecycle, signing, and packaging contracts.',
     steps: [
-      nodeTests('desktop-packaging.test.mjs', 'desktop-updater-manifest.test.mjs', 'desktop-signing.test.mjs'),
+      nodeTests('desktop-packaging.test.mjs', 'windows-upgrade-cleanup.test.mjs', 'desktop-updater-manifest.test.mjs', 'desktop-signing.test.mjs'),
       desktopCargo('test'),
     ],
   },
