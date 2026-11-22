@@ -1552,6 +1552,7 @@ h3 {
 }
 
 .sidebar-bottom-btn {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1601,24 +1602,21 @@ h3 {
 }
 
 .sidebar-update-dot {
-  display: inline-block;
+  /* A trailing status marker must not move the centered icon/label group. */
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
   width: 7px;
   height: 7px;
   border-radius: 999px;
   background: var(--brand-default);
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
-.sidebar.is-collapsed .sidebar-bottom-btn {
-  position: relative;
 }
 
 .sidebar.is-collapsed .sidebar-update-dot {
-  position: absolute;
   top: 7px;
   right: 7px;
-  margin-left: 0;
+  transform: none;
 }
 
 .sidebar-bottom>p {

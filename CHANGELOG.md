@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Smoothed workspace terminal minimize, maximize and restore transitions: retain the hidden final frame until the panel is hidden, defer xterm/PTY resizing until the animation settles, and continue interrupted transitions from their current presentation.
+- Kept the sidebar Settings icon and label centered when an update is available by positioning the blue update indicator outside the button's flex layout.
+
 ## [1.9.16] - 2026-11-22
 
 ### Added

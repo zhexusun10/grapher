@@ -550,6 +550,80 @@ for (const platform of ["macos", "windows"]) {
   });
 }
 
+test("terminal transitions keep the screen stable and fit the PTY only after settling", async () => {
+  const { context, page, pageErrors } = await setupDesktopPage({ reducedMotion: "no-preference" });
+  try {
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('welcome:'));
+    await page.waitForTimeout(360);
+
+    const sample = (action) => page.evaluate(async (action) => {
+      const card = document.querySelector('[data-testid="workspace-terminal-card"]');
+      const surface = card.querySelector('.xterm');
+      const calls = window.__terminalTest.calls;
+      const before = calls.filter(c => c.cmd === 'terminal_resize').length;
+      const frames = [];
+      card.querySelector(`[data-terminal-action="${action}"]`).click();
+      await new Promise(resolve => {
+        const start = performance.now();
+        const frame = () => {
+          frames.push({ height: card.getBoundingClientRect().height, screen: surface.querySelector('.xterm-screen').getBoundingClientRect().height });
+          if (performance.now() - start < 400) requestAnimationFrame(frame);
+          else resolve();
+        };
+        requestAnimationFrame(frame);
+      });
+      return { frames, resizes: calls.filter(c => c.cmd === 'terminal_resize').length - before,
+        sameSurface: card.querySelector('.xterm') === surface, text: surface.textContent };
+    }, action);
+
+    for (const direction of [1, -1]) {
+      const result = await sample('maximize');
+      assert.ok(result.resizes >= 1, 'the PTY must receive the settled grid size');
+      assert.ok(result.resizes <= 2, `mode change must not resize/reflow the PTY every frame (${result.resizes} resizes)`);
+      assert.ok(new Set(result.frames.map(frame => frame.screen)).size <= 2, 'the screen grid stays fixed until the card settles');
+      assert.ok(result.sameSurface, 'mode changes preserve the terminal surface');
+      assert.match(result.text, /welcome:/);
+      assert.ok(result.frames.some((frame, i, frames) => i && Math.abs(frame.height - frames[i - 1].height) > 1), 'mode changes animate through intermediate sizes');
+      for (let i = 1; i < result.frames.length; i++) {
+        assert.ok(direction * (result.frames[i].height - result.frames[i - 1].height) >= -1,
+          'the card must move continuously toward its target without a last-frame jump');
+      }
+    }
+    const minimized = await sample('minimize');
+    for (let i = 1; i < minimized.frames.length; i++) {
+      assert.ok(minimized.frames[i].height <= minimized.frames[i - 1].height + 1,
+        'minimize must not flash back to its expanded height at completion');
+    }
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('[data-terminal-action="maximize"]').click();
+    await page.waitForTimeout(300);
+    // Reverse the fade before it finishes. A normal Playwright click would
+    // wait for layout stability and miss this interrupted transition.
+    const reversed = await page.evaluate(async () => {
+      const card = document.querySelector('[data-testid="workspace-terminal-card"]');
+      const toggle = document.querySelector('[data-testid="composer-terminal-toggle"]');
+      card.querySelector('[data-terminal-action="minimize"]').click();
+      await new Promise(resolve => setTimeout(resolve, 70));
+      const before = card.getBoundingClientRect().height;
+      toggle.click();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const animations = card.getAnimations();
+      for (const animation of animations) { animation.pause(); animation.currentTime = 0; }
+      const after = card.getBoundingClientRect().height;
+      for (const animation of animations) animation.play();
+      return { before, after };
+    });
+    assert.ok(Math.abs(reversed.before - reversed.after) <= 1,
+      'restoring during a maximized minimize must continue from the visible window');
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('[data-testid="workspace-terminal-dock"]').getAttribute('data-terminal-mode'), 'open');
+    assert.equal((await page.evaluate(() => window.__terminalTest.calls)).filter(c => c.cmd === 'terminal_create').length, 1);
+    assert.deepEqual(pageErrors, []);
+  } finally { await context.close(); }
+});
+
 test("desktop terminal animates open, maximize, restore, minimize, and close with macOS traffic-light glyphs", async () => {
   const { context, page, pageErrors } = await setupDesktopPage({
     platform: "macos",

@@ -5,11 +5,11 @@
 /* When a docked terminal is open, keep a crisp 10px splitter gap below the
    workbench and bring the landing composer right above the terminal card. */
 .main .workbench {
-  transition: margin-bottom 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: margin-bottom 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .main .landing-screen {
-  transition: padding-bottom 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: padding-bottom 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .main.has-docked-terminal .workbench {
