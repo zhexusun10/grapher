@@ -5,6 +5,8 @@
 //! explicit close or application exit.
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -62,7 +64,8 @@ struct TerminalSession {
     writer: Mutex<Option<SyncSender<Vec<u8>>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     child_pid: Option<u32>,
-    killed: AtomicBool,
+    killed: Arc<AtomicBool>,
+    child_exited: Arc<AtomicBool>,
 }
 
 impl TerminalSession {
@@ -177,6 +180,44 @@ impl TerminalManager {
             .openpty(size)
             .map_err(|error| format!("Failed to open PTY: {error}"))?;
 
+        #[cfg(unix)]
+        let poll_fd = {
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or("PTY has no pollable descriptor")?;
+            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+            if duplicate < 0 {
+                return Err(format!(
+                    "Failed to clone PTY poll descriptor: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
+            // The cloned master descriptors share status flags. Nonblocking
+            // I/O lets the writer abandon backpressure when the shell exits,
+            // even if a disowned descendant retains an unused slave handle.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(format!(
+                    "Failed to configure PTY I/O: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            duplicate
+        };
+        // Acquire all fallible I/O handles before spawning, so descriptor
+        // exhaustion cannot leave an unregistered shell running.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| format!("Failed to clone PTY reader: {error}"))?;
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| format!("Failed to acquire PTY writer: {error}"))?;
+
         let mut cmd = CommandBuilder::new(&shell_program);
         for arg in &shell_args {
             cmd.arg(arg);
@@ -200,27 +241,38 @@ impl TerminalManager {
 
         let child_pid = child.process_id();
         let killer = child.clone_killer();
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| format!("Failed to clone PTY reader: {error}"))?;
-        let mut writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| format!("Failed to acquire PTY writer: {error}"))?;
         // PTY writes can block indefinitely when a child stops reading. Never
         // block the HTTP worker or the desktop UI thread on that backpressure.
         let (input_tx, input_rx) = sync_channel::<Vec<u8>>(8);
+        let killed = Arc::new(AtomicBool::new(false));
+        let child_exited = Arc::new(AtomicBool::new(false));
+        let writer_killed = Arc::clone(&killed);
+        let writer_exited = Arc::clone(&child_exited);
         if let Err(error) = std::thread::Builder::new()
             .name("grapher-pty-write".into())
             .spawn(move || {
                 while let Ok(bytes) = input_rx.recv() {
-                    if writer
-                        .write_all(&bytes)
-                        .and_then(|()| writer.flush())
-                        .is_err()
-                    {
-                        break;
+                    let mut offset = 0;
+                    while offset < bytes.len() {
+                        if writer_killed.load(Ordering::Acquire)
+                            || writer_exited.load(Ordering::Acquire)
+                        {
+                            return;
+                        }
+                        match writer.write(&bytes[offset..]) {
+                            Ok(0) => return,
+                            Ok(n) => offset += n,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                    if writer.flush().is_err() {
+                        return;
                     }
                 }
             })
@@ -236,7 +288,8 @@ impl TerminalManager {
             writer: Mutex::new(Some(input_tx)),
             killer: Mutex::new(killer),
             child_pid,
-            killed: AtomicBool::new(false),
+            killed,
+            child_exited,
         });
 
         {
@@ -255,7 +308,35 @@ impl TerminalManager {
             .name(format!("grapher-pty-read-{}", &session_id[..8]))
             .spawn(move || {
                 let mut buf = [0u8; READ_CHUNK_BYTES];
+                #[cfg(unix)]
+                let mut after_exit_bytes = 0usize;
                 loop {
+                    if session_ref.killed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    #[cfg(unix)]
+                    {
+                        let mut descriptor = libc::pollfd {
+                            fd: poll_fd.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
+                        if ready < 0 {
+                            if std::io::Error::last_os_error().kind()
+                                == std::io::ErrorKind::Interrupted
+                            {
+                                continue;
+                            }
+                            break;
+                        }
+                        if ready == 0 {
+                            if session_ref.child_exited.load(Ordering::Acquire) {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
@@ -266,9 +347,21 @@ impl TerminalManager {
                                 session_id: output_session_id.clone(),
                                 data: encode_base64_std(&buf[..n]),
                             });
+                            #[cfg(unix)]
+                            if session_ref.child_exited.load(Ordering::Acquire) {
+                                // Drain the shell's buffered tail, but do not
+                                // follow a disowned descendant's output forever.
+                                after_exit_bytes += n;
+                                if after_exit_bytes >= 256 * 1024 {
+                                    break;
+                                }
+                            }
                         }
                         Err(error) => {
-                            if error.kind() == std::io::ErrorKind::Interrupted {
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                            ) {
                                 continue;
                             }
                             break;
@@ -295,16 +388,25 @@ impl TerminalManager {
                     Ok(status) => Some(status.exit_code() as i32),
                     Err(_) => None,
                 };
+                wait_session_ref.child_exited.store(true, Ordering::Release);
                 if let Ok(mut writer) = wait_session_ref.writer.lock() {
                     writer.take();
                 }
-                if let Ok(mut master) = wait_session_ref.master.lock() {
-                    master.take();
+                #[cfg(not(unix))]
+                {
+                    // Closing ConPTY is required to release its output pipe.
+                    if let Ok(mut master) = wait_session_ref.master.lock() {
+                        master.take();
+                    }
                 }
                 // The last output and process exit are produced by different
                 // threads. Drain the PTY before publishing exit so clients can
                 // safely retire their session-to-view mapping on that event.
                 let _ = reader_thread.join();
+                #[cfg(unix)]
+                if let Ok(mut master) = wait_session_ref.master.lock() {
+                    master.take();
+                }
                 if let Ok(mut map) = sessions_ref.lock() {
                     map.remove(&wait_session_id);
                 }
@@ -714,6 +816,63 @@ mod tests {
             .flat_map(|e| decode_base64_for_test(&e.data))
             .collect();
         assert!(String::from_utf8_lossy(&output).contains("GRAPHER_FINAL_OUTPUT"));
+        assert_eq!(manager.active_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exit_does_not_wait_for_a_disowned_child_to_close_stdin() {
+        let (_, _, shell) = resolve_default_shell();
+        if !matches!(shell.as_str(), "bash" | "zsh") {
+            return;
+        }
+        struct BackgroundChild(i32);
+        impl Drop for BackgroundChild {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let manager = TerminalManager::new();
+        let sink = Arc::new(TestSink::default());
+        let info = manager
+            .create_session(
+                Arc::clone(&sink),
+                &temp.path().to_string_lossy(),
+                None,
+                None,
+            )
+            .unwrap();
+        manager
+            .write_session(
+                &info.session_id,
+                "sleep 30 >/dev/null 2>&1 & echo $! > bg.pid; disown; exit\r",
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(temp.path().join("bg.pid")) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background fixture did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let _background = BackgroundChild(pid);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while sink.exits.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "shell exit was blocked by an inherited PTY descriptor"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(manager.active_count(), 0);
     }
 
