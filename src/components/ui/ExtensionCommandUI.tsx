@@ -15,6 +15,7 @@ export function ExtensionCommandUI({ request, respond }: {
   const panel = useRef<HTMLElement>(null);
   const titleId = useId();
   const searchable = request.method === 'select' && (request.options?.length ?? 0) > 8;
+  const secretInput = request.method === 'input' && /\b(?:api\s*key|secret|password|token)\b/i.test(request.title ?? '');
   const options = (request.options ?? []).filter(option => option.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
   const send = async (response: Record<string, unknown>) => {
     if (busyRef.current) return;
@@ -53,8 +54,10 @@ export function ExtensionCommandUI({ request, respond }: {
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
           : event.key === 'ArrowDown' ? (current + 1) % choices.length : (current <= 0 ? choices.length : current) - 1;
         event.preventDefault(); event.stopPropagation(); choices[next]?.focus();
-      } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement && options[0]) {
+      } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement && request.method === 'select' && options[0]) {
         event.preventDefault(); event.stopPropagation(); void send({ value: options[0] });
+      } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement && secretInput) {
+        event.preventDefault(); event.stopPropagation(); void send({ value });
       } else if (event.key === 'Enter' && event.target instanceof HTMLTextAreaElement &&
           (request.method === 'editor' ? event.ctrlKey || event.metaKey : !event.shiftKey)) {
         event.preventDefault(); event.stopPropagation(); void send({ value });
@@ -73,6 +76,11 @@ export function ExtensionCommandUI({ request, respond }: {
     </> : request.method === "confirm" ? <>
       <button type="button" disabled={busy} onClick={() => void send({ confirmed: true })}>{t("确认")}</button>
       <button type="button" disabled={busy} onClick={() => void send({ confirmed: false })}>{t("否")}</button>
+    </> : secretInput ? <>
+      <input type="password" autoComplete="off" spellCheck={false}
+        aria-label={request.title || "Pi extension input"} placeholder={request.placeholder}
+        value={value} disabled={busy} onChange={event => setValue(event.target.value)} />
+      <button type="button" disabled={busy} onClick={() => void send({ value })}>{t("提交")}</button>
     </> : <>
       <textarea aria-label={request.title || "Pi extension input"} placeholder={request.placeholder}
         value={value} disabled={busy} onChange={event => setValue(event.target.value)} />

@@ -154,9 +154,23 @@ export async function loadBundledWebSearch() {
   ]);
   const credentialPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/credentials.ts', import.meta.url));
   const preferencesPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/preferences.ts', import.meta.url));
+  const secretInputPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/secret-input.ts', import.meta.url));
   const loader = createJiti(import.meta.url, { moduleCache: false, virtualModules: VIRTUAL_MODULES, tsconfigPaths: true });
   const credentials = withInheritedSearchCredentials(await loader.import(credentialPath));
   const preferences = withGrapherSearchPreferences(await loader.import(preferencesPath), credentials, getAgentDir);
+  const originalSecretInput = await loader.import<Record<string, any>>(secretInputPath);
+  const secretInput = {
+    ...originalSecretInput,
+    promptApiKey: async (ctx: any, provider: string) => {
+      if (ctx?.__grapherRpcLogin || ctx?.mode === 'rpc') {
+        return ctx.ui.input(
+          `${provider} API key`,
+          'Hidden input. Saved locally with restricted permissions, not encrypted.',
+        );
+      }
+      return originalSecretInput.promptApiKey(ctx, provider);
+    },
+  };
   // This relative module belongs only to this package-local loader. Other
   // user extensions keep their own imports and credential implementations.
   const jiti = createJiti(import.meta.url, { moduleCache: false,
@@ -165,9 +179,46 @@ export async function loadBundledWebSearch() {
       './credentials.ts': credentials,
       './preferences.ts': preferences,
       '../preferences.ts': preferences,
+      './secret-input.ts': secretInput,
     }, tsconfigPaths: true });
-  return jiti.import<import('../pi/packages/coding-agent/src/index.ts').ExtensionFactory>(
+  const factory = await jiti.import<import('../pi/packages/coding-agent/src/index.ts').ExtensionFactory>(
     fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url)), { default: true });
+  // Allow /pi-better-web-search login|logout|status inside Grapher's trusted
+  // local RPC UI by bridging the TUI-only guard to the masked UI input prompt.
+  return (pi: any) => {
+    const wrappedPi = new Proxy(pi, {
+      get(target, prop) {
+        if (prop === 'registerCommand') {
+          return (name: string, options: any) => {
+            if (name === 'pi-better-web-search' && typeof options?.handler === 'function') {
+              const originalHandler = options.handler;
+              return target.registerCommand(name, {
+                ...options,
+                handler: (args: string, ctx: any) => {
+                  if (ctx?.hasUI && ctx.mode === 'rpc') {
+                    const rpcLoginCtx = new Proxy(ctx, {
+                      get(cTarget, cProp) {
+                        if (cProp === 'mode') return 'tui';
+                        if (cProp === '__grapherRpcLogin') return true;
+                        const val = Reflect.get(cTarget, cProp, cTarget);
+                        return typeof val === 'function' ? val.bind(cTarget) : val;
+                      },
+                    });
+                    return originalHandler(args, rpcLoginCtx);
+                  }
+                  return originalHandler(args, ctx);
+                },
+              });
+            }
+            return target.registerCommand(name, options);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return factory(wrappedPi);
+  };
 }
 export type { InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
 // RPC does not dispatch interactive-mode builtins. Delegate command actions

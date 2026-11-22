@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Upgraded bundled `pi-better-web-search` from 1.0.4 to 1.0.5 and added Parallel to Grapher's credential/settings validation, dedicated API detection and Keenable public-endpoint status. An available Parallel key switches `web_search` to `objective` / `search_queries` / `urls` and locks routing to Parallel without cross-provider fallback; `/web-search-api parallel` disables it and restores the usual schema and routing. Tool cards and collapsed activity summaries now display Parallel objectives alongside legacy search queries.
+- Upgraded bundled `pi-better-web-search` from 1.0.4 to 1.0.6 and added Parallel to Grapher's credential/settings validation, dedicated API detection and Keenable public-endpoint status. An available Parallel key switches `web_search` to `objective` / `search_queries` / `urls` and locks routing to Parallel without cross-provider fallback; `/web-search-api parallel` disables it and restores the usual schema and routing. Tool cards and collapsed activity summaries now display Parallel objectives alongside legacy search queries. Successful `web_search` responses also include a top-level UTC `current_time` timestamp (`YYYY-MM-DDTHH:MM:SSZ`) that is preserved with priority under JSON truncation.
 
 ### Fixed
 
+- Bridged `/pi-better-web-search login`, `logout`, and `status` into Grapher's RPC UI using a masked password input in `ExtensionCommandUI` instead of failing with the terminal-only TUI guard, and fixed clipped focus outlines on extension command option buttons by adding option spacing and tightening `:focus-visible` outline offset and stacking (`engine/pi-compat.ts`, `src/components/ui/ExtensionCommandUI.tsx`, `src/components/ui/composer-commands.css`, `scripts/extension-commands.test.ts`).
 - Remember the last selected sidebar workspace across reloads and restarts, independently of list order or Git detection. Removed or archived workspaces fall back to the most recently opened active workspace.
 - Removed Git discovery from workspace navigation: restoring and switching use saved paths immediately, while first-launch discovery and folder selection perform filesystem-only validation.
 

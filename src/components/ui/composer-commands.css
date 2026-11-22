@@ -31,7 +31,7 @@
 .prompt-command-popover > button { flex-shrink: 0; }
 .prompt-command-popover a { color: inherit; text-decoration: underline; }
 .prompt-command-ui button, .prompt-command-notice button {
-  padding: 5px 10px; margin: 4px 4px 0 0; border-radius: 6px;
+  padding: 5px 10px; margin: 6px 6px 0 0; border-radius: 6px;
   border: 1px solid var(--border-subtle, #e2e8f0); background: var(--bg-canvas); color: inherit; cursor: pointer;
 }
 .prompt-command-notice .prompt-command-notice-close {
@@ -45,7 +45,33 @@
   color: var(--text-primary, #0f172a);
   filter: none;
 }
-.prompt-command-ui button:focus-visible { outline: 2px solid var(--text-primary); }
-.prompt-command-ui textarea, .prompt-command-ui input { width: 100%; margin-top: 8px; padding: 6px; }
+.prompt-command-ui button:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 1px;
+  position: relative;
+  z-index: 1;
+}
+.prompt-command-ui textarea, .prompt-command-ui input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle, #e2e8f0);
+  border-radius: 6px;
+  background: var(--bg-canvas);
+  color: inherit;
+}
+.prompt-command-ui textarea:focus-visible, .prompt-command-ui input:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 0;
+}
 .prompt-command-ui textarea { min-height: 64px; }
-.prompt-command-options { display: flex; flex-wrap: wrap; }
+.prompt-command-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.prompt-command-options button {
+  margin: 0;
+}

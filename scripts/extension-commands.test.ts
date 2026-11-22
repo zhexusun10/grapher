@@ -124,3 +124,28 @@ test('unknown commands and commands requiring history never become model prompts
   assert.ok(result.events.some((event: any) => /active conversation|extension operation failed/.test(event.message ?? '')));
   assert.equal(existsSync(join(paths.own, 'sessions')), false);
 }));
+
+test('bundled pi-better-web-search login, status, and api menu work over Grapher RPC UI', { timeout: 30_000 }, () => fixture(async (host, paths) => {
+  const statusStart = await start(host, '', '/pi-better-web-search status');
+  const statusResult = await poll(host, statusStart, state => state.status === 'complete');
+  const statusMsg = statusResult.events.map((event: any) => event.message ?? '').join('\n');
+  assert.match(statusMsg, /Parallel: no saved key/);
+  assert.doesNotMatch(statusMsg, /local interactive pi terminal/i);
+
+  const loginStart = await start(host, '', '/pi-better-web-search login');
+  const providerSelect = dialog(await poll(host, loginStart, state => !!dialog(state, 'select')), 'select');
+  assert.ok(providerSelect.options.includes('Parallel'), JSON.stringify(providerSelect.options));
+  await respond(host, loginStart, providerSelect, { value: 'Parallel' });
+  const keyInput = dialog(await poll(host, loginStart, state => !!dialog(state, 'input')), 'input');
+  assert.match(keyInput.title ?? '', /Parallel API key/);
+  await respond(host, loginStart, keyInput, { value: 'parallel-test-key-123' });
+  const loginResult = await poll(host, loginStart, state => state.status === 'complete');
+  assert.ok(loginResult.events.some((event: any) => /Parallel: API key saved locally/.test(event.message ?? '')));
+
+  const apiStart = await start(host, '', '/web-search-api');
+  const apiSelect = dialog(await poll(host, apiStart, state => !!dialog(state, 'select')), 'select');
+  assert.ok(apiSelect.options.some((option: string) => /Parallel Search — ready; saved key present/.test(option)), JSON.stringify(apiSelect.options));
+  await respond(host, apiStart, apiSelect, { cancelled: true });
+  await poll(host, apiStart, state => state.status === 'complete');
+  assert.equal(existsSync(join(paths.own, 'sessions')), false);
+}));
