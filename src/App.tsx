@@ -170,7 +170,9 @@ export default function App() {
     const list = readStorageJson(STORAGE_KEYS.projects);
     if (Array.isArray(list) && list.length > 0) {
       const sorted = [...list].filter((p) => !p.archived).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-      initialConfig.repository = sorted[0]?.path ? normalizeWorkspacePath(sorted[0].path) : "";
+      const lastWorkspace = workspaceKey(readStorageString(STORAGE_KEYS.lastWorkspace) ?? "");
+      const project = sorted.find(p => workspaceKey(p.path) === lastWorkspace) ?? sorted[0];
+      initialConfig.repository = project ? normalizeWorkspacePath(project.path) : "";
     }
     return {
       ...initialConfig,
@@ -265,6 +267,13 @@ export default function App() {
   });
   const [isSidebarReady, setIsSidebarReady] = useState(false);
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
+  useEffect(() => {
+    // Selection is a local navigation preference, not a Git metadata update.
+    // Wait for bootstrap so a provisional startup view cannot overwrite it.
+    if (isBootstrapReady) {
+      writeStorageString(STORAGE_KEYS.lastWorkspace, normalizeWorkspacePath(config.repository));
+    }
+  }, [config.repository, isBootstrapReady]);
   // Settings can be ready before compatibility indexing and foreground restore.
   // Directory discovery must not race either into choosing the startup view.
   const [isInitialViewReady, setIsInitialViewReady] = useState(false);
@@ -1147,7 +1156,9 @@ export default function App() {
 
     if (storedProjects !== null && storedProjects.length > 0) {
       const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-      const latestProj = sorted.find((p) => !p.archived);
+      const lastWorkspace = workspaceKey(readStorageString(STORAGE_KEYS.lastWorkspace) ?? "");
+      const latestProj = sorted.find(p => !p.archived && workspaceKey(p.path) === lastWorkspace)
+        ?? sorted.find(p => !p.archived);
       if (latestProj) {
         activeRepo = latestProj.path;
 

@@ -122,6 +122,69 @@ function planningPage(body, planningId) {
 const recoveryBootstrap = snapshot => ({ ...bootstrap, snapshot: empty, runs: [snapshot.runId],
   conversations: [{ runId: snapshot.runId, repository, title: snapshot.graph.originalGoal, phase: snapshot.phase, hasActiveExecutions: false }] });
 
+test("workspace selection survives reload independently of card order and repository detection", { timeout: 30_000 }, async () => {
+  const second = "C:\\Projects\\Second";
+  const projects = [
+    { ...info, id: repository, lastOpened: 2 },
+    { id: second, path: second, name: "Second", lastOpened: 1 },
+    { id: "/archived", path: "/archived", name: "Archived", archived: true, lastOpened: 3 },
+  ];
+  const response = { ...bootstrap, runs: ["fast", "second-run"], conversations: [summary(fast),
+    { runId: "second-run", repository: second, title: "Second conversation", phase: "completed", hasActiveExecutions: false }] };
+  let holdBootstrap = false, pendingBootstrap;
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command === "save_config") {
+      await route.fulfill({ json: { result: response } });
+      return true;
+    }
+    if (command === "bootstrap") {
+      if (holdBootstrap) pendingBootstrap = route;
+      else await route.fulfill({ json: { result: response } });
+      return true;
+    }
+    if (command === "detect_repository") {
+      // Navigation is remembered even when Git detection supplies no metadata.
+      await route.fulfill({ json: { result: null } });
+      return true;
+    }
+  }, projects);
+  const active = page.locator('.project-workspace-item[aria-current="true"]');
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    assert.equal(await active.getAttribute("aria-label"), `${info.name}\n${repository}`);
+    await page.getByRole("button", { name: `Second\n${second}`, exact: true }).click();
+    await page.waitForFunction(second => localStorage.getItem("grapher_last_workspace") === second, second);
+    assert.deepEqual(await page.locator(".project-workspace-item strong").allTextContents(), [info.name, "Second"]);
+
+    // Windows aliases use the same workspace identity. Keep bootstrap pending
+    // to check the first paint separately from the authoritative restore.
+    await page.evaluate(() => localStorage.setItem("grapher_last_workspace", "\\\\?\\c:\\projects\\second\\"));
+    holdBootstrap = true;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await until(() => !!pendingBootstrap);
+    assert.equal(await active.getAttribute("aria-label"), `Second\n${second}`);
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_last_workspace")), "\\\\?\\c:\\projects\\second\\");
+    holdBootstrap = false;
+    await pendingBootstrap.fulfill({ json: { result: response } });
+    await page.locator('[data-run-id="second-run"]').waitFor();
+    assert.equal(await active.getAttribute("aria-label"), `Second\n${second}`);
+    assert.equal(await page.locator('[data-run-id="fast"]').count(), 0);
+
+    // Missing, archived and pre-feature preferences all retain the old fallback.
+    for (const lastWorkspace of ["/removed", "/archived", null]) {
+      await page.evaluate(value => {
+        if (value === null) localStorage.removeItem("grapher_last_workspace");
+        else localStorage.setItem("grapher_last_workspace", value);
+      }, lastWorkspace);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.locator('[data-run-id="fast"]').waitFor();
+      assert.equal(await active.getAttribute("aria-label"), `${info.name}\n${repository}`);
+      await page.waitForFunction(repository => localStorage.getItem("grapher_last_workspace") === repository, repository);
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("startup waits for bootstrap and rejects stale running summaries without leaving home", { timeout: 30_000 }, async () => {
   const settled = recoveryGraph("failed");
   const { planType: _route, ...stale } = { ...settled.planning, status: "running" };

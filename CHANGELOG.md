@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Remember the last selected sidebar workspace across reloads and restarts, independently of list order or Git detection. Removed or archived workspaces fall back to the most recently opened active workspace.
+
 ## [1.9.14] - 2026-11-22
 
 ### Added
