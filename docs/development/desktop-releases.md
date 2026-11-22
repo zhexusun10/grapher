@@ -45,6 +45,12 @@ Before building locally, install prerequisites for your host OS (Node.js 22.19+,
   2. `build-desktop` — runs on separate native runners (`macos-26` for Apple Silicon `macos-arm64`, `macos-26-intel` for Intel `macos-x64`, and `windows-latest` for `windows-x64`) so macOS builds link against the macOS 26+ SDK while preserving `minimumSystemVersion: "12.0"`. Each job runs [`scripts/desktop-build.mjs`](../../scripts/desktop-build.mjs), which stages the frontend `dist/`, release Rust `grapher` binary, verified pinned Pi/engine runtime, and pinned Node.js `22.19.0` binary (SHA-256 verified) via [`scripts/desktop-stage.mjs`](../../scripts/desktop-stage.mjs), builds the native installer, and optionally signs Tauri updater artifacts.
   3. `create-release` — waits for both `build-release` and `build-desktop`, downloads all artifacts into `release-assets/`, runs [`scripts/desktop-updater-manifest.mjs`](../../scripts/desktop-updater-manifest.mjs) to build and verify `latest.json` when signed updater artifacts are present, consolidates all asset checksums into a single `SHA256SUMS.txt` while pruning per-file `.sha256` and standalone `.sig` files (whose signatures are already embedded in `latest.json`), and creates or refreshes a **draft** GitHub Release.
 
+## Windows in-place upgrade cleanup
+
+The NSIS preinstall hook stops only a backend whose full executable path is exactly `<install directory>/runtime/grapher.exe`. It holds a process handle while checking the image through local CIM, which also works when 32-bit Windows PowerShell inspects a 64-bit backend. Independent CLI binaries, the GUI executable and other installation directories remain untouched. The install path is passed as a literal `-File` argument, including spaces, apostrophes and non-ASCII characters.
+
+A failed process query/termination or a still-locked bundled directory aborts the upgrade instead of falling back to a process-name kill or extracting over stale runtime files. The focused **Windows upgrade cleanup** CI job runs [policy and live-process regressions](../../scripts/windows-upgrade-cleanup.test.mjs) without the full Rust/Pi setup.
+
 ## Pre-tag version checklist
 
 Before creating a `v<X.Y.Z>` tag, keep all three desktop/package version fields aligned:

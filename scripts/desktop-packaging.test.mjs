@@ -101,7 +101,6 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   assert.equal(conf.bundle.windows.nsis.installMode, 'currentUser');
   assert.equal(conf.bundle.windows.nsis.installerHooks, 'nsis/hooks.nsh');
   const nsisHooks = readFileSync(join(root, 'src-tauri', 'nsis', 'hooks.nsh'), 'utf8');
-  assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*taskkill\s+\/F\s+\/IM\s+grapher\.exe/);
   assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*RMDir\s+\/r\s+"\$INSTDIR\\runtime"/);
   assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*RMDir\s+\/r\s+"\$INSTDIR\\node"/);
   assert.match(nsisHooks, /!macro\s+NSIS_HOOK_POSTINSTALL[\s\S]*SHChangeNotify/);
