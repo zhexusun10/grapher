@@ -1,5 +1,5 @@
 /* =============================================================================
-   Workspace-Scoped Desktop Terminal (Docked & Maximized)
+   Workspace-Scoped Terminal (Docked & Maximized)
    ============================================================================= */
 
 /* When a docked terminal is open, keep a crisp 10px splitter gap below the
@@ -376,4 +376,11 @@
   .terminal-traffic-btn svg {
     transition: none;
   }
+}
+.workspace-terminal-input-error {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  color: #b42318;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }

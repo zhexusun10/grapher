@@ -133,6 +133,8 @@ Partitioner
 
 ## Quick start
 
+The terminal button beside attachments opens a workspace shell in both the browser and desktop apps. It runs on the machine hosting Grapher, in the selected workspace; minimizing keeps the shell alive, and closing terminates it.
+
 ### Option 1: Desktop App (Recommended — macOS & Windows)
 
 Download the latest native installer from [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) and verify its checksum against `SHA256SUMS.txt`:

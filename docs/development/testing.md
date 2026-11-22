@@ -457,6 +457,12 @@ Playwright Chromium and runs `test:macos-browser`; failure logs are retained for
 seven days as an artifact. Failures fail the workflow; no `continue-on-error`
 is used. Requiring these checks for merging remains a branch-protection setting.
 
+A focused **Windows PTY lifecycle** job runs the shared native terminal tests,
+including ConPTY's startup cursor-position handshake and natural-exit drain,
+without waiting for the broad library suite. The full Windows library suite
+uses the same `fixture` feature as the Linux/macOS backend suites so synthetic
+execution completions retain their explicit test-only evidence.
+
 Windows pushes run the focused filesystem suite; PR/scheduled/manual runs retain
 the full Windows library suite. The Linux/macOS backend suites also execute the
 applicable POSIX-link and snapshot regressions. Weekly scheduled and manual CI runs also explicitly provision pinned uv and retain the model-free

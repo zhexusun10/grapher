@@ -11,6 +11,62 @@ fn service(root: &std::path::Path) -> Arc<Service> {
     })
 }
 
+#[cfg(unix)]
+#[test]
+fn browser_terminal_http_runs_in_workspace_replays_output_and_checks_origin() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(temp.path());
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+    let address = server.server_addr().to_ip().unwrap();
+    let worker_server = Arc::clone(&server);
+    let web_root = temp.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        while let Ok(request) = worker_server.recv() {
+            handle_http_request(request, &service, &web_root, address.port());
+        }
+    });
+    let post = |command: &str, body: serde_json::Value, origin: &str| {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = body.to_string();
+        write!(socket, "POST /api/{command} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        response
+    };
+    let create = json!({"workspacePath":temp.path(),"cols":90,"rows":28});
+    assert!(post("terminal_create", create.clone(), "https://untrusted.invalid").starts_with("HTTP/1.1 403"));
+    let origin = format!("http://{address}");
+    let result = post("terminal_create", create, &origin);
+    assert!(result.starts_with("HTTP/1.1 200"), "{result}");
+    let created: serde_json::Value = serde_json::from_str(result.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let id = created["result"]["sessionId"].as_str().unwrap();
+    assert!(post("terminal_resize", json!({"sessionId":id,"cols":100,"rows":32}), &origin).starts_with("HTTP/1.1 200"));
+    assert!(post("terminal_write", json!({"sessionId":id,"data":"printf 'web-%s\\n' terminal-ready > pty-proof.txt; exit\r"}), &origin).starts_with("HTTP/1.1 200"));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let final_page = loop {
+        let response = post("terminal_read", json!({"sessionId":id,"cursor":0}), &origin);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let page: serde_json::Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        if page["result"]["exited"] == true { break page; }
+        assert!(Instant::now() < deadline, "shell did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(final_page["result"]["exitCode"], 0);
+    assert!(!final_page["result"]["chunks"].as_array().unwrap().is_empty());
+    assert_eq!(fs::read_to_string(temp.path().join("pty-proof.txt")).unwrap(), "web-terminal-ready\n");
+    let replay = post("terminal_read", json!({"sessionId":id,"cursor":0}), &origin);
+    let replay: serde_json::Value = serde_json::from_str(replay.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(replay, final_page);
+    assert!(post("terminal_kill", json!({"sessionId":id}), &origin).starts_with("HTTP/1.1 200"));
+    assert!(post("terminal_read", json!({"sessionId":id}), &origin).starts_with("HTTP/1.1 404"));
+    server.unblock();
+    worker.join().unwrap();
+}
+
 #[test]
 fn browser_poll_uses_deltas_for_matching_versions_and_full_projection_after_a_missed_base() {
     let temp = tempfile::tempdir().unwrap();

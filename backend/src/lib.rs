@@ -38,6 +38,7 @@ pub mod session_branch;
 pub mod snapshot_view;
 mod startup;
 pub mod store;
+pub mod terminal;
 pub mod workspace;
 #[cfg(test)]
 mod workspace_cleanliness_tests;

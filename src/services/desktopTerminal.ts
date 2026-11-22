@@ -1,4 +1,5 @@
 import { isMacosTauriDesktop, isTauriDesktop, isWindowsTauriDesktop } from "./apiBase";
+import { createWebTerminal, killWebTerminal, resizeWebTerminal, subscribeWebTerminalEvents, writeWebTerminal } from "./webTerminal";
 
 export const DESKTOP_TERMINAL_OUTPUT_EVENT = "grapher://terminal-output";
 export const DESKTOP_TERMINAL_EXIT_EVENT = "grapher://terminal-exit";
@@ -49,6 +50,10 @@ export function isDesktopTerminalSupported(): boolean {
   return isMacosTauriDesktop() || isWindowsTauriDesktop();
 }
 
+export function isWorkspaceTerminalSupported(): boolean {
+  return typeof window !== "undefined" && (!isTauriDesktop() || isDesktopTerminalSupported());
+}
+
 export function decodeBase64ToBytes(encoded: string): Uint8Array {
   if (!encoded) return new Uint8Array(0);
   const binary = atob(encoded);
@@ -64,6 +69,7 @@ export async function createDesktopTerminal(
   cols?: number,
   rows?: number,
 ): Promise<TerminalSessionInfo> {
+  if (!isTauriDesktop()) return createWebTerminal(workspacePath, cols, rows);
   const invoke = getTauriInvoke();
   if (!invoke) {
     throw new Error("Desktop terminal IPC is unavailable");
@@ -83,10 +89,26 @@ export async function createDesktopTerminal(
   };
 }
 
+const inputQueues = new Map<string, Promise<void>>();
 export async function writeDesktopTerminal(sessionId: string, data: string): Promise<void> {
-  const invoke = getTauriInvoke();
-  if (!invoke || !sessionId || !data) return;
-  await invoke("terminal_write", { sessionId, data });
+  if (!sessionId || !data) return;
+  // Preserve key/paste order across async IPC and HTTP calls, and split on
+  // Unicode code points so a large paste cannot break UTF-8 surrogate pairs.
+  const task = (inputQueues.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    const characters = Array.from(data);
+    for (let offset = 0; offset < characters.length; offset += 8192) {
+      const chunk = characters.slice(offset, offset + 8192).join("");
+      if (!isTauriDesktop()) await writeWebTerminal(sessionId, chunk);
+      else {
+        const invoke = getTauriInvoke();
+        if (!invoke) throw new Error("Desktop terminal IPC is unavailable");
+        await invoke("terminal_write", { sessionId, data: chunk });
+      }
+    }
+  });
+  inputQueues.set(sessionId, task);
+  try { await task; }
+  finally { if (inputQueues.get(sessionId) === task) inputQueues.delete(sessionId); }
 }
 
 export async function resizeDesktopTerminal(
@@ -94,12 +116,14 @@ export async function resizeDesktopTerminal(
   cols: number,
   rows: number,
 ): Promise<void> {
+  if (!isTauriDesktop()) return resizeWebTerminal(sessionId, cols, rows);
   const invoke = getTauriInvoke();
   if (!invoke || !sessionId) return;
   await invoke("terminal_resize", { sessionId, cols, rows });
 }
 
 export async function killDesktopTerminal(sessionId: string): Promise<void> {
+  if (!isTauriDesktop()) return killWebTerminal(sessionId);
   const invoke = getTauriInvoke();
   if (!invoke || !sessionId) return;
   await invoke("terminal_kill", { sessionId });
@@ -109,6 +133,7 @@ export async function subscribeDesktopTerminalEvents(handlers: {
   onOutput: (event: TerminalOutputEvent) => void;
   onExit: (event: TerminalExitEvent) => void;
 }): Promise<() => void> {
+  if (!isTauriDesktop()) return subscribeWebTerminalEvents(handlers);
   if (!isDesktopTerminalSupported()) {
     return () => {};
   }

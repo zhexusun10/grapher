@@ -47,6 +47,7 @@ git2 = { version = "0.21", default-features = false }
 sha1-checked = { version = "0.10.0", default-features = false, features = ["std"] }
 libc = "0.2"
 tiny_http = "0.12"
+portable-pty = "0.9"
 signal-hook = "0.3"
 ts-rs = { version = "11", features = ["serde-json-impl"] }
 
