@@ -458,7 +458,7 @@ test('bundled web search defaults off, persists opt-in for Planner/Node only and
 
 test('web search Keenable public opt-in persists, clears on disable, and reports dedicated API presence', async () => {
   const f = fixture();
-  const envKeys = ['KEENABLE_API_KEY', 'EXA_API_KEY', 'PERPLEXITY_API_KEY', 'PI_BETTER_WEB_SEARCH_AUTH', 'GRAPHER_ISOLATED_PI_SEARCH'];
+  const envKeys = ['KEENABLE_API_KEY', 'EXA_API_KEY', 'PARALLEL_API_KEY', 'PERPLEXITY_API_KEY', 'PI_BETTER_WEB_SEARCH_AUTH', 'PI_BETTER_WEB_SEARCH_SETTINGS', 'GRAPHER_ISOLATED_PI_SEARCH'];
   const before = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   for (const key of envKeys) delete process.env[key];
   try {
@@ -469,13 +469,30 @@ test('web search Keenable public opt-in persists, clears on disable, and reports
     assert.deepEqual(withPublic.webSearch, { keenablePublic: true, hasDedicatedApi: false });
     assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).webSearch?.keenablePublic, true);
 
-    // Inherited global Pi key for one of the 3 dedicated providers is detected.
-    writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { exa: 'fake-exa-key' } }));
-    assert.deepEqual((await extensionCatalog(f.own)).webSearch, { keenablePublic: true, hasDedicatedApi: true });
+    // Detect saved and environment Parallel keys, respecting an explicit opt-out.
+    for (const provider of ['exa', 'parallel']) {
+      writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { [provider]: 'fake-saved-key' } }));
+      assert.equal((await extensionCatalog(f.own)).webSearch.hasDedicatedApi, true, provider);
+    }
+    writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: {} }));
+    process.env.PARALLEL_API_KEY = 'fake-environment-parallel-key';
+    assert.equal((await extensionCatalog(f.own)).webSearch.hasDedicatedApi, true);
+    writeFileSync(join(f.own, 'better-web-search-settings.json'), JSON.stringify({ version: 1, apis: { parallel: false } }));
+    assert.equal((await extensionCatalog(f.own)).webSearch.hasDedicatedApi, false);
+    rmSync(join(f.own, 'better-web-search-settings.json'));
+    delete process.env.PARALLEL_API_KEY;
+
+    // Upstream rejects the entire settings object for an invalid Parallel toggle.
+    writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { keenable: 'fake-keenable-key' } }));
+    writeFileSync(join(f.own, 'better-web-search-settings.json'), JSON.stringify({ version: 1, apis: { keenable: false, parallel: 'invalid' } }));
+    assert.equal((await extensionCatalog(f.own)).webSearch.hasDedicatedApi, true);
+    rmSync(join(f.own, 'better-web-search-settings.json'));
 
     // Corrupt credential store (any invalid provider key) matches upstream rejection.
-    writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { exa: 'fake-exa-key', deepseek: 'invalid key with spaces' } }));
-    assert.deepEqual((await extensionCatalog(f.own)).webSearch, { keenablePublic: true, hasDedicatedApi: false });
+    for (const provider of ['deepseek', 'parallel']) {
+      writeFileSync(join(f.global, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { exa: 'fake-exa-key', [provider]: 'invalid key with spaces' } }));
+      assert.deepEqual((await extensionCatalog(f.own)).webSearch, { keenablePublic: true, hasDedicatedApi: false });
+    }
 
     // Explicit keenable: false in better-web-search-settings.json suppresses keenablePublic status.
     writeFileSync(join(f.own, 'better-web-search-settings.json'), JSON.stringify({ version: 1, apis: { keenable: false } }));

@@ -391,9 +391,9 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
         path: '/Users/jerry/.pi/agent/npm/node_modules/pi-better-web-search/extensions/index.ts', bundled: true,
         required: false, enabled: true },
       disabled: false, onToggle() {},
-      statusNote: t('当前使用 Keenable 免费公共端点（配置 Keenable、Exa 或 Perplexity API 后自动切换）'),
+      statusNote: t('当前使用 Keenable 免费公共端点（配置 Parallel、Keenable、Exa 或 Perplexity API 后自动切换）'),
     }));
-    assert.ok(webSearchWithNote.replace(/&#x27;/g, "'").includes(t('当前使用 Keenable 免费公共端点（配置 Keenable、Exa 或 Perplexity API 后自动切换）')));
+    assert.ok(webSearchWithNote.replace(/&#x27;/g, "'").includes(t('当前使用 Keenable 免费公共端点（配置 Parallel、Keenable、Exa 或 Perplexity API 后自动切换）')));
     const dialog = renderToStaticMarkup(React.createElement(KeenablePublicDialog, {
       open: true, busy: false, onCancel() {}, onEnableOnly() {}, onUsePublic() {},
     })).replace(/&#x27;/g, "'");

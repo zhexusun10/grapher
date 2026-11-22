@@ -15,11 +15,11 @@ async function fixture(run: (paths: { own: string; global: string; key: (directo
     PI_CODING_AGENT_DIR: own, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
     PI_BETTER_WEB_SEARCH_AUTH: undefined, GRAPHER_ISOLATED_PI_SEARCH: undefined,
     PI_BETTER_WEB_SEARCH_SETTINGS: join(own, 'settings.json'), PI_BETTER_WEB_SEARCH_CACHE: join(own, 'cache.json'),
-    EXA_API_KEY: 'fake-environment-key',
+    EXA_API_KEY: 'fake-environment-key', PARALLEL_API_KEY: undefined,
   };
   const before = Object.fromEntries(Object.keys(changes).map(key => [key, process.env[key]]));
   for (const [key, value] of Object.entries(changes)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-  writeFileSync(join(own, 'settings.json'), JSON.stringify({ version: 1, apis: { exa: true, deepseek: false, keenable: false, perplexity: false } }));
+  writeFileSync(join(own, 'settings.json'), JSON.stringify({ version: 1, apis: { exa: true, deepseek: false, keenable: false, parallel: false, perplexity: false } }));
   const key = (target: string, value: string) => writeFileSync(join(target, 'better-web-search-auth.json'), JSON.stringify({ version: 1, keys: { exa: value } }));
   key(global, 'fake-inherited-key');
   const fetch = globalThis.fetch;
@@ -87,7 +87,86 @@ test('explicit search credential paths and isolation opt out of inheritance; cor
   assert.equal(readFileSync(join(global, 'better-web-search-auth.json'), 'utf8'), '{broken');
 }));
 
-test('Grapher Keenable public opt-in activates public endpoint until any of the 3 dedicated providers has an API key', async () => {
+test('bundled Parallel inherits keys, switches schema, locks routing and restores legacy search when disabled', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-parallel-search-'));
+  const own = join(directory, 'own');
+  const global = join(directory, 'global');
+  mkdirSync(own); mkdirSync(global);
+  const changes: Record<string, string | undefined> = {
+    PI_CODING_AGENT_DIR: own, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
+    PI_BETTER_WEB_SEARCH_AUTH: undefined, GRAPHER_ISOLATED_PI_SEARCH: undefined,
+    PI_BETTER_WEB_SEARCH_SETTINGS: join(own, 'settings.json'), PI_BETTER_WEB_SEARCH_CACHE: join(own, 'cache.json'),
+    PARALLEL_API_KEY: 'fake-environment-parallel-key', EXA_API_KEY: 'fake-exa-key',
+    KEENABLE_API_KEY: undefined, PERPLEXITY_API_KEY: undefined, DEEPSEEK_API_KEY: undefined,
+  };
+  const before = Object.fromEntries(Object.keys(changes).map(key => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(changes)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  const source = join(global, 'better-web-search-auth.json');
+  const original = JSON.stringify({ version: 1, keys: { parallel: 'fake-inherited-parallel-key' } });
+  writeFileSync(source, original);
+  // Even a prior manual preference must yield to Parallel's incompatible schema.
+  const settings = (parallel: boolean) => writeFileSync(changes.PI_BETTER_WEB_SEARCH_SETTINGS!, JSON.stringify({
+    version: 1, search: 'exa', apis: { parallel, keenable: false, perplexity: false, deepseek: false },
+  }));
+  settings(true);
+  const fetch = globalThis.fetch;
+  const requests: Array<{ url: string; key: string | null; body: any }> = [];
+  let fail = false;
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    const target = String(url);
+    requests.push({ url: target, key: new Headers(init.headers).get('x-api-key'), body: JSON.parse(String(init.body)) });
+    if (fail) return new Response(JSON.stringify({ error: 'invalid request' }), { status: 400 });
+    return new Response(JSON.stringify({ results: [{ url: 'https://example.com', title: 'Example', excerpts: ['Result'] }] }));
+  }) as typeof globalThis.fetch;
+  try {
+    const tools = new Map();
+    const hooks = new Map();
+    let active: string[] = [];
+    await (await loadBundledWebSearch())({
+      registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {},
+      on: (event: string, handler: any) => hooks.set(event, handler),
+      getActiveTools: () => active, setActiveTools: (next: string[]) => { active = next; },
+    } as any);
+    const ctx = { model: undefined, modelRegistry: { getAvailable: () => [], getProvider: () => undefined, getAll: () => [], hasConfiguredAuth: () => false } };
+    await hooks.get('session_start')({}, ctx);
+    assert.ok(active.includes('web_search'));
+    assert.deepEqual(Object.keys(tools.get('web_search').parameters.properties).sort(), ['objective', 'search_queries', 'urls']);
+    const execute = (params: object) => tools.get('web_search').execute('parallel-search', params, undefined, undefined, ctx);
+    assert.equal((await execute({ query: 'legacy query' })).isError, true);
+    assert.equal(requests.length, 0, 'reject stale arguments before HTTP');
+
+    const search = { objective: 'Find official documentation', search_queries: ['official API documentation'] };
+    assert.notEqual((await execute(search)).isError, true);
+    assert.deepEqual(requests.at(-1), {
+      url: 'https://api.parallel.ai/v1/search', key: 'fake-inherited-parallel-key', body: { mode: 'advanced', ...search },
+    });
+    const extract = { urls: ['https://example.com'], objective: 'Find API details' };
+    assert.notEqual((await execute(extract)).isError, true);
+    assert.deepEqual(requests.at(-1), {
+      url: 'https://api.parallel.ai/v1/extract', key: 'fake-inherited-parallel-key', body: extract,
+    });
+    fail = true;
+    const start = requests.length;
+    assert.equal((await execute(search)).isError, true);
+    assert.deepEqual(requests.slice(start).map(request => request.url), ['https://api.parallel.ai/v1/search'], 'Parallel failures never fall back to Exa');
+    fail = false;
+
+    settings(false);
+    await hooks.get('before_agent_start')({}, ctx);
+    assert.ok(tools.get('web_search').parameters.properties.query);
+    assert.equal(tools.get('web_search').parameters.properties.search_queries, undefined);
+    assert.notEqual((await execute({ query: 'legacy query' })).isError, true);
+    assert.equal(requests.at(-1)?.url, 'https://api.exa.ai/search');
+    assert.equal(readFileSync(source, 'utf8'), original);
+    assert.equal(process.env.PARALLEL_API_KEY, 'fake-environment-parallel-key');
+  } finally {
+    globalThis.fetch = fetch;
+    for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Grapher Keenable public opt-in activates public endpoint until a dedicated search provider has an API key', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-keenable-public-'));
   const own = join(directory, 'own');
   const global = join(directory, 'global');
@@ -96,7 +175,7 @@ test('Grapher Keenable public opt-in activates public endpoint until any of the 
     'PI_CODING_AGENT_DIR', 'GRAPHER_GLOBAL_PI_AGENT_DIR',
     'PI_BETTER_WEB_SEARCH_AUTH', 'GRAPHER_ISOLATED_PI_SEARCH',
     'PI_BETTER_WEB_SEARCH_SETTINGS', 'PI_BETTER_WEB_SEARCH_CACHE',
-    'KEENABLE_API_KEY', 'EXA_API_KEY', 'PERPLEXITY_API_KEY', 'DEEPSEEK_API_KEY',
+    'KEENABLE_API_KEY', 'EXA_API_KEY', 'PARALLEL_API_KEY', 'PERPLEXITY_API_KEY', 'DEEPSEEK_API_KEY',
   ];
   const before = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   for (const key of envKeys) delete process.env[key];
@@ -172,7 +251,7 @@ test('Grapher Keenable public opt-in activates public endpoint until any of the 
 
 test('withGrapherSearchPreferences does not leak synthetic keenable:true when unrelated preferences or other APIs are saved', () => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-search-prefs-write-'));
-  const envKeys = ['KEENABLE_API_KEY', 'EXA_API_KEY', 'PERPLEXITY_API_KEY'];
+  const envKeys = ['KEENABLE_API_KEY', 'EXA_API_KEY', 'PARALLEL_API_KEY', 'PERPLEXITY_API_KEY'];
   const before = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   for (const key of envKeys) delete process.env[key];
   try {
@@ -185,8 +264,21 @@ test('withGrapherSearchPreferences does not leak synthetic keenable:true when un
       readProviderPreferences: () => structuredClone(persisted),
       writeProviderPreferences: (next: any) => { persisted = structuredClone(next); return true; },
     };
-    const credentials = { savedApiKey: () => undefined };
+    let savedParallelKey: string | undefined;
+    const credentials = { savedApiKey: (provider: string) => provider === 'parallel' ? savedParallelKey : undefined };
     const prefs = withGrapherSearchPreferences(upstream, credentials, () => directory);
+
+    // A configured Parallel API suppresses the public default; an explicit
+    // Parallel opt-out restores it, matching the catalog's API detection.
+    savedParallelKey = 'fake-saved-parallel-key';
+    assert.equal(prefs.readProviderPreferences().apis?.keenable, undefined);
+    persisted = { version: 1, apis: { parallel: false } };
+    assert.equal(prefs.readProviderPreferences().apis?.keenable, true);
+    savedParallelKey = undefined;
+    persisted = { version: 1 };
+    process.env.PARALLEL_API_KEY = 'fake-environment-parallel-key';
+    assert.equal(prefs.readProviderPreferences().apis?.keenable, undefined);
+    delete process.env.PARALLEL_API_KEY;
 
     // 1. /web-search-provider pattern: mutates search while keeping same apis reference.
     const forProvider = prefs.readProviderPreferences();

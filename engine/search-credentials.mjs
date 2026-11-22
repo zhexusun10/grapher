@@ -6,11 +6,12 @@ import { join, resolve } from 'node:path';
 import { toHostInput } from './path-identity.mjs';
 
 export const TOP_DEDICATED_SEARCH_PROVIDERS = [
+  ['parallel', 'PARALLEL_API_KEY'],
   ['keenable', 'KEENABLE_API_KEY'],
   ['exa', 'EXA_API_KEY'],
   ['perplexity', 'PERPLEXITY_API_KEY'],
 ];
-const ALL_DEDICATED_PROVIDERS = ['deepseek', 'exa', 'keenable', 'perplexity'];
+const ALL_DEDICATED_PROVIDERS = ['deepseek', 'exa', 'keenable', 'parallel', 'perplexity'];
 
 function isValidApiKey(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 8192 && !/[^\x21-\x7e]/.test(value);
@@ -109,8 +110,8 @@ export function withInheritedSearchCredentials(upstream) {
 }
 
 // Enable Keenable's public endpoint when the user explicitly opted in while
-// mounting web search, and automatically stop once any of the 3 dedicated
-// search providers (Keenable, Exa, Perplexity) has an API key configured.
+// mounting web search, and automatically stop once Parallel, Keenable, Exa or
+// Perplexity has an API key configured.
 export function withGrapherSearchPreferences(upstream, credentials, getAgentDir) {
   const syntheticApis = new WeakSet();
   return {

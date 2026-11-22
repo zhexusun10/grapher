@@ -44,7 +44,7 @@ function normalizeFileKey(path: string): string {
 }
 
 function webSearchDetail(args: Record<string, unknown>): string | undefined {
-  const query = compactText(args.query);
+  const query = compactText(args.query) || compactText(args.objective);
   if (query) return query;
   if (Array.isArray(args.urls)) {
     const firstUrl = args.urls.map(compactText).find((url): url is string => Boolean(url));
