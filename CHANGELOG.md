@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Windows terminal viewport/history corruption across resizing by reporting the host PTY backend and enabling xterm's ConPTY compatibility behavior, including browser clients connected to Windows. Hid xterm 6's unused native viewport scrollbar while preserving its real scrollback scrollbar.
-- Smoothed workspace terminal minimize, maximize and restore transitions: retain the hidden final frame until the panel is hidden, defer xterm/PTY resizing until the animation settles, and continue interrupted transitions from their current presentation.
-- Kept the sidebar Settings icon and label centered when an update is available by positioning the blue update indicator outside the button's flex layout.
-
 ## [1.9.16] - 2026-11-22
 
 ### Added
@@ -23,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed Windows terminal viewport/history corruption across resizing by reporting the host PTY backend and enabling xterm's ConPTY compatibility behavior, including browser clients connected to Windows. Hid xterm 6's unused native viewport scrollbar while preserving its real scrollback scrollbar.
+- Smoothed workspace terminal minimize, maximize and restore transitions: retain the hidden final frame until the panel is hidden, defer xterm/PTY resizing until the animation settles, and continue interrupted transitions from their current presentation.
+- Kept the sidebar Settings icon and label centered when an update is available by positioning the blue update indicator outside the button's flex layout.
 - Scoped Windows upgrade cleanup to the backend executable inside the selected installation, preserving independent CLI sessions and other installations. Cleanup failures now abort the upgrade; added policy and real Windows process-isolation coverage.
 
 - Fixed intermittent upward scrollback flicker and viewport jumps in virtualized conversations: froze each unmeasured row ID's initial height estimate in `VirtualizedList` (`frozenEstimatesRef` with bounded per-kind stats tracking) so measuring mounted rows never mutates `paddingTop` for unmeasured rows above the viewport; released `stabilizingAnchorRef` based on committed measurement revisions (invalidating unmounted stale anchors and resetting the synchronous convergence counter once settled); broadened pre-paint `rangePrependAnchor` capture across concurrent structure updates with forced window-edge viewport updates; synchronized external `TRANSCRIPT_SCROLL_ADJUSTED_EVENT` updates across `VirtualizedList`, `useAutoTranscriptHistory`, and deferred `ExecutionTranscript` containers (preventing double compensation with exact boundary checks); and stopped historical settled `StreamingAssistantBubble` mounts from broadcasting `TRANSCRIPT_CONTENT_GROWTH_EVENT` when not following output (`src/components/VirtualizedList.tsx`, `src/hooks/useAutoTranscriptHistory.ts`, `src/components/ExecutionTranscript.tsx`, `src/components/views/ChatBubbles.tsx`, `scripts/conversation-history-ui.test.mjs`).
