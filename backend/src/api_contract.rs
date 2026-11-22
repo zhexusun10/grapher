@@ -219,6 +219,7 @@ pub const READ_OPERATIONS: &[(&str, &[&str])] = &[
     ("composer_command", &["catalog", "poll"]),
 ];
 pub const READ_COMMANDS: &[&str] = &[
+    "terminal_read",
     "bootstrap",
     "host_preflight",
     "history",

@@ -133,6 +133,8 @@ Partitioner
 
 ## 快速开始
 
+浏览器和桌面端均可点击附件旁的终端按钮，在所选工作区打开 shell。终端运行在 Grapher 后端所在的机器上；最小化保留会话，关闭则结束会话。
+
 ### 方式一：下载原生桌面端安装包（推荐 — macOS 与 Windows）
 
 从 [GitHub Releases](https://github.com/zhexusun10/grapher/releases/latest) 下载对应平台的原生安装包，并使用 `SHA256SUMS.txt` 校验文件完整性：

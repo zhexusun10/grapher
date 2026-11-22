@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import {
   createDesktopTerminal,
   decodeBase64ToBytes,
-  isDesktopTerminalSupported,
+  isWorkspaceTerminalSupported,
   killDesktopTerminal,
   resizeDesktopTerminal,
   subscribeDesktopTerminalEvents,
@@ -85,7 +85,7 @@ function prefersReducedMotion(): boolean {
 }
 
 export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTerminalsHandle {
-  const supported = isDesktopTerminalSupported();
+  const supported = isWorkspaceTerminalSupported();
   const trimmedWorkspacePath = activeWorkspacePath.trim();
   const activeKey = trimmedWorkspacePath ? workspaceKey(trimmedWorkspacePath) : "";
 
@@ -102,6 +102,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
   const eventUnsubscribeRef = useRef<(() => void) | null>(null);
   const eventSubscribePromiseRef = useRef<Promise<void> | null>(null);
   const mountedRef = useRef(true);
+  const earlyEventsRef = useRef(new Map<string, { chunks: Uint8Array[]; bytes: number; exit?: number | null }>());
 
   const pushOutputForInstance = useCallback((instanceId: number, bytes: Uint8Array) => {
     if (bytes.length === 0) return;
@@ -139,6 +140,30 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
     };
   }, []);
 
+  const handleExit = useCallback((sessionId: string, exitCode: number | null) => {
+    const key = sessionToKeyRef.current.get(sessionId);
+    sessionToInstanceRef.current.delete(sessionId);
+    sessionToKeyRef.current.delete(sessionId);
+    if (!key) return;
+    setEntriesByKey(prev => {
+      const current = prev[key];
+      if (!current || current.sessionId !== sessionId) return prev;
+      return { ...prev, [key]: { ...current, status: "exited", exitCode } };
+    });
+  }, []);
+
+  const earlyEvents = useCallback((sessionId: string) => {
+    let pending = earlyEventsRef.current.get(sessionId);
+    if (!pending) {
+      if (earlyEventsRef.current.size >= 32) {
+        earlyEventsRef.current.delete(earlyEventsRef.current.keys().next().value!);
+      }
+      pending = { chunks: [], bytes: 0 };
+      earlyEventsRef.current.set(sessionId, pending);
+    }
+    return pending;
+  }, []);
+
   const ensureEventSubscription = useCallback((): Promise<void> => {
     if (!supported) return Promise.resolve();
     if (eventUnsubscribeRef.current) return Promise.resolve();
@@ -147,31 +172,28 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
     const task = subscribeDesktopTerminalEvents({
       onOutput: (event) => {
         const instanceId = sessionToInstanceRef.current.get(event.sessionId);
-        if (instanceId === undefined) return;
         try {
           const bytes = decodeBase64ToBytes(event.data);
+          if (instanceId === undefined) {
+            const pending = earlyEvents(event.sessionId);
+            pending.chunks.push(bytes);
+            pending.bytes += bytes.length;
+            while (pending.bytes > MAX_BUFFERED_CHUNKS_BYTES && pending.chunks.length > 1) {
+              pending.bytes -= pending.chunks.shift()!.length;
+            }
+            return;
+          }
           pushOutputForInstance(instanceId, bytes);
         } catch {
           // Ignore malformed output frame.
         }
       },
       onExit: (event) => {
-        const key = sessionToKeyRef.current.get(event.sessionId);
-        sessionToInstanceRef.current.delete(event.sessionId);
-        sessionToKeyRef.current.delete(event.sessionId);
-        if (!key) return;
-        setEntriesByKey((prev) => {
-          const current = prev[key];
-          if (!current || current.sessionId !== event.sessionId) return prev;
-          return {
-            ...prev,
-            [key]: {
-              ...current,
-              status: "exited",
-              exitCode: event.exitCode,
-            },
-          };
-        });
+        if (!sessionToKeyRef.current.has(event.sessionId)) {
+          earlyEvents(event.sessionId).exit = event.exitCode;
+          return;
+        }
+        handleExit(event.sessionId, event.exitCode);
       },
     }).then((unlisten) => {
       if (!mountedRef.current) {
@@ -186,7 +208,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
     });
     eventSubscribePromiseRef.current = task;
     return task;
-  }, [supported, pushOutputForInstance]);
+  }, [supported, pushOutputForInstance, earlyEvents, handleExit]);
 
   // Ensure all live PTYs and event listeners are cleaned up if the app root unmounts.
   useEffect(() => {
@@ -202,6 +224,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
       sessionToInstanceRef.current.clear();
       listenersByInstanceRef.current.clear();
       pendingBuffersRef.current.clear();
+      earlyEventsRef.current.clear();
     };
   }, []);
 
@@ -243,12 +266,20 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         .then(
         (info) => {
           const current = entriesRef.current[key];
-          if (!current || current.instanceId !== instanceId) {
+          if (!mountedRef.current || !current || current.closing || current.instanceId !== instanceId) {
+            earlyEventsRef.current.delete(info.sessionId);
             void killDesktopTerminal(info.sessionId).catch(() => {});
             return;
           }
           sessionToInstanceRef.current.set(info.sessionId, instanceId);
           sessionToKeyRef.current.set(info.sessionId, key);
+          // Parsing buffered startup output may synchronously generate terminal
+          // input (ConPTY's cursor-position handshake). Make the session
+          // writable before handing those bytes to xterm, even before commit.
+          entriesRef.current = {
+            ...entriesRef.current,
+            [key]: { ...current, sessionId: info.sessionId, shell: info.shell, status: "running", error: null },
+          };
           setEntriesByKey((prev) => {
             const latest = prev[key];
             if (!latest || latest.instanceId !== instanceId) return prev;
@@ -263,6 +294,12 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
               },
             };
           });
+          const early = earlyEventsRef.current.get(info.sessionId);
+          earlyEventsRef.current.delete(info.sessionId);
+          if (early) {
+            for (const chunk of early.chunks) pushOutputForInstance(instanceId, chunk);
+            if ("exit" in early) handleExit(info.sessionId, early.exit ?? null);
+          }
           const latestSize = latestSizeByKeyRef.current.get(key);
           if (latestSize) {
             void resizeDesktopTerminal(info.sessionId, latestSize.cols, latestSize.rows).catch(() => {});
@@ -287,7 +324,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         },
       );
     },
-    [supported, ensureEventSubscription],
+    [supported, ensureEventSubscription, pushOutputForInstance, handleExit],
   );
 
   const toggleActiveTerminal = useCallback(() => {
@@ -422,7 +459,16 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
   const writeTerminalInput = useCallback((key: string, data: string) => {
     const current = entriesRef.current[key];
     if (!current?.sessionId || current.status !== "running") return;
-    void writeDesktopTerminal(current.sessionId, data).catch(() => {});
+    const sessionId = current.sessionId;
+    const showError = (error: string | null) => setEntriesByKey(prev => {
+      const latest = prev[key];
+      if (latest?.sessionId !== sessionId || latest.status !== "running" || latest.error === error) return prev;
+      return { ...prev, [key]: { ...latest, error } };
+    });
+    void writeDesktopTerminal(sessionId, data).then(
+      () => showError(null),
+      error => showError(error instanceof Error ? error.message : String(error)),
+    );
   }, []);
 
   const resizeTerminal = useCallback((key: string, cols: number, rows: number) => {

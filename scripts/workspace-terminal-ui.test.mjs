@@ -84,7 +84,7 @@ after(async () => {
   await server?.close();
 });
 
-async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedMotion = "reduce" } = {}) {
+async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedMotion = "reduce", earlyExit = false, createDelay = 0, earlyCursorQuery = false } = {}) {
   const context = await browser.newContext({
     viewport: { width: 1280, height: 840 },
     locale: "en-US",
@@ -95,7 +95,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
     ? { platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", uaPlatform: "Windows", shell: "pwsh" }
     : { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", uaPlatform: "macOS", shell: "zsh" };
 
-  await context.addInitScript(({ tauriMode, platformConfig, repoA, repoB, origin }) => {
+  await context.addInitScript(({ tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery }) => {
     Object.defineProperty(navigator, "platform", { value: platformConfig.platform, configurable: true });
     Object.defineProperty(navigator, "userAgent", { value: platformConfig.userAgent, configurable: true });
     Object.defineProperty(navigator, "userAgentData", {
@@ -168,6 +168,17 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
         if (cmd === "terminal_create") {
           const sessionId = `pty-${nextSessionNum++}`;
           terminalCalls.push({ cmd, args, sessionId });
+          if (earlyCursorQuery) {
+            window.__terminalTest.emit("grapher://terminal-output", { sessionId, data: btoa("\x1b[6n") });
+            await new Promise(resolve => setTimeout(resolve, 50));
+            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath };
+          }
+          if (earlyExit) {
+            window.__terminalTest.emit("grapher://terminal-output", { sessionId, data: btoa("FAST_STARTUP_ERROR\r\n") });
+            window.__terminalTest.emit("grapher://terminal-exit", { sessionId, exitCode: 1 });
+            await new Promise(resolve => setTimeout(resolve, 50));
+            return { sessionId, shell: platformConfig.shell, cwd: args.workspacePath };
+          }
           // Emit a welcome prompt shortly after creation.
           setTimeout(() => {
             window.__terminalTest.emit("grapher://terminal-output", {
@@ -175,6 +186,7 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
               data: btoa(`welcome:${args.workspacePath}\r\n$ `),
             });
           }, 15);
+          if (createDelay) await new Promise(resolve => setTimeout(resolve, createDelay));
           return {
             sessionId,
             shell: platformConfig.shell,
@@ -188,16 +200,43 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
         return null;
       },
     };
-  }, { tauriMode, platformConfig, repoA, repoB, origin });
+  }, { tauriMode, platformConfig, repoA, repoB, origin, earlyExit, createDelay, earlyCursorQuery });
 
   let currentRepo = repoA;
   const snapshotsById = { [runA1.runId]: runA1, [runA2.runId]: runA2 };
+  const webCalls = [];
+  const webSessions = new Map();
 
   await context.route("**/api/*", async (route) => {
     const command = new URL(route.request().url()).pathname.slice(5);
     const body = route.request().postDataJSON() || {};
     let result = null;
     switch (command) {
+      case "terminal_create": {
+        const sessionId = `web-pty-${webCalls.filter(c => c.command === command).length + 1}`;
+        webCalls.push({ command, body, sessionId });
+        webSessions.set(sessionId, { chunks: [Buffer.from(`welcome:${body.workspacePath}\r\n$ `).toString("base64")], exitCode: null, exited: false });
+        result = { sessionId, shell: "bash", cwd: body.workspacePath };
+        break;
+      }
+      case "terminal_read": {
+        const session = webSessions.get(body.sessionId);
+        if (session?.failures) {
+          session.failures -= 1;
+          await route.fulfill({ status: 503, json: { error: "Temporary connection failure" } });
+          return;
+        }
+        const chunks = session?.chunks ?? [];
+        result = { chunks: chunks.slice(body.cursor), cursor: chunks.length, truncated: false,
+          exited: session?.exited ?? true, exitCode: session?.exitCode ?? null, more: false };
+        break;
+      }
+      case "terminal_write":
+      case "terminal_resize":
+      case "terminal_kill":
+        webCalls.push({ command, body });
+        if (command === "terminal_kill") webSessions.delete(body.sessionId);
+        break;
       case "bootstrap": {
         const repo = currentRepo;
         const isA = repo === repoA;
@@ -290,18 +329,78 @@ async function setupDesktopPage({ platform = "macos", tauriMode = true, reducedM
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
   await page.goto(origin, { waitUntil: "networkidle" });
-  return { context, page, pageErrors };
+  return { context, page, pageErrors, webCalls, webSessions };
 }
 
-test("browser mode hides the desktop terminal toggle button", async () => {
-  const { context, page, pageErrors } = await setupDesktopPage({ tauriMode: false });
+test("browser terminal uses HTTP for creation, output, input, resize and close", async () => {
+  const { context, page, pageErrors, webCalls } = await setupDesktopPage({ tauriMode: false });
   try {
     await page.locator(".prompt-box-left-actions").waitFor();
-    assert.equal(await page.locator('[data-testid="composer-terminal-toggle"]').count(), 0);
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('welcome:'));
+    assert.equal(webCalls.find(c => c.command === "terminal_create").body.workspacePath, repoA);
+    await page.locator('.workspace-terminal-xterm').click();
+    await page.keyboard.type('pwd');
+    await page.waitForTimeout(200);
+    assert.ok(webCalls.some(c => c.command === "terminal_write" && c.body.data.includes('p')));
+    assert.ok(webCalls.some(c => c.command === "terminal_resize" && c.body.cols > 0 && c.body.rows > 0));
+    await page.getByRole('button', { name: 'Close terminal', exact: true }).click();
+    await page.waitForTimeout(100);
+    assert.ok(webCalls.some(c => c.command === "terminal_kill" && c.body.sessionId === "web-pty-1"));
     assert.deepEqual(pageErrors, []);
   } finally {
     await context.close();
   }
+});
+
+test("startup output and exit arriving before create reply remain visible", async () => {
+  const { context, page, pageErrors } = await setupDesktopPage({ earlyExit: true });
+  try {
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.locator('.workspace-terminal-status-pill.is-exited').waitFor();
+    await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('FAST_STARTUP_ERROR'));
+    assert.equal(await page.locator('.workspace-terminal-restart-btn').count(), 1);
+    assert.deepEqual(pageErrors, []);
+  } finally { await context.close(); }
+});
+
+test("browser terminal resumes at its cursor after a failed read and drains final UTF-8 output", async () => {
+  const { context, page, webSessions, webCalls } = await setupDesktopPage({ tauriMode: false });
+  try {
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('welcome:'));
+    const session = webSessions.get("web-pty-1");
+    session.failures = 1;
+    session.chunks.push(Buffer.from("恢复输出 🚀\r\n").toString("base64"));
+    session.exited = true;
+    session.exitCode = 7;
+    await page.locator('.workspace-terminal-status-pill.is-exited').waitFor();
+    await page.waitForFunction(() => document.querySelector('.workspace-terminal-xterm')?.textContent.includes('恢复输出 🚀'));
+    assert.equal((await page.locator('.workspace-terminal-xterm').textContent()).split('恢复输出').length - 1, 1);
+    assert.match(await page.locator('.workspace-terminal-status-pill').textContent(), /7/);
+    await page.waitForTimeout(100);
+    assert.ok(webCalls.some(c => c.command === "terminal_kill" && c.body.sessionId === "web-pty-1"));
+  } finally { await context.close(); }
+});
+
+test("closing a terminal while create is pending kills the late session", async () => {
+  const { context, page } = await setupDesktopPage({ createDelay: 150, reducedMotion: "no-preference" });
+  try {
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForFunction(() => window.__terminalTest.calls.some(c => c.cmd === "terminal_create"));
+    await page.getByRole('button', { name: 'Close terminal', exact: true }).click();
+    await page.waitForFunction(() => window.__terminalTest.calls.some(c => c.cmd === "terminal_kill" && c.args.sessionId === "pty-1"));
+    await page.locator('[data-testid="workspace-terminal-card"]').waitFor({ state: "hidden" });
+  } finally { await context.close(); }
+});
+
+test("Windows startup cursor query arriving before create reply gets an xterm response", async () => {
+  const { context, page } = await setupDesktopPage({ platform: "windows", earlyCursorQuery: true });
+  try {
+    await page.locator('[data-testid="composer-terminal-toggle"]').click();
+    await page.waitForFunction(() => window.__terminalTest.calls.some(c =>
+      c.cmd === "terminal_write" && /\x1b\[\d+;\d+R/.test(c.args.data)));
+  } finally { await context.close(); }
 });
 
 for (const platform of ["macos", "windows"]) {

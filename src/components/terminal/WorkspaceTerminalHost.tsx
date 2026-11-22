@@ -499,6 +499,9 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
             </div>
           }
         >
+          {entry.status !== "error" && entry.error && (
+            <div className="workspace-terminal-input-error" role="alert">{entry.error}</div>
+          )}
           {entry.status === "error" ? (
             <div className="workspace-terminal-error" role="alert">
               <p className="workspace-terminal-error-title">{t("无法启动终端")}</p>

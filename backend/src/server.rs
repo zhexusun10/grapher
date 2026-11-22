@@ -31,6 +31,7 @@ mod project_discovery;
 mod search;
 mod snapshot_delta;
 mod sse;
+mod terminal;
 mod transcript;
 #[path = "workspace_attachments.rs"]
 mod workspace_attachments;
@@ -6215,6 +6216,9 @@ pub fn dispatch(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
+    if matches!(command, "terminal_create" | "terminal_read" | "terminal_write" | "terminal_resize" | "terminal_kill") {
+        return terminal::dispatch(command, &body);
+    }
     if command == "operation_status" {
         return Ok(api_transport::operation_status(&argument::<String>(
             &body,
@@ -7245,6 +7249,7 @@ pub fn run_with_options(options: ServerOptions) -> Result<(), String> {
                 crate::native::shutdown_runtime();
                 crate::provider_auth::shutdown();
                 close_all_sse_subscribers();
+                terminal::shutdown();
                 shutdown_server.unblock();
             }
         })
