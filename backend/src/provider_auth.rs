@@ -180,6 +180,11 @@ impl Worker for Bridge {
 
 struct Transport {
     active: Mutex<Option<Bridge>>,
+    // Provider/model discovery is read-only and is shared by startup,
+    // Settings and the composer. Keep the last accepted result in the
+    // backend too, so a second Settings opening does not re-enter the
+    // single Provider/Auth IPC bridge while it is warming up.
+    catalog_cache: Mutex<Option<Value>>,
     stopped: AtomicBool,
     #[cfg(not(feature = "fixture"))]
     prepared: Pool<(), Bridge>,
@@ -189,6 +194,7 @@ impl Transport {
     fn new() -> Self {
         Self {
             active: Mutex::new(None),
+            catalog_cache: Mutex::new(None),
             stopped: AtomicBool::new(false),
             #[cfg(not(feature = "fixture"))]
             prepared: Pool::new("Provider/Auth"),
@@ -295,8 +301,37 @@ impl Transport {
 }
 
 pub fn request(body: Value) -> Result<Value, String> {
-    let catalog = body["operation"] == "catalog";
-    let result = TRANSPORT.get_or_init(Transport::new).request(body)?;
+    let operation = body["operation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let catalog = operation == "catalog";
+    let refresh = body["refresh"].as_bool().unwrap_or(false);
+    let cacheable_request = body["version"].as_u64() == Some(1) && catalog && !refresh;
+    let transport = TRANSPORT.get_or_init(Transport::new);
+    if cacheable_request && !transport.stopped.load(Ordering::SeqCst) {
+        if let Ok(cache) = transport.catalog_cache.lock() {
+            if let Some(value) = cache.as_ref() {
+                return Ok(value.clone());
+            }
+        }
+    }
+    if operation == "logout" {
+        if let Ok(mut cache) = transport.catalog_cache.lock() {
+            *cache = None;
+        }
+    }
+    let result = transport.request(body)?;
+    if catalog {
+        if let Ok(mut cache) = transport.catalog_cache.lock() {
+            *cache = Some(result.clone());
+        }
+    }
+    if operation == "set_model_visibility" || result["status"] == "complete" {
+        if let Ok(mut cache) = transport.catalog_cache.lock() {
+            *cache = None;
+        }
+    }
     if catalog {
         crate::model_window::remember_catalog(&result);
     }

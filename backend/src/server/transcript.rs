@@ -23,19 +23,49 @@ pub(super) fn capture_execution_output(
 ) -> Result<ExecutionOutputRead, String> {
     let run_id: String = argument(body, "runId")?;
     let execution_id: String = argument(body, "executionId")?;
-    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    if runtime.state.run_id != run_id {
+    match service.runtime.try_lock() {
+        Ok(runtime) => {
+            if runtime.state.run_id != run_id {
+                return Err("Run does not match service".into());
+            }
+            execution_output_read_from_state(
+                runtime.root.clone(),
+                run_id,
+                execution_id,
+                &runtime.state,
+            )
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            // Transcript pages are immutable/read-only SQLite reads. A worker
+            // may hold the projection mutex while preparing or committing an
+            // event; replay the small metadata projection from the read
+            // connection instead of making the browser wait for that worker.
+            let root = service_data_root(service)?;
+            let store = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+            let state = store.load(&run_id)?;
+            execution_output_read_from_state(root, run_id, execution_id, &state)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn execution_output_read_from_state(
+    root: PathBuf,
+    run_id: String,
+    execution_id: String,
+    state: &Snapshot,
+) -> Result<ExecutionOutputRead, String> {
+    if state.run_id != run_id {
         return Err("Run does not match service".into());
     }
-    let execution = runtime
-        .state
+    let execution = state
         .executions
         .iter()
-        .chain(&runtime.state.mergers)
+        .chain(&state.mergers)
         .find(|execution| execution.id == execution_id)
         .ok_or("Execution not found in run")?;
     Ok(ExecutionOutputRead {
-        root: runtime.root.clone(),
+        root,
         run_id,
         execution_id,
         status: execution.status.clone(),
@@ -46,7 +76,7 @@ pub(super) fn capture_execution_output(
         missing_context: execution.metrics.as_ref().is_some_and(|metrics| {
             metrics.context_usage.is_none() && metrics.assistant_messages > 0
         }),
-        has_steers: runtime.state.events.iter().any(|event| {
+        has_steers: state.events.iter().any(|event| {
             matches!(&event.kind, EventKind::Steered { execution_id, .. } if execution_id == &execution.id)
         }),
     })

@@ -893,6 +893,31 @@ fn bootstrap_projection(
     })
 }
 
+fn service_data_root(service: &Arc<Service>) -> Result<PathBuf, String> {
+    if let Some(root) = known_service_root(service) {
+        return Ok(root);
+    }
+    // Test-created Services do not always go through the server bootstrap,
+    // where the root is memoized. Keep the fallback for those callers, but do
+    // not use it on the hot path: a historical read must not wait for a busy
+    // Runtime projection lock in production.
+    service
+        .runtime
+        .lock()
+        .map(|runtime| runtime.root.clone())
+        .map_err(|error| error.to_string())
+}
+
+fn durable_snapshot_metadata(
+    run_id: &str,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    let root = service_data_root(service)?;
+    let store = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+    let state = store.load(run_id)?;
+    snapshot_metadata(&state)
+}
+
 fn snapshot(service: &Arc<Service>) -> Result<Snapshot, String> {
     Ok(service
         .runtime
@@ -903,10 +928,13 @@ fn snapshot(service: &Arc<Service>) -> Result<Snapshot, String> {
 }
 
 fn history(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
-    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    // Labels and history fallbacks never read file changes, so do not parse a
-    // potentially huge sidecar (or replay logs) just to answer them.
-    runtime.store.load(&run_id)
+    // Historical replay is a read-only SQLite operation. Do not keep the
+    // Run's projection mutex across it: a long event log or checkpoint replay
+    // used to block settings, snapshot polling and other foreground requests
+    // until the 15-second browser deadline expired.
+    let root = service_data_root(service)?;
+    let store = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+    store.load(&run_id)
 }
 
 fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
@@ -5646,8 +5674,7 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
     if !is_valid_planning_id(&planning_id) {
         return Err(format!("Invalid planning ID: {planning_id}"));
     }
-    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    let planning_dir = runtime.root.join("planning");
+    let planning_dir = service_data_root(service)?.join("planning");
     let summary_path = crate::path_safety::real_child_path(
         &planning_dir,
         &planning_dir.join(&planning_id).join("summary.json"),
@@ -5705,12 +5732,7 @@ fn get_planning_output_with_options(
     if !matches!(role.as_str(), "partition" | "planner") {
         return Err("Invalid planning role".into());
     }
-    let root = service
-        .runtime
-        .lock()
-        .map_err(|e| e.to_string())?
-        .root
-        .join("planning");
+    let root = service_data_root(service)?.join("planning");
     let root = root
         .canonicalize()
         .map_err(|_| "Planning output not found")?;
@@ -5984,8 +6006,7 @@ fn list_plannings(
     service: &Arc<Service>,
     repository_filter: Option<String>,
 ) -> Result<Vec<PlanningSummary>, String> {
-    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    let planning_dir = runtime.root.join("planning");
+    let planning_dir = service_data_root(service)?.join("planning");
     if !planning_dir.exists() {
         return Ok(Vec::new());
     }
@@ -6266,11 +6287,14 @@ pub fn dispatch(
         .map_err(|e| e.to_string());
     }
     if command == "snapshot" && metadata {
-        let captured = service
-            .runtime
-            .lock()
-            .map_err(|e| e.to_string())?
-            .browser_metadata()?;
+        let run_id = body.get("runId").and_then(serde_json::Value::as_str);
+        let captured = match service.runtime.try_lock() {
+            Ok(runtime) => runtime.browser_metadata()?,
+            Err(std::sync::TryLockError::WouldBlock) if run_id.is_some() => {
+                return durable_snapshot_metadata(run_id.unwrap(), service);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         return Ok(Arc::unwrap_or_clone(captured));
     }
     if command == "history" && metadata {
@@ -6766,6 +6790,34 @@ fn api_service(
     command: &str,
     body: &serde_json::Value,
 ) -> Result<Arc<Service>, String> {
+    if command == "snapshot"
+        && body.get("detail").and_then(serde_json::Value::as_str) == Some("metadata")
+        && body.get("runId").is_some()
+    {
+        // Settings and Run navigation only need the compact projection. If the
+        // primary Runtime is in a long operation, let dispatch read the
+        // durable snapshot directly instead of queueing this request behind
+        // the projection mutex. The normal path below still prefers the live
+        // child service whenever it is available.
+        if matches!(
+            primary.runtime.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            return Ok(primary.clone());
+        }
+    }
+    if command == "get_execution_output"
+        && body.get("runId").and_then(serde_json::Value::as_str).is_some()
+        && matches!(
+            primary.runtime.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    {
+        // The transcript reader has its own durable fallback. Avoid blocking
+        // in service_for_run while verifying the current primary Run; this is
+        // the common path when output arrives during a long worker operation.
+        return Ok(primary.clone());
+    }
     match command {
         "snapshot"
         | "snapshot_if_changed"

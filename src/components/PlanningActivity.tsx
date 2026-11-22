@@ -2,6 +2,7 @@ import { t, localizeError } from "../i18n";
 import type { ChatMessage, TranscriptItem } from "../types";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
+import { flushSync } from "react-dom";
 import { runtimeService } from "../services/runtime";
 import { combineAbortSignals } from "../services/requestTimeout";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribePlanningOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
@@ -175,7 +176,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   // out of the byte cursor) until its insertion point reaches the viewport top.
   const pendingOlder = useRef<{ id: string; page: Awaited<ReturnType<typeof runtimeService.getPlanningOutput>> } | null>(null);
   const [holdingOlder, setHoldingOlder] = useState(false);
-  const commitPendingOlder = useStableCallback(() => {
+  const commitPendingOlder = useStableCallback((fromScroll = false) => {
     const pending = pendingOlder.current;
     if (!pending || lifetime.current?.aborted || !olderPageFits(sectionRef.current, pending.id)) return false;
     pendingOlder.current = null;
@@ -185,15 +186,21 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     }
     try {
       markTranscriptPrependIfReading(sectionRef.current);
-      publish(pending.id, latest
-        ? prependTranscriptPage(latest, pending.page) : windowFromPage(pending.page, !pending.page.running));
+      const next = latest
+        ? prependTranscriptPage(latest, pending.page) : windowFromPage(pending.page, !pending.page.running);
+      if (fromScroll) {
+        try { flushSync(() => { publish(pending.id, next); setHoldingOlder(false); }); }
+        catch { publish(pending.id, next); }
+      } else {
+        publish(pending.id, next);
+      }
     } catch (caught) { failedOlder.current = true; setError(caught instanceof Error ? caught.message : String(caught)); }
     return true;
   });
   useEffect(() => {
     if (!holdingOlder) return;
-    if (commitPendingOlder()) { setHoldingOlder(false); return; }
-    return onTranscriptScroll(sectionRef.current, () => { if (commitPendingOlder()) setHoldingOlder(false); });
+    if (commitPendingOlder(false)) { setHoldingOlder(false); return; }
+    return onTranscriptScroll(sectionRef.current, () => { if (commitPendingOlder(true)) setHoldingOlder(false); });
   }, [holdingOlder, commitPendingOlder]);
 
   const loadOlder = useStableCallback(async (preserveReading: boolean = true, requestedId?: string, quiet = false,

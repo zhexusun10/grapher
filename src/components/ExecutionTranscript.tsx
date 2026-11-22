@@ -1,5 +1,6 @@
 import { t, localizeError } from "../i18n";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Loader2 } from "lucide-react";
 import type { Execution, ImageAttachment } from "../types";
 import { runtimeService } from "../services/runtime";
@@ -277,7 +278,7 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
   // compensates the scroll position under an active gesture.
   const pendingOlder = useRef<Awaited<ReturnType<typeof runtimeService.getExecutionOutput>> | null>(null);
   const [holdingOlder, setHoldingOlder] = useState(false);
-  const commitPendingOlder = useStableCallback(() => {
+  const commitPendingOlder = useStableCallback((fromScroll = false) => {
     const page = pendingOlder.current;
     if (!page || lifetime.current?.aborted || !olderPageFits(wrapperRef.current)) return false;
     pendingOlder.current = null;
@@ -288,14 +289,20 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
     try {
       markTranscriptPrependIfReading(wrapperRef.current);
       // A simultaneous forward response may have extended end; never replace it.
-      publish(prependTranscriptPage(latest, page));
+      const next = prependTranscriptPage(latest, page);
+      if (fromScroll) {
+        try { flushSync(() => { publish(next); setHoldingOlder(false); }); }
+        catch { publish(next); }
+      } else {
+        publish(next);
+      }
     } catch (caught) { failedOlder.current = true; setError(String(caught)); }
     return true;
   });
   useEffect(() => {
     if (!holdingOlder) return;
-    if (commitPendingOlder()) { setHoldingOlder(false); return; }
-    return onTranscriptScroll(wrapperRef.current, () => { if (commitPendingOlder()) setHoldingOlder(false); });
+    if (commitPendingOlder(false)) { setHoldingOlder(false); return; }
+    return onTranscriptScroll(wrapperRef.current, () => { if (commitPendingOlder(true)) setHoldingOlder(false); });
   }, [holdingOlder, commitPendingOlder]);
 
   const loadOlder = useStableCallback(async (preserveReading: boolean = true, readerRequested: boolean = preserveReading) => {

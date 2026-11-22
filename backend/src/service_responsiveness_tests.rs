@@ -2,13 +2,160 @@ use super::*;
 use std::time::Duration;
 
 fn primary(root: &std::path::Path) -> Arc<Service> {
-    Arc::new(Service {
+    let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open_lazy(root).unwrap()),
         driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), Condvar::new()),
         planning: AtomicBool::new(false),
         extension: root.join("unused.ts"),
-    })
+    });
+    remember_service_root(&service, root);
+    service
+}
+
+fn stored_run(service: &Arc<Service>, run_id: &str) {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": "/repo", "model": "mock/model", "maxParallel": 1
+    }))
+    .unwrap();
+    let mut state = Snapshot {
+        run_id: run_id.into(),
+        ..Default::default()
+    };
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .append(
+            &mut state,
+            EventKind::Created {
+                graph: Graph {
+                    nodes: vec![Node {
+                        id: "task".into(),
+                        task: "task".into(),
+                    }],
+                    ..Default::default()
+                },
+                config,
+                planning_id: None,
+                planning: None,
+            },
+        )
+        .unwrap();
+}
+
+fn stored_execution_run(service: &Arc<Service>, run_id: &str, execution_id: &str) {
+    stored_run(service, run_id);
+    let execution: Execution = serde_json::from_value(serde_json::json!({
+        "id": execution_id,
+        "node": "task",
+        "revision": 1,
+        "attempt": 1,
+        "sessionId": "session",
+        "worktree": "",
+        "before": "",
+        "after": null,
+        "status": "running",
+        "output": "",
+        "outputBytes": 0,
+        "startedAt": 1,
+        "completedAt": null
+    }))
+    .unwrap();
+    let runtime = service.runtime.lock().unwrap();
+    let mut state = runtime.store.load(run_id).unwrap();
+    runtime
+        .store
+        .append(
+            &mut state,
+            EventKind::Started {
+                execution,
+                message_sequences: Some(vec![]),
+                fresh_restart: false,
+            },
+        )
+        .unwrap();
+    runtime
+        .store
+        .append(
+            &mut state,
+            EventKind::Output {
+                execution_id: execution_id.into(),
+                text: "history output".into(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn transcript_reads_fall_back_to_durable_metadata_while_a_run_is_busy() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = primary(temp.path());
+    stored_execution_run(&service, "transcript-read", "execution");
+    let held = service.runtime.lock().unwrap();
+    let reader = service.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let body = serde_json::json!({
+            "runId": "transcript-read", "executionId": "execution", "offset": 0,
+            "limit": 64, "compact": true, "detail": "metadata"
+        });
+        let scoped = api_service(&reader, "get_execution_output", &body).unwrap();
+        tx.send(dispatch(&scoped, "get_execution_output", body)).unwrap();
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    drop(held);
+    worker.join().unwrap();
+    let page = result
+        .expect("transcript reads must not queue behind the projection lock")
+        .unwrap();
+    assert_eq!(page["content"], "history output");
+}
+
+#[test]
+fn historical_replay_does_not_wait_for_the_projection_mutex() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = primary(temp.path());
+    stored_run(&service, "history-read");
+    let held = service.runtime.lock().unwrap();
+    let reader = service.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || tx.send(history("history-read".into(), &reader)).unwrap());
+
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    drop(held);
+    worker.join().unwrap();
+    let snapshot = result
+        .expect("historical replay must not queue behind the projection lock")
+        .unwrap();
+    assert_eq!(snapshot.run_id, "history-read");
+}
+
+#[test]
+fn busy_settings_snapshot_falls_back_to_durable_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = primary(temp.path());
+    stored_run(&service, "settings-read");
+    let held = service.runtime.lock().unwrap();
+    let reader = service.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let body = serde_json::json!({
+            "runId": "settings-read", "compact": true, "detail": "metadata"
+        });
+        let scoped = api_service(&reader, "snapshot", &body).unwrap();
+        tx.send(dispatch(&scoped, "snapshot", body)).unwrap();
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    drop(held);
+    worker.join().unwrap();
+    let metadata = result
+        .expect("settings metadata must not queue behind the projection lock")
+        .unwrap();
+    assert_eq!(metadata["runId"], "settings-read");
 }
 
 #[test]

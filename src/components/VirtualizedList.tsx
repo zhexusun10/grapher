@@ -22,7 +22,10 @@ const MeasuredListRow = memo(function MeasuredListRow({ id, measure, rowElements
   useLayoutEffect(() => {
     const element = ref.current!;
     rowElements.current.set(id, element);
-    const read = () => Math.round(element.offsetHeight || element.getBoundingClientRect().height);
+    const read = () => {
+      const rectHeight = element.getBoundingClientRect().height;
+      return rectHeight > 0 ? rectHeight : element.offsetHeight;
+    };
     measure(id, read());
     const unobserve = observeElementResize(element, () => measure(id, read(), true));
     return () => {
@@ -32,6 +35,17 @@ const MeasuredListRow = memo(function MeasuredListRow({ id, measure, rowElements
   }, [id, measure, rowElements]);
   return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root" }}>{children}</div>;
 });
+
+function rowHeightKind(id: string): string {
+  if (id.startsWith("summary_")) return "summary";
+  if (id.startsWith("think_")) return "think";
+  if (id.startsWith("divider_")) return "divider";
+  if (id.startsWith("tool") || id.startsWith("call_")) return "tool";
+  if (id.startsWith("err_") || id.startsWith("system_")) return "error";
+  if (id.startsWith("user_") || id.startsWith("session_user_")) return "user";
+  if (id.startsWith("text_")) return "text";
+  return "other";
+}
 
 /** Window document-flow rows using the *shared parent's* viewport, not a private scroll area.
  * The conversation remains responsible for following output and revealing expanded cards.
@@ -67,12 +81,26 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const [viewport, setViewport] = useState({ top: 0, height: 600, hasScroller: true });
   const lastViewportRef = useRef(viewport);
   lastViewportRef.current = viewport;
+  const liveTopRef = useRef<number | null>(null);
+  // Track measured row-height averages per row kind so unmeasured older rows
+  // start close to this conversation's real heights instead of tiny defaults,
+  // reducing both scrollTop compensation deltas and mount-then-unmount churn.
+  const kindHeightStatsRef = useRef(new Map<string, { sum: number; count: number }>());
 
   const measure = useCallback((id: string, height: number, sync = false) => {
     if (height <= 0 || transitionPhaseRef.current !== "idle") return;
     const existing = heights.current.get(id);
-    if (existing !== undefined && Math.abs(existing - height) < 1) return;
-    if (existing !== undefined) resizedRevisionRef.current += 1;
+    if (existing !== undefined && Math.abs(existing - height) < 0.25) return;
+    const kind = rowHeightKind(id);
+    const stats = kindHeightStatsRef.current.get(kind) ?? { sum: 0, count: 0 };
+    if (existing !== undefined) {
+      resizedRevisionRef.current += 1;
+      stats.sum = Math.max(0, stats.sum - existing) + height;
+    } else {
+      stats.sum += height;
+      stats.count += 1;
+    }
+    kindHeightStatsRef.current.set(kind, stats);
     heights.current.set(id, height);
     measuredRevisionRef.current += 1;
     if (sync) syncFlushScheduled.current = true;
@@ -100,7 +128,11 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const { offsets, revision: offsetsRevision, resizeRevision: offsetsResizeRevision } = useMemo(() => ({
     offsets: rowOffsets(ids,
       { get: (id: string) => { const height = heights.current.get(id); return height === undefined ? undefined : height + gap; } },
-      (id: string) => estimateTranscriptRowHeight(id) + gap),
+      (id: string) => {
+        const stats = kindHeightStatsRef.current.get(rowHeightKind(id));
+        const estimated = stats && stats.count >= 2 ? stats.sum / stats.count : estimateTranscriptRowHeight(id);
+        return estimated + gap;
+      }),
     revision: measuredRevisionRef.current,
     resizeRevision: resizedRevisionRef.current,
   }), [ids, gap, heightVersion]);
@@ -225,6 +257,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const updateViewport = useCallback(() => {
     const element = ref.current, parent = parentRef.current;
     if (!element || !parent) {
+      liveTopRef.current = null;
       setViewport(previous => previous.hasScroller ? { ...previous, hasScroller: false } : previous);
       return;
     }
@@ -232,6 +265,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const elementRect = element.getBoundingClientRect();
     const top = Math.round(parentRect.top + parent.clientTop - elementRect.top);
     const height = Math.round(parent.clientHeight || 600);
+    liveTopRef.current = top;
     const prev = lastViewportRef.current;
     if (Math.abs(prev.top - top) < 4 && prev.height === height && prev.hasScroller) {
       return;
@@ -444,37 +478,34 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       }
       if (!stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1) releaseAnchor();
       if (transitionPhaseRef.current === "idle") {
-        // When fast upward/downward scrolling approaches the mounted window edge,
-        // flush the viewport update synchronously on this frame so the browser
-        // never paints empty paddingTop/paddingBottom whitespace while waiting
-        // for the next rAF.
+        // Window hysteresis: while scrolling comfortably inside the already
+        // mounted overscan buffer, skip React re-renders and scrollTop writes
+        // completely so native compositor momentum runs with zero micro-jitter.
+        // Only flush once the viewport approaches the mounted window edge.
         const element = ref.current;
-        let nearEdge = false;
         if (parent && element) {
           const curTop = Math.round(parent.getBoundingClientRect().top + parent.clientTop - element.getBoundingClientRect().top);
+          liveTopRef.current = curTop;
           const curHeight = parent.clientHeight || 600;
           const curOffsets = latestOffsetsRef.current;
           const mountedStart = previousRangeStartRef.current;
           const mountedEnd = previousRangeEndRef.current;
-          const edgeMargin = Math.max(curHeight * 0.75, 480);
-          if (mountedStart > 0 && curTop < (curOffsets[mountedStart] ?? 0) + edgeMargin) {
-            nearEdge = true;
-          } else if (mountedEnd < latestIdsLengthRef.current && curTop + curHeight > (curOffsets[mountedEnd] ?? 0) - edgeMargin) {
-            nearEdge = true;
-          }
-        }
-        if (nearEdge) {
-          if (frame.current !== null) {
-            cancelAnimationFrame(frame.current);
-            frame.current = null;
-          }
-          syncingViewportScrollRef.current = true;
-          try {
-            flushSync(() => updateViewport());
-          } catch {
-            updateViewport();
-          } finally {
-            syncingViewportScrollRef.current = false;
+          const safeMargin = Math.max(curHeight * 0.6, 400);
+          const withinSafeTop = mountedStart === 0 || curTop >= (curOffsets[mountedStart] ?? 0) + safeMargin;
+          const withinSafeBottom = mountedEnd >= latestIdsLengthRef.current || curTop + curHeight <= (curOffsets[mountedEnd] ?? 0) - safeMargin;
+          if (!withinSafeTop || !withinSafeBottom) {
+            if (frame.current !== null) {
+              cancelAnimationFrame(frame.current);
+              frame.current = null;
+            }
+            syncingViewportScrollRef.current = true;
+            try {
+              flushSync(() => updateViewport());
+            } catch {
+              updateViewport();
+            } finally {
+              syncingViewportScrollRef.current = false;
+            }
           }
         } else if (frame.current === null) {
           frame.current = requestAnimationFrame(() => {
@@ -488,7 +519,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const onContentGrowth = () => {
       for (const [id, element] of rowElements.current) {
         if (!element.isConnected) continue;
-        measure(id, Math.round(element.offsetHeight || element.getBoundingClientRect().height), true);
+        const rectHeight = element.getBoundingClientRect().height;
+        measure(id, rectHeight > 0 ? rectHeight : element.offsetHeight, true);
       }
     };
     const observer = new ResizeObserver(updateViewport);
@@ -540,8 +572,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const externalTop = externalTransitionAnchor && !pinnedToBottom && parent && ref.current
     ? Math.round(parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top)
     : null;
-  const top = restoreTop ?? anchorTop ?? externalTop ?? (pinnedToBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
-  const pixelOverscan = Math.max(height * 1.5, 1000);
+  const effectiveViewportTop = liveTopRef.current ?? viewport.top;
+  const top = restoreTop ?? anchorTop ?? externalTop ?? (pinnedToBottom ? Math.max(effectiveViewportTop, totalHeight - height) : effectiveViewportTop);
+  const pixelOverscan = Math.max(height * 1.8, 1200);
   const range = virtual ? visibleRows(offsets, top, height, overscan, pixelOverscan)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
   if (transitionPhase !== "idle" && transitionInitialIdsRef.current === null) {
@@ -645,7 +678,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       let shifted = false;
       if (row) {
         const visualDelta = row.getBoundingClientRect().top - retained.visualTop;
-        if (Math.abs(visualDelta) >= 1) {
+        if (Math.abs(visualDelta) >= 0.5) {
           parent.scrollTop += visualDelta;
           parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
           shifted = true;
@@ -691,7 +724,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         const anchoredRow = rowElements.current.get(rangePrependAnchor.id);
         if (anchoredRow && anchoredRow.isConnected) {
           const shift = anchoredRow.getBoundingClientRect().top - rangePrependAnchor.visualTop;
-          if (Math.abs(shift) >= 1) {
+          if (Math.abs(shift) >= 0.5) {
             parent.scrollTop += shift;
             parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
             const gesture = gestureRowAnchor.current;
