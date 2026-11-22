@@ -127,7 +127,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.waitForFunction(() => {
       const index = JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"));
-      return index["c:/projects/alpha"]?.join() === "run-a" && index["c:/projects/beta"]?.join() === "run-b";
+      return index?.["c:/projects/alpha"]?.join() === "run-a" && index?.["c:/projects/beta"]?.join() === "run-b";
     });
     assert.deepEqual(await page.locator(".runs-list [data-run-id]").evaluateAll(cards => cards.map(card => card.dataset.runId)), ["run-a"]);
 
@@ -787,7 +787,7 @@ test("home composer accepts dragged image attachments and preserves them across 
     });
     const previewImg = page.locator('.landing-screen .prompt-box-preview-img[alt="dropped-shot.png"]');
     await previewImg.waitFor();
-    assert.ok((await previewImg.getAttribute("src"))?.startsWith("data:image/png;base64,"));
+    await previewImg.evaluate(image => image.decode());
 
     // Navigate into a historical conversation (unmounts LandingView).
     await page.locator('[data-run-id="run-a"]').click();
@@ -798,7 +798,7 @@ test("home composer accepts dragged image attachments and preserves them across 
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
     await page.locator(".landing-screen").waitFor();
     await previewImg.waitFor();
-    assert.ok((await previewImg.getAttribute("src"))?.startsWith("data:image/png;base64,"));
+    await previewImg.evaluate(image => image.decode());
 
     // Workspace isolation: switching to Beta hides Alpha's attachment; returning to Alpha restores it.
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
@@ -809,6 +809,7 @@ test("home composer accepts dragged image attachments and preserves them across 
     await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
     await page.locator(".project-workspace-item.active", { hasText: "Alpha" }).waitFor();
     await previewImg.waitFor();
+    await previewImg.evaluate(image => image.decode());
 
     // Window-level file drop guard prevents default browser navigation outside the composer.
     const dropPrevented = await page.evaluate(() => {

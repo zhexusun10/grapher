@@ -3,6 +3,7 @@ import { normalizeWorkspacePath } from "./workspaceConversations";
 
 export const STORAGE_KEYS = {
   projects: "grapher_projects",
+  lastWorkspace: "grapher_last_workspace",
   workspaceRuns: "grapher_workspace_runs",
   archivedRuns: "grapher_archived_runs",
   runLabels: "grapher_run_labels",

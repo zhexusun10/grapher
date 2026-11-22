@@ -503,7 +503,7 @@ pub struct Bootstrap {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unavailable_conversation_ids: Vec<String>,
     data_path: String,
-    repository_info: Option<crate::workspace::RepositoryInfo>,
+    repository_info: Option<crate::workspace::WorkspaceDirectory>,
     pub effective_role_models: std::collections::HashMap<String, String>,
     pub env_overrides: std::collections::HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -757,10 +757,10 @@ fn bootstrap_projection(
     };
     #[cfg(feature = "fixture")]
     let entrypoint = crate::native::installation_root().join("engine/entrypoint.mjs");
-    // Repository status can touch an arbitrarily large/native working tree.
-    // It must not hold the primary Run lock or be part of saving model defaults.
+    // Directory admission can scan a large working tree. Keep it outside the
+    // primary Run lock and settings saves; navigation never inspects Git.
     let detected_repo = discover_repository
-        .then(|| crate::workspace::detect(None).ok().flatten())
+        .then(|| crate::workspace::inspect_directory(None).ok().flatten())
         .flatten();
     let saved_config_on_disk = {
         let path = root.join("config.json");
@@ -814,12 +814,12 @@ fn bootstrap_projection(
             if repo.path == config.repository {
                 Some(repo.clone())
             } else {
-                crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+                crate::workspace::inspect_directory(Some(std::path::Path::new(&config.repository)))
                     .ok()
                     .flatten()
             }
         } else {
-            crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+            crate::workspace::inspect_directory(Some(std::path::Path::new(&config.repository)))
                 .ok()
                 .flatten()
         }
@@ -5412,17 +5412,19 @@ fn edit_node(
 fn detect_repository(
     path: Option<String>,
     service: &Arc<Service>,
-) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
-    crate::workspace::detect_with_size_check(path.as_deref().map(std::path::Path::new), |path| {
-        match idle_workspace_size_error(
+) -> Result<Option<crate::workspace::WorkspaceDirectory>, String> {
+    // Keep the existing command name for clients; this only inspects a folder.
+    crate::workspace::inspect_directory_with_size_check(
+        path.as_deref().map(std::path::Path::new),
+        |path| match idle_workspace_size_error(
             service,
             path,
             crate::workspace::cached_check_workspace_size,
         )? {
             Some(error) => Err(error),
             None => Ok(()),
-        }
-    })
+        },
+    )
 }
 
 fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {

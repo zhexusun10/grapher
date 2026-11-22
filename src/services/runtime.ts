@@ -7,7 +7,7 @@ import { ApiRequestError, jsonRequest, observeApiResponse, requestHeaders, respo
 import type { SnapshotPollRequest, SnapshotPollResponse, ExecutionOutputPage, PlanningOutputPage, OperationStatus, ConversationSearchResponse } from "./apiContract.generated";
 import { applySnapshotDelta, validateSnapshot } from "./snapshotDelta";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, FileChangeSummary, Graph, HostPreflight, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, FileChangeSummary, Graph, HostPreflight, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, WorkspaceDirectory, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -456,12 +456,12 @@ export const runtimeService = {
     request<Snapshot>("edit_planner", input),
   editNode: (input: { runId: string; node: string; executionId: string; oldText: string; instruction: string; images?: import("../types").ImageAttachment[]; versionIndex?: number; userTurnOffset?: number }) =>
     request<Snapshot>("edit_node", input),
-  detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),
-  async pickRepository(): Promise<RepositoryInfo | null> {
+  inspectWorkspace: (path?: string | null) => request<WorkspaceDirectory | null>("detect_repository", { path: path || null }),
+  async pickRepository(): Promise<WorkspaceDirectory | null> {
     try {
       const res = await request<{
         supported: boolean;
-        repository: RepositoryInfo | null;
+        repository: WorkspaceDirectory | null;
         cancelled: boolean;
       }>("pick_repository");
       if (res.supported) {
@@ -483,7 +483,7 @@ export const runtimeService = {
     }
     const path = window.prompt(t("输入本地项目文件夹绝对路径（支持 Git 仓库或普通文件夹）"));
     if (!path?.trim()) return null;
-    const info = await this.detectRepository(path.trim());
+    const info = await this.inspectWorkspace(path.trim());
     if (!info) throw new Error(t("无法加载该路径为有效工作区。"));
     return info;
   },
