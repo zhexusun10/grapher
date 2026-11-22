@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded bundled `pi-better-web-search` from 1.0.4 to 1.0.5 and added Parallel to Grapher's credential/settings validation, dedicated API detection and Keenable public-endpoint status. An available Parallel key switches `web_search` to `objective` / `search_queries` / `urls` and locks routing to Parallel without cross-provider fallback; `/web-search-api parallel` disables it and restores the usual schema and routing. Tool cards and collapsed activity summaries now display Parallel objectives alongside legacy search queries.
+
 ### Fixed
 
 - Remember the last selected sidebar workspace across reloads and restarts, independently of list order or Git detection. Removed or archived workspaces fall back to the most recently opened active workspace.

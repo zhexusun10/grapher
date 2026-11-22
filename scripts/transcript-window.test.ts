@@ -307,6 +307,20 @@ test("collapseCards folds cards into Codex-style summaries between model text an
   assert.equal(withPrepended.rows[0].summaryItems?.length, 3);
 });
 
+test("summarizeActivityGroup retains legacy and Parallel search details", () => {
+  for (const args of [
+    { query: "Find official documentation" },
+    { objective: "Find official\ndocumentation", search_queries: ["official API documentation"] },
+    { objective: "Find official documentation", urls: ["https://example.com"] },
+  ]) {
+    const summary = summarizeActivityGroup([
+      { id: "search", type: "tool_call", toolName: "web_search", status: "success", args },
+    ]);
+    assert.equal(summary.icon, "web");
+    assert.ok(summary.text.includes("Find official documentation"));
+  }
+});
+
 test("summarizeActivityGroup formats Codex-style summaries in Chinese and English", () => {
   const zh = (key: string, ...values: unknown[]) => translate("zh-CN", key, ...values);
   const en = (key: string, ...values: unknown[]) => translate("en", key, ...values);

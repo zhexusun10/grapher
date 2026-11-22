@@ -96,7 +96,7 @@ export function KeenablePublicDialog({ open, busy, onCancel, onEnableOnly, onUse
                   <ExternalLink size={12} aria-hidden="true" />
                 </a>
               </li>
-              <li>{t('选择使用公共端点后，一旦你配置了 Keenable、Exa 或 Perplexity 任一专用搜索 API，系统会自动停止使用公共端点并切换到你的私有 API。')}</li>
+              <li>{t('选择使用公共端点后，一旦你配置了 Parallel、Keenable、Exa 或 Perplexity 任一专用搜索 API，系统会自动停止使用公共端点并切换到你的私有 API。')}</li>
             </ul>
           </div>
         </div>
@@ -175,7 +175,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       disabled={busy || disabled}
       onToggle={handleToggle}
       statusNote={extension.id === WEB_SEARCH_ID && extension.enabled && webSearchPublicActive
-        ? t('当前使用 Keenable 免费公共端点（配置 Keenable、Exa 或 Perplexity API 后自动切换）')
+        ? t('当前使用 Keenable 免费公共端点（配置 Parallel、Keenable、Exa 或 Perplexity API 后自动切换）')
         : undefined}
     />
   ));

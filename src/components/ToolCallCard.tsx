@@ -42,7 +42,7 @@ function compactText(value: unknown): string | undefined {
 
 /** One-line summary for the bundled web_search extension tool. */
 function webSearchSummary(args: Record<string, any>): string {
-  const query = compactText(args.query);
+  const query = compactText(args.query) || compactText(args.objective);
   const urls = Array.isArray(args.urls)
     ? args.urls.map(compactText).filter((url): url is string => url !== undefined)
     : [];

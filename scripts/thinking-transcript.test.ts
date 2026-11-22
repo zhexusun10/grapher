@@ -188,18 +188,24 @@ test("session JSONL empty thinking parts keep an explanatory card", () => {
   assert.ok(opened.includes(t("此次思考未输出可见内容")), "the empty session block explains itself when opened");
 });
 
-test("bundled web_search calls render a dedicated card with query and URL details", () => {
+test("bundled web_search calls render a dedicated card with query, Parallel objective and URL details", () => {
   const output = line({ type: "message", id: "assistant-search", message: { role: "assistant", content: [
     { type: "toolCall", id: "web-query", name: "web_search", arguments: { query: "rust async\nruntime" } },
     { type: "toolCall", id: "web-urls", name: "web_search",
       arguments: { urls: ["https://example.com/a", "https://example.com/b"] } },
+    { type: "toolCall", id: "web-parallel", name: "web_search",
+      arguments: { objective: "Find Parallel\ndocumentation", search_queries: ["Parallel official API documentation"] } },
+    { type: "toolCall", id: "web-extract", name: "web_search",
+      arguments: { objective: "Extract API details", urls: ["https://example.com/docs"] } },
   ] } });
   const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
-  assert.equal(toolCount(html), 2);
-  assert.equal((html.match(/tool-call-card web /g) || []).length, 2, "web_search uses the web card type");
+  assert.equal(toolCount(html), 4);
+  assert.equal((html.match(/tool-call-card web /g) || []).length, 4, "web_search uses the web card type");
   assert.match(html, /tool-icon web/);
   assert.match(html, /rust async runtime/, "queries collapse to a one-line summary");
   assert.ok(html.includes(t("{0} 个链接", 2)), "URL-only searches summarize the URL count");
+  assert.match(html, /Find Parallel documentation/, "Parallel search objectives remain visible in collapsed cards");
+  assert.match(html, /Extract API details · https:\/\/example.com\/docs/);
 });
 
 test("a tail result without its start still has a tool card, never raw JSON", () => {
