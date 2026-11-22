@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.14] - 2026-11-22
+
 ### Added
 
 - Added workspace and conversation archiving in the sidebar: an archive toggle button sits to the left of each section's `+` button (hiding cleanly when the sidebar is collapsed) to switch the existing `.projects-list` and `.runs-list` card areas between active and archived items with a directional fade/slide transition (respecting `prefers-reduced-motion`). Right-clicking (or keyboard-opening the context menu on) any workspace or conversation card archives it in the active view or unarchives it in the archived view, persists state in local storage (`ProjectItem.archived` and `dataPath`-scoped `grapher_archived_runs`, pruned on deletion/bootstrap), switches away cleanly when the active workspace or open conversation is archived, and auto-unarchives a workspace if reopened via `+` (`src/components/layout/Sidebar.tsx`, `src/App.tsx`, `src/services/appStorage.ts`, `src/types.ts`, `src/styles.css`, `src/i18n/en.ts`, `scripts/sidebar-copy-prompt-ui.test.mjs`).
