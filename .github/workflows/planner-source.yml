@@ -243,7 +243,8 @@ jobs:
           workspaces: backend
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Verify real ConPTY startup, input, resize, output drain and shutdown
-        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib terminal::tests:: -- --test-threads=1
+        run: >-
+          node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib terminal::tests:: -- --test-threads=1
 
   macos-filesystem:
     name: macOS filesystem / ${{ matrix.os }}
