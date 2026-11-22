@@ -121,10 +121,72 @@ enum StdoutEvent {
     Closed,
 }
 
+#[cfg(windows)]
+struct SidecarJobObject(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for SidecarJobObject {}
+
+#[cfg(windows)]
+impl SidecarJobObject {
+    fn assign_child(child: &Child) -> Option<Self> {
+        use std::{ffi::c_void, mem::size_of, os::windows::io::AsRawHandle, ptr};
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+
+        unsafe {
+            let job = CreateJobObjectW(ptr::null(), ptr::null());
+            if job.is_null() {
+                eprintln!("[grapher-desktop] Warning: failed to create Windows Job Object for backend sidecar");
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                eprintln!("[grapher-desktop] Warning: failed to configure Windows Job Object kill-on-close");
+                CloseHandle(job);
+                return None;
+            }
+            let process_handle = child.as_raw_handle();
+            if AssignProcessToJobObject(job, process_handle) == 0 {
+                eprintln!("[grapher-desktop] Warning: failed to assign backend sidecar to Windows Job Object");
+                CloseHandle(job);
+                return None;
+            }
+            Some(Self(job))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SidecarJobObject {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 struct RunningChild {
     child: Child,
     stdin: Option<ChildStdin>,
     shutdown_timeout: Duration,
+    #[cfg(windows)]
+    _job: Option<SidecarJobObject>,
 }
 
 pub struct BackendSidecar {
@@ -142,6 +204,8 @@ impl BackendSidecar {
                 config.backend_executable.display()
             )
         })?;
+        #[cfg(windows)]
+        let job = SidecarJobObject::assign_child(&child);
 
         let stdin = child
             .stdin
@@ -180,6 +244,8 @@ impl BackendSidecar {
                 child,
                 stdin: Some(stdin),
                 shutdown_timeout: config.shutdown_timeout,
+                #[cfg(windows)]
+                _job: job,
             })),
             stderr_buffer,
         })

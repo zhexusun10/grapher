@@ -69,6 +69,7 @@
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "nsis/hooks.nsh",
         "languages": ["English"]
       }
     }

@@ -21,7 +21,7 @@ use sidecar::{BackendSidecar, SidecarConfig};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -433,7 +433,23 @@ fn open_desktop_notification_settings() -> Result<(), String> {
     {
         macos_notifications::open_notification_settings()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let mut child = std::process::Command::new("explorer.exe")
+            .arg("ms-settings:notifications")
+            .spawn()
+            .map_err(|error| format!("Failed to open Windows notification settings: {error}"))?;
+        std::thread::Builder::new()
+            .name("grapher-open-notification-settings".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|error| {
+                format!("Failed to monitor Windows notification settings launch: {error}")
+            })?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(())
     }
@@ -656,10 +672,70 @@ fn initialize_backend(
     Ok((sidecar, git_bootstrap))
 }
 
+pub const WINDOWS_AUTOSTART_ARG: &str = "--autostart";
+
+pub fn launched_from_autostart(args: &[String]) -> bool {
+    args.iter().skip(1).any(|arg| arg == WINDOWS_AUTOSTART_ARG)
+}
+
+pub fn tray_labels_for_windows_lang_id(lang_id: u16) -> (&'static str, &'static str) {
+    // Primary language ID sits in the low 10 bits; 0x04 is LANG_CHINESE.
+    if (lang_id & 0x03ff) == 0x0004 {
+        ("显示 Grapher", "退出 Grapher")
+    } else {
+        ("Show Grapher", "Quit Grapher")
+    }
+}
+
 #[cfg(desktop)]
 fn build_autostart_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None)
+    #[cfg(target_os = "windows")]
+    let args: Option<Vec<&'static str>> = Some(vec![WINDOWS_AUTOSTART_ARG]);
+    #[cfg(not(target_os = "windows"))]
+    let args: Option<Vec<&'static str>> = None;
+    tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, args)
 }
+
+#[derive(Default)]
+pub struct WindowsTrayState {
+    tray_available: AtomicBool,
+    hidden_to_tray: AtomicBool,
+    quitting: AtomicBool,
+}
+
+impl WindowsTrayState {
+    pub fn set_tray_available(&self, available: bool) {
+        self.tray_available.store(available, Ordering::Release);
+    }
+
+    pub fn should_hide_on_close(&self) -> bool {
+        self.tray_available.load(Ordering::Acquire) && !self.quitting.load(Ordering::Acquire)
+    }
+
+    pub fn mark_hidden_to_tray(&self) {
+        self.hidden_to_tray.store(true, Ordering::Release);
+    }
+
+    pub fn mark_restored(&self) {
+        self.hidden_to_tray.store(false, Ordering::Release);
+    }
+
+    pub fn is_hidden_to_tray(&self) -> bool {
+        self.hidden_to_tray.load(Ordering::Acquire)
+    }
+
+    pub fn mark_quitting(&self) {
+        self.quitting.store(true, Ordering::Release);
+        self.hidden_to_tray.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_TRAY_ID: &str = "grapher-tray";
+#[cfg(target_os = "windows")]
+const WINDOWS_TRAY_SHOW_ID: &str = "tray-show";
+#[cfg(target_os = "windows")]
+const WINDOWS_TRAY_QUIT_ID: &str = "tray-quit";
 
 #[cfg(target_os = "macos")]
 fn handle_macos_close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
@@ -676,13 +752,165 @@ fn handle_macos_close_requested(window: &tauri::Window, api: &tauri::CloseReques
     }
 }
 
+#[cfg(target_os = "windows")]
+fn set_windows_webview_hidden_state(window: &tauri::WebviewWindow, hidden: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface;
+
+    let visible = !hidden;
+    if let Err(error) = window.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        if let Err(err) = controller.SetIsVisible(visible) {
+            eprintln!(
+                "[grapher-desktop] Warning: failed to set WebView2 visibility to {visible}: {err}"
+            );
+        }
+        // Lower WebView2's V8/Blink memory target when hidden in the tray without
+        // calling `TrySuspend()`, so background completion notifications keep running.
+        if let Ok(core) = controller.CoreWebView2() {
+            if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                let level = if hidden {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                } else {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                };
+                if let Err(err) = core19.SetMemoryUsageTargetLevel(level) {
+                    eprintln!(
+                        "[grapher-desktop] Warning: failed to set WebView2 memory target level (hidden={hidden}): {err}"
+                    );
+                }
+            }
+        }
+    }) {
+        eprintln!(
+            "[grapher-desktop] Warning: failed to access WebView2 controller for hidden={hidden}: {error}"
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn mark_windows_webview_start_hidden(window: &tauri::WebviewWindow) {
+    use windows_core::w;
+
+    let _ = window.with_webview(|webview| unsafe {
+        if let Ok(core) = webview.controller().CoreWebView2() {
+            let _ = core.AddScriptToExecuteOnDocumentCreated(
+                w!("window.__GRAPHER_START_HIDDEN__ = true;"),
+                None,
+            );
+        }
+    });
+    let _ = window.eval("window.__GRAPHER_START_HIDDEN__ = true;");
+    set_windows_webview_hidden_state(window, true);
+    let _ = window.hide();
+}
+
+#[cfg(target_os = "windows")]
+fn handle_windows_close_requested(window: &tauri::Window, api: &tauri::CloseRequestApi) {
+    if window.label() != "main" {
+        return;
+    }
+    let app_handle = window.app_handle();
+    let should_hide = app_handle
+        .try_state::<WindowsTrayState>()
+        .map(|state| state.should_hide_on_close())
+        .unwrap_or(false);
+    if !should_hide {
+        return;
+    }
+    api.prevent_close();
+    if let Some(state) = app_handle.try_state::<WindowsTrayState>() {
+        state.mark_hidden_to_tray();
+    }
+    // Tauri's `Window::hide()` only hides the outer Win32 HWND (`ShowWindow(SW_HIDE)`),
+    // which does NOT set WebView2's `ICoreWebView2Controller::IsVisible` to `FALSE`.
+    // Explicitly setting `IsVisible(false)` + low memory target triggers
+    // `document.hidden = true` + `visibilitychange` (closing SSE, suspending
+    // polling/rAF/timers/CSS animations) and stops WebView2 GPU compositing,
+    // matching macOS hidden-window optimization.
+    if let Some(webview_window) = app_handle.get_webview_window("main") {
+        set_windows_webview_hidden_state(&webview_window, true);
+    }
+    let _ = window.hide();
+}
+
+#[cfg(target_os = "windows")]
+fn quit_windows_app(app_handle: &tauri::AppHandle) {
+    if let Some(tray_state) = app_handle.try_state::<WindowsTrayState>() {
+        tray_state.mark_quitting();
+    }
+    let _ = app_handle.remove_tray_by_id(WINDOWS_TRAY_ID);
+    if let Some(state) = app_handle.try_state::<BackendState>() {
+        state.shutdown();
+    }
+    app_handle.exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn setup_windows_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::{
+        menu::{MenuBuilder, MenuItemBuilder},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+
+    let lang_id = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
+    let (show_label, quit_label) = tray_labels_for_windows_lang_id(lang_id);
+    let show_item = MenuItemBuilder::with_id(WINDOWS_TRAY_SHOW_ID, show_label).build(app)?;
+    let quit_item = MenuItemBuilder::with_id(WINDOWS_TRAY_QUIT_ID, quit_label).build(app)?;
+    let menu = MenuBuilder::new(app)
+        .item(&show_item)
+        .separator()
+        .item(&quit_item)
+        .build()?;
+
+    let mut builder = TrayIconBuilder::with_id(WINDOWS_TRAY_ID)
+        .tooltip("Grapher")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app_handle, event| match event.id().as_ref() {
+            WINDOWS_TRAY_SHOW_ID => show_main_window(app_handle),
+            WINDOWS_TRAY_QUIT_ID => quit_windows_app(app_handle),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                show_main_window(tray.app_handle());
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    builder.build(app)?;
+    Ok(())
+}
+
 #[cfg(desktop)]
 pub(crate) fn show_main_window(app_handle: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app_handle.show();
+    #[cfg(target_os = "windows")]
+    if let Some(state) = app_handle.try_state::<WindowsTrayState>() {
+        state.mark_restored();
+    }
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
+        #[cfg(target_os = "windows")]
+        set_windows_webview_hidden_state(&window, false);
         let _ = window.set_focus();
     }
 }
@@ -724,12 +952,18 @@ fn schedule_windows_startup_reveal(app_handle: &tauri::AppHandle) {
             let Some(window) = fallback_handle.get_webview_window("main") else {
                 return;
             };
-            // Never restore a window the user has already minimized. Failed
-            // state queries also leave its current visibility untouched.
-            if matches!(window.is_visible(), Ok(false))
+            // Never restore a window the user has already minimized or hidden to the tray.
+            // Failed state queries also leave its current visibility untouched.
+            let hidden_to_tray = fallback_handle
+                .try_state::<WindowsTrayState>()
+                .map(|state| state.is_hidden_to_tray())
+                .unwrap_or(false);
+            if !hidden_to_tray
+                && matches!(window.is_visible(), Ok(false))
                 && matches!(window.is_minimized(), Ok(false))
             {
                 eprintln!("[grapher-desktop] Frontend window reveal timed out; showing the main window");
+                set_windows_webview_hidden_state(&window, false);
                 if let Err(error) = window.show() {
                     eprintln!("[grapher-desktop] Failed to show the main window: {error}");
                 }
@@ -774,18 +1008,52 @@ fn set_windows_corner_preference<R: tauri::Runtime>(window: &tauri::WebviewWindo
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS natively enforces single-instance for `.app` bundles via `RunEvent::Reopen`
+    // and uses `tauri-plugin-process::relaunch()` after in-app updates, so only Windows
+    // registers `tauri-plugin-single-instance` (waking a tray-hidden instance on relaunch).
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        show_main_window(app);
+    }));
+    let app = builder
         .plugin(tauri_plugin_process::init())
         .on_window_event(|_window, _event| {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
                 handle_macos_close_requested(_window, api);
             }
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                handle_windows_close_requested(_window, api);
+            }
         })
         .setup(|app| {
+            app.manage(WindowsTrayState::default());
             #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("main") {
-                set_windows_corner_preference(&window);
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    set_windows_corner_preference(&window);
+                }
+                let start_hidden = launched_from_autostart(&std::env::args().collect::<Vec<_>>());
+                match setup_windows_tray(app) {
+                    Ok(()) => {
+                        if let Some(tray_state) = app.try_state::<WindowsTrayState>() {
+                            tray_state.set_tray_available(true);
+                            if start_hidden {
+                                tray_state.mark_hidden_to_tray();
+                                if let Some(window) = app.get_webview_window("main") {
+                                    mark_windows_webview_start_hidden(&window);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[grapher-desktop] Warning: failed to register Windows system tray icon (close will exit normally): {error}"
+                        );
+                    }
+                }
             }
 
             #[cfg(desktop)]
@@ -1125,5 +1393,66 @@ mod tests {
         assert_eq!(sanitize_notification_text("hello world", 7), "hello…");
         assert_eq!(sanitize_notification_text("hello world", 6), "hello…");
         assert_eq!(sanitize_notification_text("a b", 1), "…");
+    }
+
+    #[test]
+    fn windows_tray_state_controls_close_to_tray_and_quit_lifecycle() {
+        let state = WindowsTrayState::default();
+        // Without an active tray icon, closing must not trap the window.
+        assert!(!state.should_hide_on_close());
+        assert!(!state.is_hidden_to_tray());
+
+        // Once the tray icon is registered, closing hides to tray.
+        state.set_tray_available(true);
+        assert!(state.should_hide_on_close());
+        state.mark_hidden_to_tray();
+        assert!(state.is_hidden_to_tray());
+
+        // Restoring clears hidden-to-tray while keeping close-to-tray active.
+        state.mark_restored();
+        assert!(!state.is_hidden_to_tray());
+        assert!(state.should_hide_on_close());
+
+        // Explicit quit from the tray disables close-to-tray interception.
+        state.mark_hidden_to_tray();
+        state.mark_quitting();
+        assert!(!state.is_hidden_to_tray());
+        assert!(!state.should_hide_on_close());
+    }
+
+    #[test]
+    fn launched_from_autostart_detects_flag_only_in_arguments() {
+        assert!(!launched_from_autostart(&[]));
+        assert!(!launched_from_autostart(&["--autostart".to_string()]));
+        assert!(!launched_from_autostart(&[
+            "grapher.exe".to_string(),
+            "--other".to_string()
+        ]));
+        assert!(launched_from_autostart(&[
+            "grapher.exe".to_string(),
+            "--autostart".to_string()
+        ]));
+    }
+
+    #[test]
+    fn tray_labels_follow_windows_primary_language() {
+        // Simplified Chinese (0x0804) & Traditional Chinese (0x0404)
+        assert_eq!(
+            tray_labels_for_windows_lang_id(0x0804),
+            ("显示 Grapher", "退出 Grapher")
+        );
+        assert_eq!(
+            tray_labels_for_windows_lang_id(0x0404),
+            ("显示 Grapher", "退出 Grapher")
+        );
+        // English US (0x0409) & Japanese (0x0411)
+        assert_eq!(
+            tray_labels_for_windows_lang_id(0x0409),
+            ("Show Grapher", "Quit Grapher")
+        );
+        assert_eq!(
+            tray_labels_for_windows_lang_id(0x0411),
+            ("Show Grapher", "Quit Grapher")
+        );
     }
 }

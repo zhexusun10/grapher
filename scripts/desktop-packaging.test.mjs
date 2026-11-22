@@ -99,6 +99,15 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   assert.equal(conf.bundle.macOS.hardenedRuntime, true);
   assert.equal(conf.bundle.macOS.entitlements, 'Entitlements.plist');
   assert.equal(conf.bundle.windows.nsis.installMode, 'currentUser');
+  assert.equal(conf.bundle.windows.nsis.installerHooks, 'nsis/hooks.nsh');
+  const nsisHooks = readFileSync(join(root, 'src-tauri', 'nsis', 'hooks.nsh'), 'utf8');
+  assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*taskkill\s+\/F\s+\/IM\s+grapher\.exe/);
+  assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*RMDir\s+\/r\s+"\$INSTDIR\\runtime"/);
+  assert.match(nsisHooks, /!macro\s+NSIS_HOOK_PREINSTALL[\s\S]*RMDir\s+\/r\s+"\$INSTDIR\\node"/);
+  assert.match(nsisHooks, /!macro\s+NSIS_HOOK_POSTINSTALL[\s\S]*SHChangeNotify/);
+  const tauriCargoToml = readFileSync(join(root, 'src-tauri', 'Cargo.toml'), 'utf8');
+  assert.match(tauriCargoToml, /^tauri\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*"tray-icon"/m);
+  assert.match(tauriCargoToml, /^tauri-plugin-single-instance\s*=\s*"2"/m);
   // Base config keeps createUpdaterArtifacts off so unsigned local/CI builds succeed without a private key.
   assert.equal(conf.bundle.createUpdaterArtifacts, false);
   assert.deepEqual(conf.plugins?.updater?.endpoints, [

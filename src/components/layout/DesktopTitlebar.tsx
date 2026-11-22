@@ -43,6 +43,7 @@ export function useDesktopTitlebar(): DesktopTitlebarState {
 
   useEffect(() => {
     if (platform !== "windows") return;
+    if ((window as { __GRAPHER_START_HIDDEN__?: boolean }).__GRAPHER_START_HIDDEN__) return;
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     // Windows starts hidden and borderless. Reveal only after React has
