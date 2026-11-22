@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Remember the last selected sidebar workspace across reloads and restarts, independently of list order or Git detection. Removed or archived workspaces fall back to the most recently opened active workspace.
+- Removed Git discovery from workspace navigation: restoring and switching use saved paths immediately, while first-launch discovery and folder selection perform filesystem-only validation.
 
 ## [1.9.14] - 2026-11-22
 

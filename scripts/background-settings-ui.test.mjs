@@ -483,6 +483,7 @@ test("execution graph overview defaults off, sits between UI sections, and commi
 
 test("completion notifications default to on, notify with agent final output when unfocused, and can be disabled in UI settings", { timeout: 90_000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  const otherRepository = "/mock/other";
   const errors = [];
   let runPhase = "running";
   let snapshotVersion = "v1";
@@ -527,9 +528,12 @@ test("completion notifications default to on, notify with agent final output whe
     },
   }) + "\n";
 
-  await context.addInitScript(({ repository }) => {
+  await context.addInitScript(({ repository, otherRepository }) => {
     localStorage.setItem("grapher_language_v1", "en");
-    localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Notify", lastOpened: 1 }]));
+    localStorage.setItem("grapher_projects", JSON.stringify([
+      { id: repository, path: repository, name: "Notify", lastOpened: 1 },
+      { id: otherRepository, path: otherRepository, name: "Other", lastOpened: 0 },
+    ]));
     localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [repository]: ["notify-run"] }));
     localStorage.setItem("grapher_run_labels", JSON.stringify({ "notify-run": "Refactor parser" }));
     window.__sentNotifications = [];
@@ -550,7 +554,7 @@ test("completion notifications default to on, notify with agent final output whe
       close() {}
     }
     window.Notification = MockNotification;
-  }, { repository });
+  }, { repository, otherRepository });
 
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
@@ -621,7 +625,10 @@ test("completion notifications default to on, notify with agent final output whe
       silent: false,
     });
 
-    // Clicking the notification opens the conversation that posted it.
+    // Clicking the notification switches back from another workspace and opens
+    // its conversation without waiting for repository detection.
+    await page.getByRole("button", { name: `Other\n${otherRepository}`, exact: true }).click();
+    assert.equal(await page.locator('.project-workspace-item[aria-current="true"]').getAttribute("aria-label"), `Other\n${otherRepository}`);
     await page.evaluate(() => {
       window.__unfocused = false;
       window.__notificationInstances[0]?.onclick?.();

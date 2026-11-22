@@ -177,13 +177,9 @@ export interface SkillItem {
   scope: "workspace" | "global" | "builtin";
 }
 
-export interface RepositoryInfo {
+export interface WorkspaceDirectory {
   path: string;
   name: string;
-  branch: string;
-  head: string;
-  clean: boolean;
-  isShadow?: boolean;
 }
 
 export interface ProjectItem {
@@ -222,7 +218,7 @@ export interface Bootstrap {
   config: Config;
   runs: string[];
   dataPath: string;
-  repositoryInfo?: RepositoryInfo | null;
+  repositoryInfo?: WorkspaceDirectory | null;
   effectiveRoleModels?: Record<string, string>;
   envOverrides?: Record<string, string>;
   hostPreflight?: HostPreflight | null;

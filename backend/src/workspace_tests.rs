@@ -7,6 +7,57 @@ use tempfile::TempDir;
 
 const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
 
+#[test]
+fn directory_inspection_ignores_git_metadata_and_keeps_the_selected_path() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    // Broken Git metadata cannot prevent opening a readable directory. No Git
+    // discovery, branch lookup or shadow repository initialization is needed.
+    fs::write(project.join(".git"), "gitdir: missing-metadata").unwrap();
+    for directory in [&project, &project.join("nested")] {
+        fs::create_dir_all(directory).unwrap();
+        let info = workspace::inspect_directory(Some(directory))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Path::new(&info.path),
+            directory.canonicalize().unwrap().as_path()
+        );
+        assert_eq!(info.name, directory.file_name().unwrap().to_string_lossy());
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            serde_json::json!({ "path": info.path, "name": info.name })
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(project.join(".git")).unwrap(),
+        "gitdir: missing-metadata"
+    );
+}
+
+#[test]
+fn directory_inspection_rejects_missing_files_and_failed_admission() {
+    let temp = TempDir::new().unwrap();
+    let missing = temp.path().join("missing");
+    let file = temp.path().join("file.txt");
+    fs::write(&file, "file").unwrap();
+    for path in [&missing, &file] {
+        assert!(
+            workspace::inspect_directory_with_size_check(Some(path), |_| {
+                panic!("non-directories must not be scanned");
+            })
+            .unwrap()
+            .is_none()
+        );
+    }
+    let error = workspace::inspect_directory_with_size_check(Some(temp.path()), |_| {
+        Err("workspace exceeds size limit".into())
+    })
+    .unwrap_err();
+    assert_eq!(error, "workspace exceeds size limit");
+}
+
 fn slot(temp: &TempDir, name: &str) -> PathBuf {
     temp.path()
         .join(".grapher-worktrees")

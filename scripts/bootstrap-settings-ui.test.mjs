@@ -122,7 +122,7 @@ function planningPage(body, planningId) {
 const recoveryBootstrap = snapshot => ({ ...bootstrap, snapshot: empty, runs: [snapshot.runId],
   conversations: [{ runId: snapshot.runId, repository, title: snapshot.graph.originalGoal, phase: snapshot.phase, hasActiveExecutions: false }] });
 
-test("workspace selection survives reload independently of card order and repository detection", { timeout: 30_000 }, async () => {
+test("workspace selection survives reload without repository detection", { timeout: 30_000 }, async () => {
   const second = "C:\\Projects\\Second";
   const projects = [
     { ...info, id: repository, lastOpened: 2 },
@@ -132,7 +132,7 @@ test("workspace selection survives reload independently of card order and reposi
   const response = { ...bootstrap, runs: ["fast", "second-run"], conversations: [summary(fast),
     { runId: "second-run", repository: second, title: "Second conversation", phase: "completed", hasActiveExecutions: false }] };
   let holdBootstrap = false, pendingBootstrap;
-  const { context, page, errors } = await app(async (route, command) => {
+  const { context, page, errors, calls } = await app(async (route, command) => {
     if (command === "save_config") {
       await route.fulfill({ json: { result: response } });
       return true;
@@ -140,11 +140,6 @@ test("workspace selection survives reload independently of card order and reposi
     if (command === "bootstrap") {
       if (holdBootstrap) pendingBootstrap = route;
       else await route.fulfill({ json: { result: response } });
-      return true;
-    }
-    if (command === "detect_repository") {
-      // Navigation is remembered even when Git detection supplies no metadata.
-      await route.fulfill({ json: { result: null } });
       return true;
     }
   }, projects);
@@ -181,6 +176,29 @@ test("workspace selection survives reload independently of card order and reposi
       assert.equal(await active.getAttribute("aria-label"), `${info.name}\n${repository}`);
       await page.waitForFunction(repository => localStorage.getItem("grapher_last_workspace") === repository, repository);
     }
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a missing workspace is retired after switching without repository detection", { timeout: 30_000 }, async () => {
+  const missing = "/missing-workspace";
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    if (command !== "repository_status" || body.repository !== missing) return false;
+    await route.fulfill({ json: { result: { repository: missing, valid: false, missing: true, error: "Directory not found" } } });
+    return true;
+  }, [
+    { ...info, id: repository, lastOpened: 2 },
+    { id: missing, path: missing, name: "Missing", lastOpened: 1 },
+  ]);
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await page.getByRole("button", { name: `Missing\n${missing}`, exact: true }).click();
+    await page.getByRole("button", { name: `Missing\n${missing}`, exact: true }).waitFor({ state: "detached" });
+    await page.waitForFunction(repository => localStorage.getItem("grapher_last_workspace") === repository, repository);
+    assert.equal(await page.locator('.project-workspace-item[aria-current="true"]').getAttribute("aria-label"), `${info.name}\n${repository}`);
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_projects")).map(project => project.path)), [repository]);
+    assert.equal(calls.filter(call => call.command === "detect_repository" || call.command === "delete_workspace").length, 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -466,7 +484,7 @@ test("prewarmed summaries render every sidebar card without histories or reposit
         runs: summaries.map(item => item.runId), repositoryInfo: null } } });
       return true;
     }
-    if (command === "history" || command === "detect_repository") return true; // deliberately stalled
+    if (command === "history") return true; // deliberately stalled
     return false;
   }, undefined, { [repository]: ["fast", "foreign"] });
   try {
@@ -478,7 +496,7 @@ test("prewarmed summaries render every sidebar card without histories or reposit
     assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
     assert.equal(await page.locator('[data-run-id="blank"] .is-resolving').count(), 0, "a blank title is resolved");
     assert.equal(calls.filter(call => call.command === "history").length, 0);
-    assert.equal(calls.filter(call => call.command === "detect_repository").length, 1, "Git status loads independently");
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 0, "restoring a workspace needs no repository detection");
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))), {
       [repository]: ["slow", "blank"], "/other": ["foreign"],
     });
@@ -723,7 +741,7 @@ test("first-launch workspace discovery is asynchronous and restores the detected
     await until(() => !!discovery);
     assert.equal(calls.find(call => call.command === "detect_repository").body.path, null);
     assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0, "discovery cannot block the sidebar");
-    await discovery.fulfill({ json: { result: { ...info, path: "/discovered", name: "Discovered workspace" } } });
+    await discovery.fulfill({ json: { result: { path: "/discovered", name: "Discovered workspace" } } });
     await page.locator('[data-run-id="discovered"]').waitFor();
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository), "/discovered");
     assert.equal(calls.filter(call => call.command === "save_config").length, 0, "discovery must not overwrite model defaults");
@@ -748,7 +766,7 @@ test("first-launch discovery cannot be overwritten by an older settings response
     await page.locator(".save-config-btn").click();
     await until(() => !!saving);
     assert.equal(saving.config.maxFeedback, 3, "saving preserves the configured feedback budget");
-    await discovery.fulfill({ json: { result: { ...info, path: "/discovered" } } });
+    await discovery.fulfill({ json: { result: { path: "/discovered", name: "Discovered" } } });
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository === "/discovered");
     await saving.route.fulfill({ json: { result: { ...fresh, config: saving.config } } });
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
@@ -772,14 +790,13 @@ test("first-launch discovery never restores a deliberately empty workspace list"
   } finally { await context.close(); }
 });
 
-test("a cold browser uses the configured workspace before Git discovery finishes", { timeout: 30_000 }, async () => {
+test("a cold browser restores the configured workspace without repository detection", { timeout: 30_000 }, async () => {
   const { context, page, errors, calls } = await app(async (route, command) => {
     if (command === "bootstrap") {
       await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty, repositoryInfo: null,
         conversations: [{ runId: "cold", repository, title: "Cold browser conversation" }] } } });
       return true;
     }
-    if (command === "detect_repository") return true;
     return false;
   }, null);
   try {
@@ -787,7 +804,7 @@ test("a cold browser uses the configured workspace before Git discovery finishes
     assert.equal(await page.locator(".project-workspace-item").count(), 1);
     assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
     assert.equal(calls.filter(call => call.command === "history").length, 0);
-    assert.equal(calls.filter(call => call.command === "detect_repository").length, 1);
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

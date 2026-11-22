@@ -5,7 +5,7 @@ import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot, normalizeMaxFeedback, normalizeMaxParallel,
-  type Config, type Graph, type HostPreflight, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
+  type Config, type Graph, type HostPreflight, type ManualNodeRequest, type ProjectItem, type WorkspaceDirectory,
   type Snapshot, type PlanRouteType,
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
@@ -184,7 +184,7 @@ export default function App() {
   // Model defaults for new conversations. A settings save inside a conversation
   // records a conversation override instead of replacing these defaults.
   const [defaultSettings, setDefaultSettings] = useState<Config>(() => ({ ...config }));
-  const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
+  const [repoInfo, setRepoInfo] = useState<WorkspaceDirectory | null>(null);
   const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
   const repositoryStatus = useRepositoryStatus(config.repository);
   const repositoryBlocked = !!config.repository && repositoryStatus?.valid === false;
@@ -251,7 +251,6 @@ export default function App() {
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
-  const [switchingProjectPath, setSwitchingProjectPath] = useState<string | null>(null);
   const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
   // Wait for the backend's data-directory identity and authoritative index.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
@@ -1152,7 +1151,7 @@ export default function App() {
     setArchivedRunIds(storedArchivedRuns);
 
     let activeRepo = "";
-    let activeInfo: RepositoryInfo | null = null;
+    let activeInfo: WorkspaceDirectory | null = null;
 
     if (storedProjects !== null && storedProjects.length > 0) {
       const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
@@ -1161,27 +1160,8 @@ export default function App() {
         ?? sorted.find(p => !p.archived);
       if (latestProj) {
         activeRepo = latestProj.path;
-
-        if (data.repositoryInfo && workspaceKey(data.repositoryInfo.path) === workspaceKey(latestProj.path)) {
-          activeInfo = data.repositoryInfo;
-          const updatedProjects = sorted.map((p) =>
-            p.path === latestProj.path
-              ? { ...p, branch: data.repositoryInfo!.branch, clean: data.repositoryInfo!.clean, isShadow: data.repositoryInfo!.isShadow }
-              : p
-          );
-          setProjects(updatedProjects);
-          writeStorageJson(STORAGE_KEYS.projects, updatedProjects);
-        } else {
-          activeInfo = {
-            name: latestProj.name,
-            path: latestProj.path,
-            branch: latestProj.branch,
-            head: latestProj.branch || "",
-            clean: latestProj.clean,
-            isShadow: latestProj.isShadow,
-          };
-          setProjects(sorted);
-        }
+        activeInfo = { name: latestProj.name, path: latestProj.path };
+        setProjects(sorted);
       } else {
         setProjects(sorted);
         activeRepo = "";
@@ -1193,9 +1173,8 @@ export default function App() {
         id: info.path,
         name: info.name,
         path: info.path,
-        branch: info.branch,
-        clean: info.clean,
-        isShadow: info.isShadow,
+        branch: "",
+        clean: false,
         lastOpened: Date.now(),
       };
       setProjects([item]);
@@ -1220,20 +1199,6 @@ export default function App() {
     }
 
     setRepoInfo(activeInfo);
-    if (activeRepo && (!data.repositoryInfo || workspaceKey(data.repositoryInfo.path) !== workspaceKey(activeRepo))) {
-      const repository = activeRepo;
-      void runtimeService.detectRepository(repository).then(detected => {
-        if (!detected || !planningRecovery.current(scope)) return;
-        setRepoInfo({ ...detected, path: normalizeWorkspacePath(detected.path) });
-        setProjects(previous => {
-          const next = previous.map(project => workspaceKey(project.path) === workspaceKey(repository)
-            ? { ...project, name: detected.name, branch: detected.branch, clean: detected.clean, isShadow: detected.isShadow }
-            : project);
-          writeStorageJson(STORAGE_KEYS.projects, next);
-          return next;
-        });
-      }).catch(() => { });
-    }
     // Bootstrap owns the defaults for new conversations. A selected conversation
     // applies its own model selection once its snapshot becomes foreground.
     const activeRepository = activeRepo || (activeInfo ? activeInfo.path : "");
@@ -1273,10 +1238,10 @@ export default function App() {
     if (!activeRepo && storedProjects === null) {
       // First launch used to discover the backend cwd during bootstrap. Keep
       // that behavior asynchronous, but do not undo an explicitly empty list.
-      void runtimeService.detectRepository().then(detected => {
+      void runtimeService.inspectWorkspace().then(detected => {
         if (!detected || !planningRecovery.current(scope)) return;
         const info = { ...detected, path: normalizeWorkspacePath(detected.path) };
-        const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
+        const item: ProjectItem = { ...info, id: info.path, branch: "", clean: false, lastOpened: Date.now() };
         const discoveredConfig = {
           ...(acceptedSettingsRef.current ?? nextConfigObj), repository: info.path,
         };
@@ -1424,9 +1389,8 @@ export default function App() {
             id: normalizedPath,
             name: info.name,
             path: normalizedPath,
-            branch: info.branch,
-            clean: info.clean,
-            isShadow: info.isShadow,
+            branch: "",
+            clean: false,
             lastOpened: Date.now(),
           };
           setProjects((prev) => {
@@ -1455,14 +1419,13 @@ export default function App() {
 
   const handleSelectProject = (proj: ProjectItem) => {
     if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
-    setSwitchingProjectPath(proj.path);
-    const scope = detachForeground(proj.path);
+    detachForeground(proj.path);
     // Switching workspaces always lands on the home view. The workspace's
     // conversations stay available in the sidebar, but the newest one is not
     // opened automatically; the user starts from a fresh conversation.
     setConfig(prev => applyModelConfig(
       { ...prev, repository: normalizeWorkspacePath(proj.path) }, defaultSettings));
-    setRepoInfo(null);
+    setRepoInfo({ name: proj.name, path: normalizeWorkspacePath(proj.path) });
     setState(emptySnapshot);
     setRouteType("undecided");
     setPlannerStream(initialPlannerStream);
@@ -1471,38 +1434,12 @@ export default function App() {
     setSelected("");
     setError("");
     resetSessionMessages();
-    void (async () => {
-      try {
-        const info = await runtimeService.detectRepository(proj.path);
-        if (!planningRecovery.current(scope)) return;
-        if (info) {
-          setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
-          setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
-          setProjects((prev) => {
-            const next = prev.map((p) =>
-              workspaceKey(p.path) === workspaceKey(info.path)
-                ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
-                : p
-            );
-            writeStorageJson(STORAGE_KEYS.projects, next);
-            return next;
-          });
-        } else {
-          setRepoInfo(null);
-          setConfig((prev) => ({ ...prev, repository: proj.path }));
-        }
-        setError("");
-      } catch (err) {
-        if (planningRecovery.current(scope)) {
-          setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
-        }
-      } finally {
-        // Clear this workspace's spinner even if a newer foreground action
-        // superseded the switch; a different switch keeps its own spinner.
-        setSwitchingProjectPath(current =>
-          current && workspaceKey(current) === workspaceKey(proj.path) ? null : current);
-      }
-    })();
+    setProjects(previous => {
+      const next = previous.map(project => workspaceKey(project.path) === workspaceKey(proj.path)
+        ? { ...project, lastOpened: Date.now() } : project);
+      writeStorageJson(STORAGE_KEYS.projects, next);
+      return next;
+    });
   };
 
   // A renamed or deleted source folder is not a repairable binding. Drop the
@@ -1536,7 +1473,6 @@ export default function App() {
     setGoal("");
     setLandingGoal(loadLandingDraft(nextRepository));
     setSelected("");
-    setSwitchingProjectPath(null);
     setError("");
     resetSessionMessages();
   });
@@ -1692,7 +1628,6 @@ export default function App() {
         setGoal("");
         setLandingGoal(loadLandingDraft(""));
         setSelected("");
-        setSwitchingProjectPath(null);
         resetSessionMessages();
         setRouteType("undecided");
         setError("");
@@ -3666,14 +3601,13 @@ export default function App() {
 
   useEffect(() => {
     if (!pendingNotificationRun) return;
-    if (switchingProjectPath) return;
     if (workspaceKey(config.repository) !== pendingNotificationRun.repoKey) return;
     const { runId } = pendingNotificationRun;
     setPendingNotificationRun(null);
     if (!deletedRunIdsRef.current.has(runId)) {
       handleLoadRun(runId, true);
     }
-  }, [pendingNotificationRun, switchingProjectPath, config.repository, handleLoadRun]);
+  }, [pendingNotificationRun, config.repository, handleLoadRun]);
 
   useEffect(() => {
     if (!isBootstrapReady) return;
@@ -3734,7 +3668,6 @@ export default function App() {
             projects={projects}
             activeRepo={config.repository}
             onSelectProject={actions.selectProject}
-            switchingProjectPath={switchingProjectPath}
             onOpenProject={actions.openProject}
             isOpeningProject={isOpeningProject}
             onRemoveProject={actions.removeProject}

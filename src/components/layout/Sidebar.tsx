@@ -262,7 +262,6 @@ const WorkspaceItem: React.FC<{
   entranceMode: CardEntranceMode;
   placeholderHeight?: number;
   isActive: boolean;
-  isSwitching: boolean;
   menuOpen: boolean;
   onClick: () => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => void;
@@ -274,7 +273,6 @@ const WorkspaceItem: React.FC<{
   entranceMode,
   placeholderHeight,
   isActive,
-  isSwitching,
   menuOpen,
   onClick,
   onContextMenu,
@@ -288,10 +286,9 @@ const WorkspaceItem: React.FC<{
       type="button"
       aria-label={`${project.name}\n${normalizeWorkspacePath(project.path)}`}
       aria-current={isActive ? "true" : undefined}
-      aria-busy={isSwitching}
       aria-haspopup="menu"
       aria-expanded={menuOpen}
-      className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
+      className={`project-workspace-item ${isActive ? "active" : ""}`}
       onClick={onClick}
       onContextMenu={onContextMenu}
       onKeyDown={onContextMenu}
@@ -371,7 +368,6 @@ interface SidebarProps {
   initialRunIds?: readonly string[];
   isReady?: boolean;
   isOpeningProject?: boolean;
-  switchingProjectPath?: string | null;
   loadingRunId?: string | null;
 }
 
@@ -404,7 +400,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   initialRunIds = [],
   isReady = true,
   isOpeningProject = false,
-  switchingProjectPath = null,
   loadingRunId = null,
 }) => {
   // Wide launches start expanded; narrow windows start with the rail so the
@@ -671,7 +666,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const projectCards = visibleProjects.map((proj, index) => {
     const key = workspaceKey(proj.path);
     const isActive = activeRepoKey === key;
-    const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === key : false;
     const isNewProject = !isProjectViewSwitch && !restoredProjectKeys.has(key) && !prevProjectsState.keys.has(key);
     let entranceMode: CardEntranceMode = "none";
     if (!reduceMotion && isNewProject) {
@@ -694,7 +688,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         entranceMode={entranceMode}
         placeholderHeight={projectsPlaceholderHeightRef.current}
         isActive={isActive}
-        isSwitching={isSwitching}
         menuOpen={projectContextMenu?.project.path === proj.path}
         onClick={() => {
           if (key !== activeRepoKey) setShowArchivedRuns(false);

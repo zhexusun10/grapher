@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence, useAnimationControls, useIsPresent, useReducedMotion } from "motion/react";
 import {
-  Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
+  Snapshot, PlanRouteType, PlanMode, WorkspaceDirectory, Config,
   Graph, GraphNode, ManualNodeRequest, Execution, Status, PlanningSummary, TranscriptItem,
   ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, GraphEvent
 } from "../../types";
@@ -167,7 +167,7 @@ interface GraphWorkbenchProps {
   onOpenEditor: () => void;
   onOpenApproval: () => void;
   onOpenFile: (request: OpenWorkspaceFileRequest) => void;
-  repoInfo: RepositoryInfo | null;
+  repoInfo: WorkspaceDirectory | null;
   config: Config;
   envOverrides?: Record<string, string>;
   active: boolean;

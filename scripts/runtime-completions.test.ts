@@ -518,17 +518,13 @@ test("pickRepository falls back to window.prompt only when picker is unsupported
         return response({
           path: "/manual/project",
           name: "project",
-          branch: "main",
-          head: "abc",
-          clean: true,
-          isShadow: false,
         });
       }
       return response({});
     };
     const result = await runtimeService.pickRepository();
     assert.equal(promptCalled, true, "window.prompt must be called when picker is unsupported");
-    assert.equal(result?.path, "/manual/project");
+    assert.deepEqual(result, { path: "/manual/project", name: "project" });
   } finally {
     globalThis.fetch = originalFetch;
     delete (globalThis as any).window.prompt;

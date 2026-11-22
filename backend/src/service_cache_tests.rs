@@ -204,7 +204,7 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
         detect_repository(Some(repository.clone()), &primary)
             .unwrap()
             .is_some(),
-        "switching to an active workspace still refreshes its metadata"
+        "directory inspection remains available for an active workspace"
     );
     active.runtime.lock().unwrap().state.phase = phase;
     // An unrelated busy workspace must not suppress this workspace's warning.
@@ -217,7 +217,7 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
     assert!(status["error"].as_str().unwrap().contains("15GB"));
     assert!(crate::workspace::validate_binding(std::path::Path::new(&repository)).is_ok());
     assert!(
-        crate::workspace::detect_with_size_check(
+        crate::workspace::inspect_directory_with_size_check(
             Some(std::path::Path::new(&repository)),
             oversized
         )

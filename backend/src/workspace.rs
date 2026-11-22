@@ -105,9 +105,16 @@ pub struct RepositoryInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirectory {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PickResult {
     pub supported: bool,
-    pub repository: Option<RepositoryInfo>,
+    pub repository: Option<WorkspaceDirectory>,
     pub cancelled: bool,
 }
 
@@ -1631,7 +1638,7 @@ pub fn pick_repository() -> Result<PickResult, String> {
             }
         };
 
-        let info = detect(Some(&folder))?;
+        let info = inspect_directory(Some(&folder))?;
         if let Some(info) = info {
             Ok(PickResult {
                 supported: true,
@@ -1657,6 +1664,36 @@ pub fn pick_repository() -> Result<PickResult, String> {
 
 pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     detect_with_size_check(target, cached_check_workspace_size)
+}
+
+/// Navigation needs a directory identity, not a Git repository or its state.
+/// Preserve the selected directory even when its .git metadata is unavailable.
+pub fn inspect_directory(target: Option<&Path>) -> Result<Option<WorkspaceDirectory>, String> {
+    inspect_directory_with_size_check(target, cached_check_workspace_size)
+}
+
+pub(crate) fn inspect_directory_with_size_check(
+    target: Option<&Path>,
+    check_size: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<Option<WorkspaceDirectory>, String> {
+    let candidate = match target {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    if !candidate.is_dir() {
+        return Ok(None);
+    }
+    let canonical = canonical_workspace_path(&candidate)?;
+    #[cfg(target_os = "macos")]
+    let canonical = crate::path_identity::actual_path(&canonical).unwrap_or(canonical);
+    validate_binding(&canonical)?;
+    check_size(&canonical)?;
+    let path = normalize_workspace_display_path(&canonical);
+    let name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    Ok(Some(WorkspaceDirectory { path, name }))
 }
 
 fn detect_git_metadata_fast(candidate: &Path) -> Option<(PathBuf, String, String)> {
@@ -1687,8 +1724,8 @@ fn detect_git_metadata_fast(candidate: &Path) -> Option<(PathBuf, String, String
     Some((top_level, branch, head))
 }
 
-/// Metadata refreshes for an already-running workspace may defer size policy;
-/// picker/new-binding callers use `detect` and always enforce admission.
+/// Git-aware metadata for execution and internal discovery. Sidebar navigation
+/// uses `inspect_directory` instead.
 pub(crate) fn detect_with_size_check(
     target: Option<&Path>,
     check_size: impl FnOnce(&Path) -> Result<(), String>,
