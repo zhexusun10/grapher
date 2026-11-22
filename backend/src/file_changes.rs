@@ -1076,6 +1076,7 @@ pub fn parse_jsonl_file_changes(
     accumulator_summary(&acc)
 }
 
+pub mod file_diff;
 mod git_diff;
 
 /// Best-effort live counts before an untracked path has a Git blob. Read link

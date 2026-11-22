@@ -27,7 +27,7 @@ fn json_request_limits_apply_to_streaming_and_regular_api_requests() {
     for command in ["get_snapshot", "plan_goal_stream"] {
         // Valid JSON followed by whitespace is still valid after truncation.
         // Reject by byte count before command validation or side effects.
-        for size in [10 * 1024 * 1024, 10 * 1024 * 1024 + 1] {
+        for size in [32 * 1024 * 1024, 32 * 1024 * 1024 + 1] {
             let body = format!("{{}}{}", " ".repeat(size - 2));
             let mut socket = TcpStream::connect(address).unwrap();
             socket
@@ -38,7 +38,7 @@ fn json_request_limits_apply_to_streaming_and_regular_api_requests() {
             socket.read_to_string(&mut response).unwrap();
             assert_eq!(
                 response.contains("Request too large"),
-                size > 10 * 1024 * 1024,
+                size > 32 * 1024 * 1024,
                 "{command}: {}",
                 &response[..response.len().min(600)]
             );

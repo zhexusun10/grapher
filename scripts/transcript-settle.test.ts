@@ -119,3 +119,18 @@ test("a composed Planner replay settles older turns while the newest one is live
   assert.equal((unnamed.match(/tool-status running/g) || []).length, 0);
   assert.equal((unnamed.match(/tool-status interrupted/g) || []).length, 2);
 });
+
+test("a settled transcript with no visible items marks data-transcript-empty even when raw output is empty", () => {
+  const emptySettled = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: "", inline: true, settled: true, emptyText: "This node produced no log output",
+  }));
+  assert.match(emptySettled, /data-transcript-empty="true"/);
+  const emptyLive = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: "", inline: true, settled: false,
+  }));
+  assert.doesNotMatch(emptyLive, /data-transcript-empty="true"/);
+  const metadataOnlySettled = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: line({ type: "grapher_process_started", pid: 123 }), inline: true, settled: true,
+  }));
+  assert.match(metadataOnlySettled, /data-transcript-empty="true"/);
+});

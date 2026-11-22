@@ -403,7 +403,8 @@ are no timing assertions.
 | Script | Scope / prerequisites |
 | --- | --- |
 | `test:frontend`, `test:backend` | Frontend logic; full Rust fixture suite. |
-| `test:ui` | Mocked-API browser flows. Needs Chromium or `GRAPHER_BROWSER_CHANNEL` (Edge on Windows). No production build. |
+| `test:ui` | Fast mocked-API feature browser flows. Needs Chromium or `GRAPHER_BROWSER_CHANNEL` (Edge on Windows). No production build. |
+| `test:ui:audit` | Deep mocked-API transcript, history and layout audit browser suites; same browser requirement. |
 | `test:bundle` | Separate temporary production build and deferred-loading browser checks; same browser requirement. |
 | `test:ui-polish` | Separate bilingual home/settings viewport sweep; same browser requirement. `GRAPHER_UI_SCREENSHOTS` optionally saves screenshots. |
 | `test:pi`, `test:extensions` | Pi transport and [role/tool contracts](pi-integration.md#role-loading-policy). `test:extensions` also typechecks the Planner extension, which is outside the frontend `npm run check` scope. |

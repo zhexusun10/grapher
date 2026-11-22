@@ -88,7 +88,7 @@ pub fn write_graph_profile(
     worktree_root: &Path,
     current: &Path,
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, None, &[], &[])
+    write_profile(path, repository, worktree_root, current, None, &[], &[], &[])
 }
 
 /// Production adds session/data, engine and installation boundaries. The
@@ -117,6 +117,7 @@ pub fn write_execution_profile(
         installation,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -132,6 +133,7 @@ pub(crate) fn write_execution_profile_scoped(
     installation: &Path,
     workspaces: &[PathBuf],
     extra_exceptions: &[PathBuf],
+    read_only_data: &[PathBuf],
 ) -> Result<PathBuf, String> {
     write_profile(
         path,
@@ -141,9 +143,11 @@ pub(crate) fn write_execution_profile_scoped(
         Some((data, session, engine, installation)),
         workspaces,
         extra_exceptions,
+        read_only_data,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_profile(
     path: &Path,
     repository: &Path,
@@ -152,6 +156,7 @@ fn write_profile(
     execution: Option<(&Path, &Path, &Path, &Path)>,
     workspaces: &[PathBuf],
     extra_exceptions: &[PathBuf],
+    read_only_data: &[PathBuf],
 ) -> Result<PathBuf, String> {
     if !supported() {
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
@@ -318,18 +323,45 @@ fn write_profile(
             quote(data)?,
             quote(session)?
         );
+        let attachment_bucket = data.join(crate::attachment_inputs::BUCKET);
+        let mut data_read_only = Vec::new();
         if let Some(objects) = borrowed_objects.as_ref().filter(|p| p.starts_with(data)) {
-            let read_rule = format!(
-                "(require-all {data_rule} (require-not (subpath {})))",
-                quote(objects)?
-            );
-            let mut ancestors = String::new();
-            let mut parent = objects.parent();
-            while let Some(dir) = parent.filter(|dir| dir.starts_with(data)) {
-                ancestors.push_str(&format!(" (require-not (literal {}))", quote(dir)?));
-                parent = dir.parent();
+            data_read_only.push(objects.clone());
+        }
+        for path in read_only_data {
+            let resolved = canonical_exception(data, path)?;
+            if !resolved.starts_with(&attachment_bucket) || resolved == attachment_bucket {
+                return Err("Read-only attachment exception must live inside attachment-inputs".into());
             }
-            text.push_str(&format!("(deny file-read-data {read_rule})\n(deny file-read-metadata (require-all {read_rule}{ancestors}))\n"));
+            data_read_only.push(resolved);
+        }
+        data_read_only.sort();
+        data_read_only.dedup();
+        if !data_read_only.is_empty() {
+            let read_exceptions = data_read_only
+                .iter()
+                .map(|dir| quote(dir).map(|dir| format!(" (require-not (subpath {dir}))")))
+                .collect::<Result<Vec<_>, _>>()?
+                .concat();
+            let read_rule = format!("(require-all {data_rule}{read_exceptions})");
+            let mut ancestor_dirs = Vec::new();
+            for target in &data_read_only {
+                let mut parent = target.parent();
+                while let Some(dir) = parent.filter(|dir| dir.starts_with(data)) {
+                    ancestor_dirs.push(dir.to_path_buf());
+                    parent = dir.parent();
+                }
+            }
+            ancestor_dirs.sort();
+            ancestor_dirs.dedup();
+            let ancestors = ancestor_dirs
+                .iter()
+                .map(|dir| quote(dir).map(|dir| format!(" (require-not (literal {dir}))")))
+                .collect::<Result<Vec<_>, _>>()?
+                .concat();
+            text.push_str(&format!(
+                "(deny file-read-data {read_rule})\n(deny file-read-metadata (require-all {read_rule}{ancestors}))\n"
+            ));
         } else {
             text.push_str(&format!("(deny file-read* {data_rule})\n"));
         }

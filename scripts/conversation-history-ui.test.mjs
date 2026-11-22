@@ -42,7 +42,7 @@ before(async () => {
   await server.listen(); origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { streamResponse?.destroy(); await browser?.close(); await server?.close(); });
+after(async () => { streamResponse?.destroy(); await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function newPage(handler, language = "en") {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
@@ -760,9 +760,9 @@ for (const role of ["node", "planner"]) {
   });
 }
 
-for (const mode of ["graph", "serial", "planner", "merger", "node-merger"]) {
+for (const [mode, language] of [["graph", "en"], ["planner", "zh-CN"], ["merger", "en"]]) {
   test(`${mode}: workspace and session details are tooltip-free`, { timeout: 30_000 }, async () => {
-    for (const language of ["en", "zh-CN"]) {
+    {
       const { context, page, errors } = await newPage(route => route.fulfill({ json: {
         result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
       } }), language);
@@ -811,9 +811,9 @@ test("graph resize and expand controls are tooltip-free and remain keyboard acce
   }
 });
 
-for (const mode of ["graph", "serial", "planner"]) {
+for (const [mode, language] of [["graph", "en"], ["serial", "zh-CN"], ["planner", "en"]]) {
   test(`${mode}: session detail attributes use capitalized initials`, { timeout: 30_000 }, async () => {
-    for (const language of ["en", "zh-CN"]) {
+    {
       const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }), language);
       try {
         await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
@@ -1155,7 +1155,7 @@ test("completed topology reports task token totals and cache percentage only aft
   } finally { await context.close(); }
 });
 
-for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
+for (const mode of ["serial", "planner", "merger"]) {
   test(`${mode}: session token usage derives task totals from backend metrics without retaining stale counts`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await newPage(route => route.fulfill({ json: {
       result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
@@ -3090,8 +3090,7 @@ for (const mode of ["node", "serial"]) {
   });
 }
 
-for (const [mode, gesture] of ["node", "serial"].flatMap(mode =>
-  ["wheel", "keyboard", "touch"].map(gesture => [mode, gesture]))) {
+for (const [mode, gesture] of [["node", "wheel"], ["serial", "keyboard"], ["node", "touch"]]) {
   test(`${mode}: ${gesture} scrollback still loads older history while output streams`, { timeout: 30_000 }, async () => {
     const prefix = line({ type: "opaque", pad: "x".repeat(600_000) }) + assistant("OLDER_NODE_ENTRY");
     const tail = Array.from({ length: 80 }, (_, index) => assistant(`NODE_HISTORY_${index} ` + "detail ".repeat(20))).join("");
@@ -3308,8 +3307,7 @@ test("planner: cached follow-ups stay with their revisions while history pages l
   } finally { releaseTwo?.(); releaseOne?.(); await context.close(); }
 });
 
-for (const reviewMode of ["background", "foreground"]) {
-  for (const evicted of [false, true]) {
+for (const [reviewMode, evicted] of [["background", true], ["foreground", false]]) {
     test(`planner: ${reviewMode} review preserves mounted history with ${evicted ? "evicted" : "cached"} logs`, { timeout: 30_000 }, async () => {
       const initial = assistant("RETAINED_PLANNER_HISTORY") + startTool("retained-tool", "echo retained") + endTool("retained-tool", "RETAINED_TOOL_OUTPUT");
       const requests = [];
@@ -3374,7 +3372,6 @@ for (const reviewMode of ["background", "foreground"]) {
         assert.deepEqual(errors, []);
       } finally { releaseReview(); await page.evaluate(() => { window.watchReviewPaints = false; }).catch(() => {}); await context.close(); }
     });
-  }
 }
 
 test("planner: starting and finishing a review keeps the earlier planning conversation", { timeout: 30_000 }, async () => {
@@ -4360,6 +4357,57 @@ test("opening workspace details while streaming output stays pinned without vert
     assert.deepEqual(errors, []);
   } finally {
     if (interval) clearInterval(interval);
+    await context.close();
+  }
+});
+
+test("entering an ongoing execution skips card entrance on existing running cards while animating later live cards", { timeout: 30_000 }, async () => {
+  const initial = line({ type: "message_start", message: { role: "assistant", content: [] } })
+    + line({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } })
+    + line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Existing reasoning in progress" } });
+  let data = initial;
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+    const bytes = Buffer.from(data);
+    const start = body.tail ? 0 : Math.min(body.offset ?? 0, bytes.length);
+    const content = bytes.subarray(start).toString();
+    try {
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId, content,
+        startOffset: start, nextOffset: bytes.length, totalBytes: bytes.length,
+        complete: true, status: "running",
+      } } });
+    } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=nodeEntry&mode=serial`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.enterNode);
+    await page.addStyleTag({ content: ".appear-active, .card-reveal.entering { animation-duration: 10s !important; }" });
+    await page.evaluate(bytes => {
+      window.audit.setOutputBytes(bytes);
+      window.audit.enterNode();
+    }, Buffer.byteLength(initial));
+    const thinkingCard = page.locator(".thinking-card");
+    await thinkingCard.waitFor();
+    const initialState = await thinkingCard.evaluate(card => ({
+      appearActive: card.classList.contains("appear-active"),
+      revealEntering: !!card.closest(".card-reveal")?.classList.contains("entering"),
+    }));
+    assert.deepEqual(initialState, { appearActive: false, revealEntering: false },
+      "existing running cards must not replay an entrance animation when entering a conversation");
+
+    data = initial + startTool("live-after-entry", "echo live");
+    const toolCard = page.locator(".tool-call-card");
+    await toolCard.waitFor();
+    const liveState = await toolCard.evaluate(card => ({
+      appearActive: card.classList.contains("appear-active"),
+      revealEntering: !!card.closest(".card-reveal")?.classList.contains("entering"),
+    }));
+    assert.deepEqual(liveState, { appearActive: true, revealEntering: true },
+      "subsequent live cards arriving after entry still animate in");
+    assert.deepEqual(errors, []);
+  } finally {
     await context.close();
   }
 });

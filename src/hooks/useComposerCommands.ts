@@ -26,6 +26,7 @@ const isCommandCatalog = (value: PiCommandCatalog | null | undefined): value is 
   typeof value?.instance === 'string' && Array.isArray(value.commands) && value.commands.every(command =>
     typeof command?.name === 'string' && (command.description === undefined || typeof command.description === 'string'));
 const isDialog = (request: ExtensionUIRequest) => ["select", "confirm", "input", "editor"].includes(request.method ?? "");
+const AUTO_DISMISS_NOTICE_MS = 4000;
 
 async function cancelDialogs(session: CommandSession, requests: ExtensionUIRequest[]) {
   if (session.standalone) {
@@ -60,7 +61,14 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
   const commandResult = commandCatalog.key === catalogKey ? commandCatalog.result : undefined;
   const commands = commandResult?.catalog;
   const [ui, setUI] = useState<ExtensionUIRequest[]>([]);
-  const [notice, setNotice] = useState("");
+  const [noticeState, setNoticeState] = useState<{ text: string; autoDismissMs?: number; id: number }>({ text: "", id: 0 });
+  const notice = noticeState.text;
+  const showNotice = useCallback((text: string, autoDismissMs?: number) => {
+    setNoticeState(previous => ({ text, autoDismissMs, id: previous.id + 1 }));
+  }, []);
+  const clearNotice = useCallback(() => {
+    setNoticeState(previous => (previous.text ? { text: "", id: previous.id + 1 } : previous));
+  }, []);
   const [scopedModelsOpen, setScopedModelsOpen] = useState(false);
   const active = useRef<CommandSession | null>(null);
   const generation = useRef(0);
@@ -77,14 +85,22 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
   const levels = model?.thinkingLevels ?? [];
 
   useEffect(() => {
-    setUI([]); setNotice(""); setScopedModelsOpen(false);
+    if (!noticeState.text || !noticeState.autoDismissMs) return;
+    const timer = setTimeout(() => {
+      setNoticeState(previous => (previous.id === noticeState.id ? { text: "", id: previous.id + 1 } : previous));
+    }, noticeState.autoDismissMs);
+    return () => clearTimeout(timer);
+  }, [noticeState]);
+
+  useEffect(() => {
+    setUI([]); clearNotice(); setScopedModelsOpen(false);
     return () => {
       generation.current++;
       const session = active.current;
       active.current = null;
       if (session) void cancelDialogs(session, session.requests.splice(0));
     };
-  }, [scopeKey]);
+  }, [scopeKey, clearNotice]);
   const loadCommandCatalog = useCallback((): Promise<CommandCatalog> => {
     const key = JSON.stringify([catalogKey, refreshRevision]);
     if (catalogRequest.current?.key === key) return catalogRequest.current.task;
@@ -199,7 +215,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       } else {
         await runtimeService.composerRename({ runId, title });
       }
-      if (identity.current === scopeKey) setNotice(t("已重命名对话：{0}", title));
+      if (identity.current === scopeKey) showNotice(t("已重命名对话：{0}", title), AUTO_DISMISS_NOTICE_MS);
       return "handled";
     }
     if (command.name === "model" || command.name === "thinking") {
@@ -227,7 +243,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
         patch = { ...settings, thinkingLevel: command.args as ThinkingLevel };
       }
       await context.save({ runId, node: modelNode, role }, patch);
-      if (isCurrent()) setNotice(t("已更新当前会话配置；正在执行的调用保持不变，后续调用使用新配置。"));
+      if (isCurrent()) showNotice(t("已更新当前会话配置；正在执行的调用保持不变，后续调用使用新配置。"), AUTO_DISMISS_NOTICE_MS);
       return isCurrent() ? "handled" : "menu";
     }
     const resolved = await loadCommandCatalog().catch(() => { throw new Error(t('扩展指令加载失败，请重试。')); });
@@ -252,9 +268,9 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
           for (const event of state.events) {
             if (isDialog(event)) session.requests.push(event);
             else if (event.method === 'set_editor_text') { editorChanged = true; setText(event.text ?? ''); }
-            else if (event.method === 'notify') setNotice(event.message ?? '');
-            else if (event.method === 'setStatus' && event.statusText) setNotice(event.statusText);
-            else if (event.method === 'setWidget' && event.widgetLines?.length) setNotice(event.widgetLines.join('\n'));
+            else if (event.method === 'notify') showNotice(event.message ?? '');
+            else if (event.method === 'setStatus' && event.statusText) showNotice(event.statusText);
+            else if (event.method === 'setWidget' && event.widgetLines?.length) showNotice(event.widgetLines.join('\n'));
           }
           setUI([...session.requests]);
           if (state.status === 'failed') throw new Error(state.error);
@@ -287,9 +303,9 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
           for (const event of events) {
             if (isDialog(event)) session.requests.push(event);
             else if (event.method === "set_editor_text") { editorChanged = true; setText(event.text ?? ""); }
-            else if (event.method === "notify" || event.type === "extension_error") setNotice(event.message ?? event.error ?? "");
-            else if (event.method === "setStatus" && event.statusText) setNotice(event.statusText);
-            else if (event.method === "setWidget" && event.widgetLines?.length) setNotice(event.widgetLines.join("\n"));
+            else if (event.method === "notify" || event.type === "extension_error") showNotice(event.message ?? event.error ?? "");
+            else if (event.method === "setStatus" && event.statusText) showNotice(event.statusText);
+            else if (event.method === "setWidget" && event.widgetLines?.length) showNotice(event.widgetLines.join("\n"));
             // Arbitrary terminal component factories have no browser equivalent.
           }
           setUI([...session.requests]);
@@ -304,13 +320,13 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       // the command acknowledgement (notifications/editor replacement).
       await poll().catch(() => {});
       await poll().catch(() => {});
-      if (isCurrent() && ["stats", "session"].includes(command.name)) setNotice(JSON.stringify(result, null, 2));
+      if (isCurrent() && ["stats", "session"].includes(command.name)) showNotice(JSON.stringify(result, null, 2));
       if (isCurrent() && command.name === "copy") {
         const value = (result as { text?: string | null })?.text;
         if (!value) throw new Error(t("当前会话还没有可复制的回复。"));
         if (!navigator.clipboard?.writeText) throw new Error(t("复制提示词失败，请检查剪贴板权限。"));
         await navigator.clipboard.writeText(value);
-        if (isCurrent()) setNotice(t("已复制"));
+        if (isCurrent()) showNotice(t("已复制"), AUTO_DISMISS_NOTICE_MS);
       }
       return editorChanged || !isCurrent() ? "menu" : "handled";
     } finally {
@@ -323,5 +339,5 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
     commandsLoading: commandCatalog.key === catalogKey && commandCatalog.loading,
     commandsError: commandCatalog.key === catalogKey ? commandCatalog.error : '',
     refreshCommands: () => setRefreshRevision(value => value + 1),
-    clearNotice: () => setNotice(""), scopedModelsOpen, closeScopedModels: () => setScopedModelsOpen(false) };
+    clearNotice, scopedModelsOpen, closeScopedModels: () => setScopedModelsOpen(false) };
 }

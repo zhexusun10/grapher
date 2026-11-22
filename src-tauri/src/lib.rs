@@ -4,6 +4,8 @@
 //! preserve-first legacy-data migration into `app_data_dir()/data`, exposes the
 //! narrow `backend_url` IPC command, wires the Tauri v2 autostart + updater +
 //! process relaunch plugins, and shuts down the backend cleanly on exit.
+#[cfg(target_os = "macos")]
+pub mod macos_notifications;
 pub mod managed_git;
 pub mod migration;
 pub mod paths;
@@ -18,9 +20,45 @@ use paths::{resolve_runtime_paths, ResolvedRuntimePaths};
 use sidecar::{BackendSidecar, SidecarConfig};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
-use tauri::{Manager, Resource, RunEvent};
+use tauri::{Emitter, Manager, Resource, RunEvent};
+
+pub const DESKTOP_NOTIFICATION_CLICKED_EVENT: &str = "grapher://notification-clicked";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NotificationClickEvent {
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    pub seq: u64,
+}
+
+#[derive(Default)]
+pub struct PendingNotificationClickState {
+    next_seq: AtomicU64,
+    pending: Mutex<Option<NotificationClickEvent>>,
+}
+
+impl PendingNotificationClickState {
+    pub fn record(&self, run_id: String) -> NotificationClickEvent {
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let event = NotificationClickEvent { run_id, seq };
+        if let Ok(mut guard) = self.pending.lock() {
+            *guard = Some(event.clone());
+        }
+        event
+    }
+
+    pub fn take(&self) -> Option<NotificationClickEvent> {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+    }
+}
 
 pub struct BackendState {
     outcome: Result<Arc<BackendSidecar>, String>,
@@ -162,6 +200,243 @@ fn open_external_url(url: String) -> Result<(), String> {
         })
         .map_err(|error| format!("Failed to monitor external browser launch: {error}"))?;
     Ok(())
+}
+
+const MAX_NOTIFICATION_TITLE_CHARS: usize = 120;
+const MAX_NOTIFICATION_BODY_CHARS: usize = 500;
+
+/// Normalizes notification text by turning newlines/tabs into spaces, stripping
+/// other control characters, collapsing consecutive whitespace, and bounding
+/// character length cleanly with an ellipsis.
+pub fn sanitize_notification_text(raw: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut cleaned = String::new();
+    let mut char_count = 0usize;
+    let mut pending_space = false;
+    let mut overflowed = false;
+    for ch in raw.chars() {
+        let mapped = match ch {
+            '\r' | '\n' | '\t' => ' ',
+            c if c.is_control() => continue,
+            c => c,
+        };
+        if mapped.is_whitespace() {
+            if char_count > 0 {
+                pending_space = true;
+            }
+            continue;
+        }
+        let needed = usize::from(pending_space) + 1;
+        if char_count + needed > max_chars {
+            overflowed = true;
+            break;
+        }
+        if pending_space {
+            cleaned.push(' ');
+            char_count += 1;
+            pending_space = false;
+        }
+        cleaned.push(mapped);
+        char_count += 1;
+    }
+    if !overflowed {
+        return cleaned;
+    }
+    let take_len = max_chars.saturating_sub(1);
+    let mut truncated: String = cleaned.chars().take(take_len).collect();
+    while truncated.ends_with(' ') {
+        truncated.pop();
+    }
+    truncated.push('…');
+    truncated
+}
+
+#[cfg(target_os = "macos")]
+fn fallback_macos_osascript_notification(
+    title: &str,
+    body: &str,
+    sound: bool,
+) -> Result<(), String> {
+    let script = if sound {
+        "display notification (item 2 of argv) with title (item 1 of argv) sound name \"default\""
+    } else {
+        "display notification (item 2 of argv) with title (item 1 of argv)"
+    };
+    let mut child = std::process::Command::new("/usr/bin/osascript")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .args(["-e", "on run argv", "-e", script, "-e", "end run", "--", title, body])
+        .spawn()
+        .map_err(|error| format!("Failed to spawn osascript notification fallback: {error}"))?;
+    std::thread::Builder::new()
+        .name("grapher-macos-notification-fallback".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map_err(|error| format!("Failed to monitor osascript notification fallback: {error}"))?;
+    Ok(())
+}
+
+/// Sends a native OS notification only when the main desktop window is NOT
+/// currently visible and focused in the foreground. Returns `Ok(true)` if a
+/// notification was dispatched and `Ok(false)` when suppressed (focused,
+/// permission denied, or empty).
+#[tauri::command]
+async fn send_desktop_notification(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    title: String,
+    body: String,
+    run_id: Option<String>,
+    sound: Option<bool>,
+) -> Result<bool, String> {
+    let is_foreground_focused = window.is_focused().unwrap_or(false)
+        && window.is_visible().unwrap_or(false)
+        && !window.is_minimized().unwrap_or(false);
+    if is_foreground_focused {
+        return Ok(false);
+    }
+
+    let clean_body = sanitize_notification_text(&body, MAX_NOTIFICATION_BODY_CHARS);
+    if clean_body.is_empty() {
+        return Ok(false);
+    }
+    let clean_title = {
+        let candidate = sanitize_notification_text(&title, MAX_NOTIFICATION_TITLE_CHARS);
+        if candidate.is_empty() {
+            "Grapher".to_string()
+        } else {
+            candidate
+        }
+    };
+    let clean_run_id = run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let play_sound = sound.unwrap_or(true);
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        match macos_notifications::send_notification(
+            &clean_title,
+            &clean_body,
+            clean_run_id.as_deref(),
+            play_sound,
+        )
+        .await
+        {
+            macos_notifications::MacosNotificationDelivery::Delivered => Ok(true),
+            macos_notifications::MacosNotificationDelivery::PermissionDenied => {
+                eprintln!(
+                    "[grapher-desktop] macOS notification permission is denied; enable notifications for Grapher in System Settings -> Notifications"
+                );
+                Ok(false)
+            }
+            macos_notifications::MacosNotificationDelivery::Unavailable => {
+                eprintln!(
+                    "[grapher-desktop] UNUserNotificationCenter unavailable (not running inside a .app bundle); using macOS osascript fallback"
+                );
+                fallback_macos_osascript_notification(&clean_title, &clean_body, play_sound)?;
+                Ok(true)
+            }
+            macos_notifications::MacosNotificationDelivery::Failed(error) => {
+                Err(format!("Failed to send macOS desktop notification: {error}"))
+            }
+        }
+    }
+    #[cfg(all(desktop, not(target_os = "macos")))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let mut builder = app
+            .notification()
+            .builder()
+            .title(&clean_title)
+            .body(&clean_body);
+        if let Some(ref run_id) = clean_run_id {
+            builder = builder.extra("runId", run_id.clone());
+        }
+        if play_sound {
+            #[cfg(target_os = "windows")]
+            {
+                builder = builder.sound("Default");
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                builder = builder.sound("message-new-instant");
+            }
+        }
+        builder
+            .show()
+            .map(|()| true)
+            .map_err(|error| format!("Failed to send desktop notification: {error}"))
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, clean_title, clean_body, clean_run_id, play_sound);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn take_pending_notification_click(
+    state: tauri::State<'_, PendingNotificationClickState>,
+) -> Option<NotificationClickEvent> {
+    state.take()
+}
+
+#[tauri::command]
+async fn desktop_notification_permission_status() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_notifications::permission_status()
+            .await
+            .as_str()
+            .to_string())
+    }
+    #[cfg(all(desktop, not(target_os = "macos")))]
+    {
+        Ok("granted".to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        Ok("unsupported".to_string())
+    }
+}
+
+#[tauri::command]
+async fn request_desktop_notification_permission() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_notifications::request_permission()
+            .await
+            .as_str()
+            .to_string())
+    }
+    #[cfg(all(desktop, not(target_os = "macos")))]
+    {
+        Ok("granted".to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        Ok("unsupported".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_desktop_notification_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_notifications::open_notification_settings()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
 }
 
 fn decode_base64_std(input: &str) -> Result<Vec<u8>, &'static str> {
@@ -401,14 +676,40 @@ fn handle_macos_close_requested(window: &tauri::Window, api: &tauri::CloseReques
     }
 }
 
-#[cfg(target_os = "macos")]
-fn show_main_window(app_handle: &tauri::AppHandle) {
+#[cfg(desktop)]
+pub(crate) fn show_main_window(app_handle: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
     let _ = app_handle.show();
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+#[cfg(desktop)]
+pub(crate) fn handle_desktop_notification_clicked(
+    app_handle: &tauri::AppHandle,
+    run_id: Option<String>,
+) {
+    show_main_window(app_handle);
+    let Some(clean_run_id) = run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let payload = if let Some(pending) = app_handle.try_state::<PendingNotificationClickState>() {
+        pending.record(clean_run_id)
+    } else {
+        NotificationClickEvent {
+            run_id: clean_run_id,
+            seq: 1,
+        }
+    };
+    let _ = app_handle.emit_to("main", DESKTOP_NOTIFICATION_CLICKED_EVENT, payload);
 }
 
 #[cfg(target_os = "windows")]
@@ -504,6 +805,38 @@ pub fn run() {
                         "[grapher-desktop] Warning: failed to register autostart plugin (continuing startup): {error}"
                     );
                 }
+
+                #[cfg(target_os = "macos")]
+                {
+                    // Use native UNUserNotificationCenter on macOS so the OS
+                    // registers Grapher in System Settings -> Notifications and
+                    // prompts for permission immediately on first launch.
+                    macos_notifications::init_and_request_permission_on_startup(app.handle());
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                match app.handle().plugin(tauri_plugin_notification::init()) {
+                    Ok(()) => {
+                        use tauri_plugin_notification::NotificationExt;
+                        let click_handle = app.handle().clone();
+                        let _ = app.notification().on_action(move |performed| {
+                            if performed.action_id() != "tap" {
+                                return;
+                            }
+                            let run_id = performed
+                                .notification()
+                                .and_then(|n| n.extra().get("runId"))
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
+                            handle_desktop_notification_clicked(&click_handle, run_id);
+                        });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[grapher-desktop] Warning: failed to register notification plugin (continuing startup): {error}"
+                        );
+                    }
+                }
             }
 
             let app_data_dir = app.path().app_data_dir().map_err(|error| {
@@ -542,6 +875,7 @@ pub fn run() {
             }
             app.manage(state);
             app.manage(git_bootstrap);
+            app.manage(PendingNotificationClickState::default());
             #[cfg(target_os = "windows")]
             schedule_windows_startup_reveal(app.handle());
             Ok(())
@@ -550,7 +884,12 @@ pub fn run() {
             backend_url,
             git_bootstrap_status,
             retry_git_bootstrap,
-            open_external_url
+            open_external_url,
+            send_desktop_notification,
+            desktop_notification_permission_status,
+            request_desktop_notification_permission,
+            open_desktop_notification_settings,
+            take_pending_notification_click
         ])
         .build(tauri::generate_context!())
         .expect("error while building Grapher desktop application");
@@ -743,5 +1082,48 @@ mod tests {
                 "expected rejection for {rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn pending_notification_click_state_tracks_monotonic_seq_and_takes_once() {
+        let state = PendingNotificationClickState::default();
+        assert_eq!(state.take(), None);
+
+        let first = state.record("run-1".to_string());
+        assert_eq!(
+            first,
+            NotificationClickEvent {
+                run_id: "run-1".to_string(),
+                seq: 1,
+            }
+        );
+        let second = state.record("run-2".to_string());
+        assert_eq!(
+            second,
+            NotificationClickEvent {
+                run_id: "run-2".to_string(),
+                seq: 2,
+            }
+        );
+        assert_eq!(state.take(), Some(second));
+        assert_eq!(state.take(), None);
+    }
+
+    #[test]
+    fn sanitize_notification_text_normalizes_whitespace_strips_controls_and_truncates() {
+        assert_eq!(sanitize_notification_text("   \r\n\t  ", 50), "");
+        assert_eq!(
+            sanitize_notification_text("  Hello\n\nworld\t\u{0007}from\rGrapher  ", 50),
+            "Hello world from Grapher"
+        );
+        assert_eq!(
+            sanitize_notification_text("你好世界，这是一条很长的通知内容", 6),
+            "你好世界，…"
+        );
+        assert_eq!(sanitize_notification_text("exact", 5), "exact");
+        assert_eq!(sanitize_notification_text("exact   ", 5), "exact");
+        assert_eq!(sanitize_notification_text("hello world", 7), "hello…");
+        assert_eq!(sanitize_notification_text("hello world", 6), "hello…");
+        assert_eq!(sanitize_notification_text("a b", 1), "…");
     }
 }

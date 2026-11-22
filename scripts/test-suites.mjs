@@ -3,6 +3,7 @@
 // platform-specific acceptance, browser builds and expensive stress probes.
 const files = names => names.map(name => `scripts/${name}`);
 const nodeTests = (...names) => ['--test', ...files(names)];
+const uiTests = (...names) => ['--test', '--test-concurrency=3', ...files(names)];
 const sourceTests = (...names) => ['scripts/node-ts.mjs', '--test', ...files(names)];
 const tsxTests = (...names) => ['--import', 'tsx', '--test', ...files(names)];
 const cargo = (command, ...args) => ['scripts/cargo.mjs', command, '--manifest-path', 'backend/Cargo.toml', ...args];
@@ -39,20 +40,24 @@ export const suites = {
         'transcript-coalescing.test.ts', 'transcript-compaction.test.ts', 'transcript-settle.test.ts',
         'attachment-card.test.ts', 'frontend-performance.test.ts', 'execution-time-took.test.ts',
         'session-token-usage.test.ts', 'updater.test.ts', 'autostart.test.ts', 'external-link.test.ts',
+        'file-drop.test.ts', 'completion-notifications.test.ts',
       ),
     ],
   },
   ui: {
-    description: 'Mocked-API browser flows; Chromium/GRAPHER_BROWSER_CHANNEL, no production build.',
-    steps: [nodeTests(
-      'background-settings-ui.test.mjs', 'workspace-ui.test.mjs', 'sidebar-copy-prompt-ui.test.mjs',
+    description: 'Fast mocked-API feature browser flows; Chromium/GRAPHER_BROWSER_CHANNEL, no production build.',
+    steps: [uiTests(
+      'background-settings-ui.test.mjs', 'workspace-ui.test.mjs', 'workspace-search-ui.test.mjs', 'sidebar-copy-prompt-ui.test.mjs',
       'manual-node-ui.test.mjs', 'workspace-changes-ui.test.mjs', 'bootstrap-settings-ui.test.mjs',
-      'frontend-audit.test.mjs', 'dialog-accessibility.test.mjs', 'conversation-history-ui.test.mjs',
-      'steer-order-ui.test.mjs', 'composer-continuation-ui.test.mjs', 'composer-commands-ui.test.mjs',
-      'planner-handoff-ui.test.mjs', 'graph-switching.test.mjs', 'graph-planning-fit.test.mjs',
-      'responsive-layout.test.mjs', 'workbench-details-ui.test.mjs', 'frontend-performance-ui.test.mjs',
-      'desktop-transport-ui.test.mjs',
+      'dialog-accessibility.test.mjs', 'steer-order-ui.test.mjs', 'composer-continuation-ui.test.mjs',
+      'composer-commands-ui.test.mjs', 'planner-handoff-ui.test.mjs', 'graph-switching.test.mjs',
+      'graph-planning-fit.test.mjs', 'responsive-layout.test.mjs', 'workbench-details-ui.test.mjs',
+      'frontend-performance-ui.test.mjs', 'desktop-transport-ui.test.mjs',
     )],
+  },
+  'ui:audit': {
+    description: 'Deep mocked-API transcript/history/audit browser suites; Chromium/GRAPHER_BROWSER_CHANNEL, no production build.',
+    steps: [uiTests('frontend-audit.test.mjs', 'conversation-history-ui.test.mjs')],
   },
   'ui-polish': {
     description: 'Opt-in bilingual home/settings viewport sweep; optional GRAPHER_UI_SCREENSHOTS output.',

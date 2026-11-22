@@ -25,8 +25,10 @@ mod activity;
 mod api_protocol_tests;
 mod api_transport;
 mod composer;
+mod file_diff;
 mod open_file;
 mod project_discovery;
+mod search;
 mod snapshot_delta;
 mod sse;
 mod transcript;
@@ -38,6 +40,7 @@ use crate::path_identity::same_repository_binding;
 use crate::path_identity::windows_repository_key;
 use activity::*;
 pub(crate) use activity::{set_prepare_phase, ActivityGuard as RuntimeActivityGuard};
+use file_diff::*;
 use open_file::*;
 use project_discovery::*;
 use sse::*;
@@ -113,6 +116,7 @@ fn invalidate_service_cache(root: &std::path::Path, id: Option<&str>) {
     if let Ok(mut cache) = HOT_SERVICES.get_or_init(Default::default).lock() {
         cache.retain(|(path, key, _)| path != root || id.is_some_and(|id| key != id));
     }
+    transcript::invalidate_steer_offset_cache(id);
 }
 
 static SOURCE_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
@@ -1439,7 +1443,7 @@ fn validate_role_model_preflight(
     Ok(())
 }
 
-fn decode_base64(input: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(input: &str) -> Option<Vec<u8>> {
     const TABLE: [i8; 256] = {
         let mut t = [-1i8; 256];
         let mut i = 0usize;
@@ -2411,19 +2415,29 @@ fn plan_goal_internal_with_options(
                 let directory = root.join("planning").join(&planning_id);
                 // Persist provisional ownership before the first filesystem write.
                 // Startup can reclaim an attempt that never reached PlanningStarted.
-                service
-                    .runtime
-                    .lock()
-                    .map_err(|error| (error.to_string(), None))?
-                    .store
-                    .remember_cleanup_targets(
+                {
+                    let runtime = service
+                        .runtime
+                        .lock()
+                        .map_err(|error| (error.to_string(), None))?;
+                    runtime
+                        .store
+                        .remember_cleanup_targets(
+                            &owner,
+                            &std::collections::BTreeSet::from([crate::cleanup::Target::data(
+                                "planning",
+                                &planning_id,
+                            )]),
+                        )
+                        .map_err(|error| (error, None))?;
+                    crate::attachment_inputs::adopt_for_run(
+                        &root,
+                        &runtime.store,
                         &owner,
-                        &std::collections::BTreeSet::from([crate::cleanup::Target::data(
-                            "planning",
-                            &planning_id,
-                        )]),
+                        &[goal.as_str()],
                     )
                     .map_err(|error| (error, None))?;
+                }
                 fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
                 // Make the retry's draft available before publishing its identity;
                 // a crash between PlanningStarted and the Pi launch must not
@@ -2532,27 +2546,6 @@ fn plan_goal_internal_with_options(
                 }
                 // Publish only an identity whose request and initial event are durable.
                 on_started(&owner);
-                let mut image_file_args: Vec<String> = Vec::new();
-                if let Some(ref imgs) = images {
-                    if !imgs.is_empty() {
-                        let attach_dir = directory.join("attachments");
-                        let _ = fs::create_dir_all(&attach_dir);
-                        for (idx, img) in imgs.iter().enumerate() {
-                            let file_path = planning_attachment_path(&attach_dir, idx, img);
-                            if let Some(bytes) = decode_base64(&img.data) {
-                                if fs::write(&file_path, bytes).is_ok() {
-                                    if let Ok(canon) = file_path.canonicalize() {
-                                        image_file_args
-                                            .push(format!("@{}", canon.to_string_lossy()));
-                                    } else {
-                                        image_file_args
-                                            .push(format!("@{}", file_path.to_string_lossy()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 let mut planner_execution_id: Option<String> = None;
                 let mut planner_workspace_selected = false;
                 let plan_outcome = (|| -> Result<Snapshot, String> {
@@ -2591,9 +2584,6 @@ fn plan_goal_internal_with_options(
                                 partitioner_extra_args.push("--thinking");
                                 partitioner_extra_args.push(thinking.as_str());
                             }
-                            for arg in &image_file_args {
-                                partitioner_extra_args.push(arg.as_str());
-                            }
                             let mut log = String::new();
                             let mut partition_log =
                                 fs::File::create(directory.join("partition.jsonl"))
@@ -2616,7 +2606,7 @@ fn plan_goal_internal_with_options(
                                         ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
                                     ],
                                     system_prompt: Some(&partitioner_system_prompt),
-                                    images: None,
+                                    images: images.as_deref(),
                                 },
                                 |text| {
                                     if let Err(error) = partition_log.write_all(text.as_bytes()) {
@@ -2656,6 +2646,7 @@ fn plan_goal_internal_with_options(
                         service.runtime.lock().map_err(|e| e.to_string())?.emit(
                             EventKind::Routed {
                                 plan_type: route.plan_type.clone(),
+                                images: None,
                             },
                         )?;
                     }
@@ -2771,6 +2762,35 @@ fn plan_goal_internal_with_options(
                                     .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string()),
                                 planner_config.post_task_review,
                             )?;
+                            let planner_goal = if continue_planning_id.is_none()
+                                && !background_review
+                                && images.as_deref().is_some_and(|imgs| !imgs.is_empty())
+                            {
+                                if Uuid::parse_str(&owner).is_ok() {
+                                    service
+                                        .runtime
+                                        .lock()
+                                        .map_err(|error| error.to_string())?
+                                        .store
+                                        .remember_cleanup_targets(
+                                            &owner,
+                                            &std::collections::BTreeSet::from([
+                                                crate::cleanup::Target::data(
+                                                    crate::attachment_inputs::BUCKET,
+                                                    &owner,
+                                                ),
+                                            ]),
+                                        )?;
+                                }
+                                let stored_images = crate::attachment_inputs::store_run_images(
+                                    &root,
+                                    &owner,
+                                    images.as_deref().unwrap_or_default(),
+                                )?;
+                                crate::attachment_inputs::prepend_mentions(&stored_images, &goal)
+                            } else {
+                                goal.clone()
+                            };
                             let (task, is_followup) = {
                                 let mut runtime =
                                     service.runtime.lock().map_err(|error| error.to_string())?;
@@ -2796,7 +2816,7 @@ fn plan_goal_internal_with_options(
                                     post_task_review_task(include_rework_note)
                                 } else if is_followup {
                                     planner_followup_prompt_for_workspace(
-                                        &goal,
+                                        &planner_goal,
                                         workspace_node,
                                         &runtime.state,
                                         include_rework_note,
@@ -2804,7 +2824,7 @@ fn plan_goal_internal_with_options(
                                         planner_workspace_notice(&runtime.state, selected.as_ref()),
                                     )
                                 } else {
-                                    goal.clone()
+                                    planner_goal
                                 };
                                 // Reviews and follow-ups share the one-shot marker;
                                 // follow-ups consume it even without transport context.
@@ -2817,9 +2837,6 @@ fn plan_goal_internal_with_options(
                             if let Some(thinking) = &planner_model_cfg.thinking {
                                 planner_extra_args.push("--thinking");
                                 planner_extra_args.push(thinking.as_str());
-                            }
-                            for arg in &image_file_args {
-                                planner_extra_args.push(arg.as_str());
                             }
                             let (planner_session_dir, planner_session_id) = if let Some((
                                 _,
@@ -2916,16 +2933,6 @@ fn plan_goal_internal_with_options(
                             let mut log_error = None;
                             let mut revision_context_files = Vec::new();
                             check_planning_cancelled(&owner)?;
-                            // Planner uploads are staged like node inputs; deliver the
-                            // accepted references now that this turn owns the workspace.
-                            crate::attachment_inputs::deliver_prepared(
-                                &root,
-                                &owner,
-                                "planner",
-                                &task,
-                                &planner_workspace,
-                                true,
-                            )?;
                             let planner_start = std::time::Instant::now();
                             let launch_workspace = planner_workspace.clone();
                             let planner_result = run_pi(
@@ -2974,7 +2981,7 @@ fn plan_goal_internal_with_options(
                                         ),
                                     ],
                                     system_prompt: Some(&planner_system_prompt),
-                                    images: None,
+                                    images: images.as_deref(),
                                 },
                                 |text| {
                                     let Some(text) =
@@ -3284,7 +3291,12 @@ fn plan_goal_internal_with_options(
                             Some(planning_id.clone()),
                             Some(summary.clone()),
                         )?;
-                        runtime.set_route(&route.plan_type)?;
+                        runtime.set_route_with_images(
+                            &route.plan_type,
+                            (route.plan_type == "serial")
+                                .then(|| images.clone())
+                                .flatten(),
+                        )?;
                     }
                     if (route.plan_type == "serial" && revision_run_id.is_none())
                         || (route.plan_type == "graph"
@@ -4635,9 +4647,31 @@ fn control_with_request_id(
         let include_workspace_move = workspace_targets
             .as_object()
             .is_some_and(|targets| !targets.is_empty());
+        let trimmed_instruction = instruction.trim();
+        let planner_instruction = if !trimmed_instruction.starts_with('/')
+            && images.as_deref().is_some_and(|imgs| !imgs.is_empty())
+        {
+            if Uuid::parse_str(planner_run).is_ok() {
+                runtime.store.remember_cleanup_targets(
+                    planner_run,
+                    &std::collections::BTreeSet::from([crate::cleanup::Target::data(
+                        crate::attachment_inputs::BUCKET,
+                        planner_run,
+                    )]),
+                )?;
+            }
+            let stored_images = crate::attachment_inputs::store_run_images(
+                &runtime.root,
+                planner_run,
+                images.as_deref().unwrap_or_default(),
+            )?;
+            crate::attachment_inputs::prepend_mentions(&stored_images, trimmed_instruction)
+        } else {
+            trimmed_instruction.to_string()
+        };
         let message = if is_followup {
             planner_followup_prompt_for_workspace(
-                instruction.trim(),
+                &planner_instruction,
                 workspace_node,
                 &runtime.state,
                 include_rework_note,
@@ -4645,28 +4679,12 @@ fn control_with_request_id(
                 planner_workspace_notice(&runtime.state, workspace_execution),
             )
         } else {
-            instruction.trim().to_string()
+            planner_instruction
         };
         // The one-shot marker is consumed by this follow-up even when the
         // transport context itself is omitted.
         if include_rework_note {
             runtime.emit(EventKind::PlannerReworkNoteInjected)?;
-        }
-        // Staged Planner uploads become inputs of the workspace this turn owns.
-        if let Some(worktree) = runtime
-            .state
-            .planning
-            .as_ref()
-            .and_then(|planning| planning.worktree.clone())
-        {
-            crate::attachment_inputs::deliver_prepared(
-                &runtime.root,
-                &runtime.state.run_id,
-                "planner",
-                instruction.trim(),
-                std::path::Path::new(&worktree),
-                true,
-            )?;
         }
         if let (Some(id), Some(run)) = (request_id, run_id.as_deref()) {
             let planning_id = runtime
@@ -4836,13 +4854,6 @@ fn control_with_request_id(
                     "Node execution is no longer running; send a new instruction instead".into(),
                 );
             }
-            crate::attachment_inputs::deliver(
-                &runtime.root,
-                &runtime.state.run_id,
-                &node,
-                &instruction,
-                std::path::Path::new(&running.unwrap().worktree),
-            )?;
         }
         // Keep durable acceptance and pipe order atomic with queue withdrawal.
         crate::engine::steer_node_with_id(
@@ -4965,7 +4976,7 @@ fn control_with_request_id(
             metrics: None,
         };
         let run_id = run_id.ok_or("Missing run identity")?;
-        let root = {
+        {
             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             // Re-check under the Run lock: publication may have started and a
             // scheduled execution may have claimed the workspace meanwhile.
@@ -4989,36 +5000,19 @@ fn control_with_request_id(
             runtime.emit(EventKind::MergerStarted {
                 execution: execution.clone(),
             })?;
-            runtime.root.clone()
-        };
+        }
         // Reservation precedes delivery, but every failure after reservation
         // needs a terminal event, including errors before a worker is spawned.
         let prepared = (|| -> Result<Snapshot, String> {
-            service
-                .runtime
-                .lock()
-                .map_err(|e| e.to_string())?
-                .emit(EventKind::Steered {
-                    execution_id: id.clone(),
-                    node: previous.node.clone(),
-                    instruction: instruction.trim().into(),
-                    request_id: None,
-                    images: images.clone(),
-                })?;
-            crate::attachment_inputs::deliver_prepared(
-                &root,
-                &run_id,
-                &previous.node,
-                instruction.trim(),
-                std::path::Path::new(&target_worktree),
-                true,
-            )?;
-            Ok(service
-                .runtime
-                .lock()
-                .map_err(|e| e.to_string())?
-                .state
-                .clone())
+            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            runtime.emit(EventKind::Steered {
+                execution_id: id.clone(),
+                node: previous.node.clone(),
+                instruction: instruction.trim().into(),
+                request_id: None,
+                images: images.clone(),
+            })?;
+            Ok(runtime.state.clone())
         })();
         let snapshot = match prepared {
             Ok(snapshot) => snapshot,
@@ -5593,6 +5587,13 @@ fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
             eprintln!("[Grapher] Pending cleanup {}: {error}", task.run_id);
         }
     }
+    if let Err(error) = crate::attachment_inputs::prune_orphaned_unscoped(
+        &root,
+        &store,
+        std::time::Duration::from_secs(24 * 60 * 60),
+    ) {
+        eprintln!("[Grapher] Orphaned attachment cleanup: {error}");
+    }
     crate::cleanup::detached::drain(&root, &store)
 }
 
@@ -5631,22 +5632,6 @@ fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
     retry_cleanup_tasks(service)
 }
 
-fn planning_attachment_path(
-    dir: &std::path::Path,
-    index: usize,
-    image: &ImageAttachment,
-) -> PathBuf {
-    let ext = match image.mime_type.as_str() {
-        "image/jpeg" | "image/jpg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        _ => "png",
-    };
-    // Client filenames are display data, not paths under our writable data dir.
-    dir.join(format!("image_{index}.{ext}"))
-}
-
 fn is_valid_planning_id(id: &str) -> bool {
     if id.is_empty() || id.len() > 128 {
         return false;
@@ -5679,6 +5664,7 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
 
 // Planning traces are loaded only when opened in the UI. Keep raw model output
 // out of bootstrap/list/poll responses and cap each UTF-8-safe page.
+#[cfg(test)]
 fn get_planning_output(
     planning_id: String,
     role: String,
@@ -5686,6 +5672,30 @@ fn get_planning_output(
     tail: bool,
     before: Option<u64>,
     limit: Option<u64>,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    get_planning_output_with_options(
+        planning_id,
+        role,
+        offset,
+        tail,
+        before,
+        limit,
+        None,
+        None,
+        service,
+    )
+}
+
+fn get_planning_output_with_options(
+    planning_id: String,
+    role: String,
+    offset: u64,
+    tail: bool,
+    before: Option<u64>,
+    limit: Option<u64>,
+    requested_projection: Option<crate::compact_transcript::TranscriptProjection>,
+    ranges_body: Option<&serde_json::Value>,
     service: &Arc<Service>,
 ) -> Result<serde_json::Value, String> {
     if !is_valid_planning_id(&planning_id) {
@@ -5707,6 +5717,13 @@ fn get_planning_output(
     let directory = crate::path_safety::real_child_path(&root, &root.join(&planning_id), false)?
         .ok_or("Planning output not found")?;
     let running = summary.status.as_deref() == Some("running");
+    let settled = !running;
+    let projection = match requested_projection {
+        Some(crate::compact_transcript::TranscriptProjection::CardShell) if running => None,
+        other => other,
+    };
+    let summary_only =
+        projection == Some(crate::compact_transcript::TranscriptProjection::Summary);
     let file_path =
         crate::path_safety::real_child_path(&root, &directory.join(format!("{role}.jsonl")), true)?;
     if file_path.is_none() && running && offset == 0 {
@@ -5720,6 +5737,8 @@ fn get_planning_output(
                 total_bytes: 0,
                 complete: true,
                 running: true,
+                summary_only: summary_only.then_some(true),
+                projection: projection.map(|p| p.as_str().to_string()),
             })
             .map_err(|e| e.to_string())?,
         );
@@ -5727,11 +5746,68 @@ fn get_planning_output(
     let file_path = file_path.ok_or("Planning output not found")?;
     let mut file = fs::File::open(file_path).map_err(|e| e.to_string())?;
     let total_bytes = file.metadata().map_err(|e| e.to_string())?.len();
+
+    if let Some(body) = ranges_body {
+        if let Some(ranges) = transcript::parse_hydrate_ranges(body, total_bytes as usize)? {
+            let mut content = String::new();
+            let mut min_start = total_bytes as usize;
+            let mut max_end = 0usize;
+            for (range_start, range_end) in ranges {
+                min_start = min_start.min(range_start);
+                max_end = max_end.max(range_end);
+                file.seek(SeekFrom::Start(range_start as u64))
+                    .map_err(|e| e.to_string())?;
+                let mut raw_bytes = Vec::new();
+                (&mut file)
+                    .take((range_end - range_start) as u64)
+                    .read_to_end(&mut raw_bytes)
+                    .map_err(|e| e.to_string())?;
+                let leading = raw_bytes
+                    .iter()
+                    .take_while(|byte| (**byte & 0xc0) == 0x80)
+                    .count();
+                let aligned_start = range_start + leading;
+                let valid = &raw_bytes[leading..];
+                let length = match std::str::from_utf8(valid) {
+                    Ok(_) => valid.len(),
+                    Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                    Err(_) => return Err("Invalid planning output UTF-8 offset".into()),
+                };
+                let slice = std::str::from_utf8(&valid[..length]).map_err(|e| e.to_string())?;
+                content.push_str(&crate::compact_transcript::hydrate_raw_slice(
+                    slice,
+                    aligned_start,
+                ));
+            }
+            if min_start > max_end {
+                min_start = 0;
+            }
+            return serde_json::to_value(crate::api_contract::PlanningOutputPage {
+                planning_id,
+                role,
+                content,
+                start_offset: min_start as u64,
+                next_offset: max_end as u64,
+                total_bytes,
+                complete: true,
+                running,
+                summary_only: None,
+                projection: Some("hydrated".into()),
+            })
+            .map_err(|e| e.to_string());
+        }
+    }
+
     // Larger bounded backward pages reduce scrollback round trips. Live forward
     // reads retain the existing 256 KiB ceiling and byte-cursor contract.
+    let max_limit = if tail {
+        if projection.is_some() { 2 * 1024 * 1024 } else { 1024 * 1024 }
+    } else {
+        256 * 1024
+    };
     let limit = limit
         .unwrap_or(256 * 1024)
-        .clamp(4, if tail { 1024 * 1024 } else { 256 * 1024 });
+        .clamp(4, max_limit);
     if offset > total_bytes {
         return Err("Invalid planning output offset".into());
     }
@@ -5741,7 +5817,58 @@ fn get_planning_output(
             return serde_json::to_value(crate::api_contract::PlanningOutputPage {
                 planning_id, role, content: String::new(), start_offset: 0, next_offset: 0,
                 total_bytes, complete: total_bytes == 0, running,
+                summary_only: summary_only.then_some(true),
+                projection: projection.map(|p| p.as_str().to_string()),
             }).map_err(|e| e.to_string());
+        }
+        if let Some(proj) = projection {
+            let compact_limit = (limit as usize).clamp(4, 2 * 1024 * 1024);
+            let (content, start_offset) =
+                crate::compact_transcript::compact_tail_pages_with_options(
+                    end as usize,
+                    compact_limit,
+                    proj,
+                    settled,
+                    |cursor, raw_limit| {
+                        let s = cursor.saturating_sub(raw_limit) as u64;
+                        file.seek(SeekFrom::Start(s)).map_err(|e| e.to_string())?;
+                        let mut raw_bytes = Vec::new();
+                        (&mut file)
+                            .take((cursor as u64).saturating_sub(s))
+                            .read_to_end(&mut raw_bytes)
+                            .map_err(|e| e.to_string())?;
+                        let leading = raw_bytes
+                            .iter()
+                            .take_while(|byte| (**byte & 0xc0) == 0x80)
+                            .count();
+                        let aligned_start = s as usize + leading;
+                        let valid = &raw_bytes[leading..];
+                        let length = match std::str::from_utf8(valid) {
+                            Ok(_) => valid.len(),
+                            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                            Err(_) => return Err("Invalid planning output UTF-8 offset".into()),
+                        };
+                        let slice =
+                            std::str::from_utf8(&valid[..length]).map_err(|e| e.to_string())?;
+                        Ok((aligned_start, slice.to_string()))
+                    },
+                )?;
+            let total_bytes = total_bytes
+                .max(file.metadata().map(|meta| meta.len()).unwrap_or(0))
+                .max(end);
+            return serde_json::to_value(crate::api_contract::PlanningOutputPage {
+                planning_id,
+                role,
+                content,
+                start_offset: start_offset as u64,
+                next_offset: end,
+                total_bytes,
+                complete: end >= total_bytes,
+                running,
+                summary_only: summary_only.then_some(true),
+                projection: Some(proj.as_str().to_string()),
+            })
+            .map_err(|e| e.to_string());
         }
         let candidate = end.saturating_sub(limit);
         // Include the line containing the candidate when it is cheap to do so.
@@ -5791,13 +5918,16 @@ fn get_planning_output(
         return serde_json::to_value(crate::api_contract::PlanningOutputPage {
             planning_id, role, content: content.into(), start_offset: start, next_offset,
             total_bytes, complete: next_offset >= total_bytes, running,
+            summary_only: None,
+            projection: None,
         }).map_err(|e| e.to_string());
     }
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
+    let forward_limit = if projection.is_some() { 4 * 1024 * 1024 } else { limit };
     (&mut file)
-        .take(limit)
+        .take(forward_limit)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let length = match std::str::from_utf8(&bytes) {
@@ -5806,6 +5936,33 @@ fn get_planning_output(
         Err(_) => return Err("Invalid planning output UTF-8 offset".into()),
     };
     let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
+    if let Some(proj) = projection {
+        let raw_next = offset + length as u64;
+        let current_total = total_bytes
+            .max(file.metadata().map(|meta| meta.len()).unwrap_or(0))
+            .max(raw_next);
+        let (compacted, consumed) = crate::compact_transcript::compact_forward_chunk_with_options(
+            content,
+            offset as usize,
+            raw_next >= current_total,
+            proj,
+            settled,
+        );
+        let next_offset = offset + consumed as u64;
+        return serde_json::to_value(crate::api_contract::PlanningOutputPage {
+            planning_id,
+            role,
+            content: compacted,
+            start_offset: offset,
+            next_offset,
+            total_bytes: current_total,
+            complete: next_offset >= current_total,
+            running,
+            summary_only: summary_only.then_some(true),
+            projection: Some(proj.as_str().to_string()),
+        })
+        .map_err(|e| e.to_string());
+    }
     let next_offset = offset + length as u64;
     // Same concurrent-append hazard as the tail path: the size was sampled
     // before the read, so a page that observed bytes appended in between would
@@ -5818,6 +5975,8 @@ fn get_planning_output(
     serde_json::to_value(crate::api_contract::PlanningOutputPage {
         planning_id, role, content: content.into(), start_offset: offset, next_offset,
         total_bytes, complete: next_offset >= total_bytes, running,
+        summary_only: None,
+        projection: None,
     }).map_err(|e| e.to_string())
 }
 
@@ -6332,6 +6491,7 @@ pub fn dispatch(
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
         "get_file_changes" => to_value(get_file_changes(&body, service)?),
+        "get_file_diff" => to_value(get_file_diff(&body, service)?),
         "open_workspace_file" => to_value(open_workspace_file(&body, service)?),
         "get_merger_prompt" => to_value(get_merger_prompt(&body, service)?),
         "get_planning_snapshot" => {
@@ -6360,7 +6520,7 @@ pub fn dispatch(
             }
             return Ok(state);
         }
-        "get_planning_output" => to_value(get_planning_output(
+        "get_planning_output" => to_value(get_planning_output_with_options(
             argument(&body, "planningId")?,
             argument(&body, "role")?,
             body.get("offset")
@@ -6376,10 +6536,13 @@ pub fn dispatch(
             body.get("limit")
                 .map(|_| argument(&body, "limit"))
                 .transpose()?,
+            transcript::parse_requested_projection(&body, true),
+            Some(&body),
             service,
         )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
         "list_plannings" => to_value(list_plannings(service, argument(&body, "repository").ok())?),
+        "search_conversations" => to_value(search::search_conversations(&body, service)?),
         "control" => to_value(control_with_request_id(
             argument(&body, "action")?,
             argument(&body, "node")?,
@@ -6620,6 +6783,7 @@ fn api_service(
         | "delete_run"
         | "get_execution_output"
         | "get_file_changes"
+        | "get_file_diff"
         | "open_workspace_file"
         | "get_workspace_image"
         | "get_merger_prompt"
@@ -6632,7 +6796,10 @@ fn api_service(
                 // file-open handlers; keep that meaning instead of failing a
                 // Run lookup.
                 if run_id.is_empty()
-                    && matches!(command, "get_file_changes" | "open_workspace_file")
+                    && matches!(
+                        command,
+                        "get_file_changes" | "get_file_diff" | "open_workspace_file"
+                    )
                 {
                     Ok(primary.clone())
                 } else {
@@ -7344,15 +7511,17 @@ fn handle_http_request_with_options(
             return;
         }
 
+        const MAX_JSON_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+
         if command == "plan_goal_stream" {
             let mut input = String::new();
             let body_res = std::io::Read::read_to_string(
-                &mut request.as_reader().take(10 * 1024 * 1024 + 1),
+                &mut request.as_reader().take((MAX_JSON_REQUEST_BYTES + 1) as u64),
                 &mut input,
             )
             .map_err(|e| e.to_string())
             .and_then(|_| {
-                if input.len() > 10 * 1024 * 1024 {
+                if input.len() > MAX_JSON_REQUEST_BYTES {
                     return Err("Request too large".into());
                 }
                 serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
@@ -7550,12 +7719,12 @@ fn handle_http_request_with_options(
 
         let mut input = String::new();
         let parsed = std::io::Read::read_to_string(
-            &mut request.as_reader().take(10 * 1024 * 1024 + 1),
+            &mut request.as_reader().take((MAX_JSON_REQUEST_BYTES + 1) as u64),
             &mut input,
         )
         .map_err(|e| e.to_string())
         .and_then(|_| {
-            if input.len() > 10 * 1024 * 1024 {
+            if input.len() > MAX_JSON_REQUEST_BYTES {
                 return Err("Request too large".into());
             }
             let body: serde_json::Value =

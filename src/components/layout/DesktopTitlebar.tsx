@@ -4,7 +4,7 @@ import { isMacosTauriDesktop, isWindowsTauriDesktop } from "../../services/apiBa
 
 export type DesktopTitlebarPlatform = "macos" | "windows" | null;
 
-export const DESKTOP_TITLEBAR_HEIGHT_PX = 30;
+export const DESKTOP_TITLEBAR_HEIGHT_PX = 32;
 
 export interface DesktopTitlebarState {
   platform: DesktopTitlebarPlatform;

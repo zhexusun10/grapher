@@ -650,3 +650,67 @@ test("scope changes and unmount cancel in-flight and subsequent Pi dialogs on th
     await server.close();
   }
 });
+
+test("slash command confirmation notices auto-dismiss and reset on repeat, while inspection notices stay open", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const page = await browser.newPage();
+    const errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.clock.install();
+    await page.route("**/api/*", async route => {
+      const url = route.request().url();
+      const body = route.request().postDataJSON();
+      let result = [];
+      if (url.endsWith("/list_files")) result = { files: [] };
+      if (url.endsWith("/list_skills")) result = { skills: [] };
+      if (url.endsWith("/provider_auth")) {
+        result = {
+          providers: [],
+          warning: null,
+          models: ["one", "two"].map(id => ({
+            provider: "test", id, name: id, api: "mock", contextWindow: 1000,
+            available: true, thinkingLevels: ["off", "low", "high"], thinkingLevelFallbacks: {},
+          })),
+        };
+      }
+      if (url.endsWith("/composer_command")) {
+        if (body.operation === "catalog") result = { instance: "pi-instance", commands: [] };
+        else if (body.operation === "poll") result = [];
+        else if (body.operation === "execute" && body.text === "/stats") result = { tokens: 42 };
+      }
+      await route.fulfill({ json: { result } });
+    });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands?run=1&node=a`);
+    const composer = page.locator("textarea").first();
+    const statusNotice = page.locator('.prompt-command-popover[role="status"]');
+    const submit = async text => { await composer.fill(text); await composer.press("Escape"); await composer.press("Enter"); };
+
+    await submit("/model test/two");
+    await expect(statusNotice).toContainText("已更新当前会话配置；正在执行的调用保持不变，后续调用使用新配置。");
+    await page.clock.runFor(2500);
+    await expect(statusNotice).toBeVisible();
+
+    // Repeating a command with identical confirmation text resets the timer.
+    await submit("/thinking high");
+    await expect(statusNotice).toContainText("已更新当前会话配置；正在执行的调用保持不变，后续调用使用新配置。");
+    await page.clock.runFor(2500);
+    await expect(statusNotice).toBeVisible();
+    await page.clock.runFor(2000);
+    await expect(statusNotice).toHaveCount(0);
+
+    // Inspection output such as /stats remains open until dismissed.
+    await submit("/stats");
+    await expect(statusNotice).toContainText('"tokens": 42');
+    await page.clock.runFor(10_000);
+    await expect(statusNotice).toBeVisible();
+
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    await server.close();
+  }
+});

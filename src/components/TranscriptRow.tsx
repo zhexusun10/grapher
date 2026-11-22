@@ -3,23 +3,28 @@ import type { FileAttachment, ImageAttachment, TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
+import { ActivitySummaryRow, type CardsTransitionPhase } from "./ActivitySummaryRow";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
-export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExpandedChange, editing, draft,
+export const TranscriptRow = memo(function TranscriptRow({ item, expanded, cardsTransition, onExpandedChange, onChildResize, onChildExpandedChange, editing, draft,
   onDraftChange, onStartEdit, onCancelEdit, onEditUser, steerAttachments }: {
   item: TranscriptItem; expanded?: boolean;
+  cardsTransition?: CardsTransitionPhase;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
+  onChildResize?: (expanded: boolean, card?: HTMLElement) => void;
+  onChildExpandedChange?: (child: TranscriptItem, expanded: boolean, card?: HTMLElement) => void;
   editing: boolean; draft: string; onDraftChange: (text: string) => void;
   onStartEdit: (id: string, text: string) => void; onCancelEdit: () => void;
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
-  steerAttachments?: { images?: ImageAttachment[]; files?: FileAttachment[] };
+  steerAttachments?: { text?: string; images?: ImageAttachment[]; files?: FileAttachment[] };
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   // Keep execution rows in the exact same layout as the Planner transcript:
   // rows sit directly in the shared list (which owns the 10px card rhythm),
   // and text uses the shared chat bubble classes.
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
+  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"
@@ -30,16 +35,19 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;
-  if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
-    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images?.length ? item.images : steerAttachments?.images} files={item.files ?? steerAttachments?.files}
+  if (item.role === "user") {
+    const displayedText = (item.steerRequestId && steerAttachments?.text) ? steerAttachments.text : (item.content || "");
+    return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
+    className="chat-message-row user planner-user-turn"><EditableUserBubble text={displayedText} images={item.images?.length ? item.images : steerAttachments?.images} files={item.files ?? steerAttachments?.files}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
-    onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
+    onEdit={onEditUser ? () => onStartEdit(item.id, displayedText) : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {
       return Promise.resolve(onEditUser(item.content || "", text, item.userTurnOffset, item.images?.length ? item.images : steerAttachments?.images)).then(accepted => {
         if (accepted !== false) onCancelEdit();
         return accepted === false ? false : true;
       });
     } : () => {}} /></AnimatedUserTurn>;
+  }
   // Keep virtualized Markdown rows out of Motion's transform layer: fenced code
   // contains its own horizontal scroller, and transformed scrollable descendants
   // can leave a stale compositor copy at the viewport edge during scrollback.

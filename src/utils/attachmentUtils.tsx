@@ -1,6 +1,7 @@
 import React from "react";
 import { FileCode, FileText, File } from "lucide-react";
 import type { FileAttachment, ImageAttachment } from "../types";
+import { findManagedAttachmentMentions, stripManagedAttachmentMentions } from "./attachmentPath";
 
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -48,6 +49,16 @@ export function getFileIcon(fileName: string) {
   return <File size={15} className="prompt-box-file-icon-generic" />;
 }
 
+const IMAGE_FILE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif)$/i;
+const VISION_IMAGE_FILE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+const VISION_IMAGE_MIME = /^image\/(png|jpe?g|gif|webp)$/i;
+
+function isDuplicateImageAttachmentFile(file: FileAttachment, images: readonly ImageAttachment[]): boolean {
+  if (images.some((img) => img.name && img.name === file.name)) return true;
+  if (file.type && VISION_IMAGE_MIME.test(file.type)) return true;
+  return VISION_IMAGE_FILE_EXT.test(file.name);
+}
+
 export interface ParsedMessageAttachments {
   cleanText: string;
   attachments: FileAttachment[];
@@ -67,6 +78,19 @@ export function parseMessageAttachmentsAndText(
   let cleanText = rawText || "";
   const attachments: FileAttachment[] = existingFiles ? [...existingFiles] : [];
   const images: ImageAttachment[] = existingImages ? [...existingImages] : [];
+
+  // Managed external attachment mentions (`@<data_root>/attachment-inputs/...`)
+  for (const mention of findManagedAttachmentMentions(cleanText)) {
+    const fileName = mention.name;
+    const isImage = IMAGE_FILE_EXT.test(fileName);
+    if (!attachments.some((a) => a.name === fileName || a.name === mention.path)) {
+      attachments.push({
+        name: fileName,
+        type: isImage ? "image" : "file",
+      });
+    }
+  }
+  cleanText = stripManagedAttachmentMentions(cleanText);
 
   // XML tags: <file name="...">content</file> or <file name="..."></file>
   const fileTagRegex = /<file name="([^"]+)">([\s\S]*?)<\/file>\s*/g;
@@ -109,9 +133,13 @@ export function parseMessageAttachmentsAndText(
   }
   cleanText = cleanText.replace(filenameBracketRegex, "");
 
+  const filteredAttachments = images.length > 0
+    ? attachments.filter((att) => !isDuplicateImageAttachmentFile(att, images))
+    : attachments;
+
   return {
     cleanText: cleanText.trim(),
-    attachments,
+    attachments: filteredAttachments,
     images,
   };
 }

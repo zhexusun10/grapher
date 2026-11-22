@@ -53,6 +53,7 @@ fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
         let mut snapshots: BTreeMap<String, String> = BTreeMap::new();
         let mut outputs: BTreeMap<(String, String), (usize, bool)> = BTreeMap::new();
         let mut planning_outputs = BTreeSet::new();
+        let mut flush_immediately = false;
         let mut current = Some(first);
         loop {
             if let Some(signal) = current.take() {
@@ -80,7 +81,20 @@ fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
                             .or_insert((total_bytes, settled));
                         entry.0 = entry.0.max(total_bytes);
                         entry.1 |= settled;
+                        if settled {
+                            flush_immediately = true;
+                        }
                     }
+                }
+            }
+            if flush_immediately {
+                match rx.try_recv() {
+                    Ok(next) => {
+                        current = Some(next);
+                        continue;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                 }
             }
             let now = std::time::Instant::now();

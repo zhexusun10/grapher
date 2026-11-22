@@ -1084,13 +1084,54 @@ fn run_pi_with_timeout(
         Vec::new()
     };
     #[cfg(not(feature = "fixture"))]
+    let data_root = crate::workspace::data_root();
+    #[cfg(all(not(feature = "fixture"), any(target_os = "macos", target_os = "linux")))]
+    let read_only_attachments = {
+        let needs_sandbox = !is_source_native_agent(&request)
+            && !crate::path_identity::actual_path(Path::new(&config.repository))
+                .ok()
+                .zip(crate::path_identity::actual_path(request.cwd).ok())
+                .is_some_and(|(source, current)| {
+                    crate::path_identity::same_path(&source, &current)
+                });
+        let active_run = needs_sandbox
+            .then(|| {
+                request
+                    .environment
+                    .iter()
+                    .find(|(key, _)| *key == "GRAPHER_ACTIVE_RUN_ID")
+                    .map(|(_, id)| id.as_str())
+            })
+            .flatten();
+        if let Some(run_id) = active_run {
+            let db = data_root.join("events.sqlite");
+            let store = db
+                .is_file()
+                .then(|| crate::store::Store::open_reader(&db))
+                .transpose()?;
+            crate::attachment_inputs::read_only_directories_for_run(
+                &data_root,
+                run_id,
+                store.as_ref(),
+            )?
+        } else {
+            Vec::new()
+        }
+    };
+    #[cfg(all(
+        not(feature = "fixture"),
+        not(any(target_os = "macos", target_os = "linux"))
+    ))]
+    let read_only_attachments: Vec<PathBuf> = Vec::new();
+    #[cfg(not(feature = "fixture"))]
     let mut command = crate::native::execution_command_scoped(
         request.role,
         Path::new(&config.repository),
         request.cwd,
-        &crate::workspace::data_root(),
+        &data_root,
         request.session_dir,
         &planner_workspaces,
+        &read_only_attachments,
     )?;
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]

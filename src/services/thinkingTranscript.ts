@@ -11,6 +11,14 @@ export interface ThinkingUpdate {
 interface MessageContent {
   type: string;
   thinking?: string;
+  grapherBodyOmitted?: boolean;
+  grapherThinkingChars?: number;
+}
+
+export interface FinalizeThinkingMeta {
+  rawRange?: [number, number];
+  source?: string;
+  makeId?: (contentIndex: number) => string;
 }
 
 /** Captured thinking is not a disposable preview; finals may only backfill or extend it. */
@@ -87,20 +95,45 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
 }
 
 /** Backfill final summaries in place, never duplicate cards or match a prior turn. */
-export function finalizeThinkingItems(items: TranscriptItem[], content: MessageContent[], messageStart = 0): TranscriptItem[] {
+export function finalizeThinkingItems(
+  items: TranscriptItem[],
+  content: MessageContent[],
+  messageStart = 0,
+  meta?: FinalizeThinkingMeta,
+): TranscriptItem[] {
   // Backfills below replace entries, so do not write into the caller's array even
   // when there was no running block to close.
   let next = closeThinkingItems(items, messageStart).slice();
   content.forEach((part, contentIndex) => {
     if (part.type !== "thinking") return;
     const index = blockIndex(next, contentIndex, messageStart);
+    const omitted = Boolean(part.grapherBodyOmitted);
+    const charCount = typeof part.grapherThinkingChars === "number" ? part.grapherThinkingChars : undefined;
     if (index >= 0) {
+      const mergedContent = backfillThinkingContent(next[index].content, part.thinking);
+      const stillOmitted = omitted && !mergedContent.trim();
       next[index] = {
         ...next[index], thinkingContentIndex: contentIndex, status: "success",
-        content: backfillThinkingContent(next[index].content, part.thinking),
+        content: mergedContent,
+        ...(meta?.source ? { source: meta.source } : {}),
+        ...(meta?.rawRange && stillOmitted ? { rawRange: meta.rawRange } : {}),
+        ...(stillOmitted ? { bodyOmitted: true } : {}),
+        ...(charCount !== undefined ? { thinkingCharCount: charCount } : {}),
       };
     } else {
-      next = updateThinkingItems(next, { type: "thinking_end", contentIndex, content: part.thinking }, messageStart);
+      const id = meta?.makeId?.(contentIndex);
+      next = updateThinkingItems(next, { type: "thinking_end", contentIndex, content: part.thinking }, messageStart, id);
+      const inserted = blockIndex(next, contentIndex, messageStart);
+      if (inserted >= 0) {
+        const stillOmitted = omitted && !next[inserted].content?.trim();
+        next[inserted] = {
+          ...next[inserted],
+          ...(meta?.source ? { source: meta.source } : {}),
+          ...(meta?.rawRange && stillOmitted ? { rawRange: meta.rawRange } : {}),
+          ...(stillOmitted ? { bodyOmitted: true } : {}),
+          ...(charCount !== undefined ? { thinkingCharCount: charCount } : {}),
+        };
+      }
     }
   });
   return next;

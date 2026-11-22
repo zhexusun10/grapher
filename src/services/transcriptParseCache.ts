@@ -21,7 +21,8 @@ export const transcriptParseCache = new BoundedLruCache<string, Entry>(entry => 
 const leases = new Set<{ owner: string; valid: boolean }>();
 const keyFor = (owner: string, source: string) => JSON.stringify([owner, source]);
 const optionsFor = (options: TranscriptParseOptions) => JSON.stringify([
-  options.showUserTurns, options.skipFirstUser, options.userTurnTexts ?? null,
+  options.showUserTurns, options.skipFirstUser, options.userTurnTexts ?? null, options.skipLeadingUserTurn ?? false,
+  options.userTurnRequestIds ?? null,
 ]);
 
 export function readTranscriptParse(

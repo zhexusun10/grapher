@@ -96,6 +96,32 @@ export interface OpenWorkspaceFileRequest {
   nodes?: string[];
 }
 
+export type DiffLineKind = "hunk" | "context" | "added" | "removed";
+
+export interface FileDiffLine {
+  kind: DiffLineKind;
+  text: string;
+}
+
+export interface FileDiffResult {
+  runId: string;
+  path: string;
+  oldPath?: string | null;
+  binary: boolean;
+  truncated: boolean;
+  hiddenLines: number;
+  lines: FileDiffLine[];
+}
+
+export interface FileDiffRequest {
+  runId: string;
+  path: string;
+  oldPath?: string;
+  status?: FileChangeStatus;
+  executionIds?: string[];
+  nodes?: string[];
+}
+
 export type { Execution, Snapshot, RuntimeActivity } from "./services/apiContract.generated";
 import type { Execution, Snapshot } from "./services/apiContract.generated";
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; heads?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; queued?: boolean; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; request_id?: string; status?: string; planning?: PlanningSummary; plan_type?: string }
@@ -168,6 +194,7 @@ export interface ProjectItem {
   clean: boolean;
   lastOpened: number;
   isShadow?: boolean;
+  archived?: boolean;
 }
 
 export interface ConversationSummary {
@@ -326,10 +353,11 @@ export interface PlanStreamEvent {
 
 export interface TranscriptItem {
   id: string;
-  type: "text" | "thinking" | "tool_call" | "system" | "divider";
+  type: "text" | "thinking" | "tool_call" | "system" | "divider" | "activity_summary";
   role?: "user" | "assistant" | "system";
   content?: string;
   userTurnOffset?: number;
+  steerRequestId?: string;
   images?: ImageAttachment[];
   files?: FileAttachment[];
   // Native reasoning block identity, scoped to its assistant message.
@@ -352,6 +380,8 @@ export interface TranscriptItem {
   isError?: boolean;
   /** Consecutive transcript failures folded into this display row. */
   errorItems?: TranscriptItem[];
+  /** Collapsible cards folded into this summary row in compact card-collapse mode. */
+  summaryItems?: TranscriptItem[];
   status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
   /** Tool-reported result truncation, never the bounded UI display preview. */
@@ -363,5 +393,21 @@ export interface TranscriptItem {
   defaultExpanded?: boolean;
   // Presentation provenance: replay timestamps alone do not make history new.
   animateAppear?: boolean;
+  /** Owning transcript source (e.g. planningId) when projected from multi-source logs. */
+  source?: string;
+  /** Exact raw UTF-8 byte spans `[start, end]` in the owning log for on-demand hydration. */
+  rawRange?: [number, number];
+  rawArgsRange?: [number, number];
+  rawResultRange?: [number, number];
+  /** True when the server omitted large args/result/thinking body in summary/card-shell mode. */
+  bodyOmitted?: boolean;
+  argsOmitted?: boolean;
+  resultOmitted?: boolean;
+  /** Server-precomputed header hints when large bodies are omitted. */
+  subcommandWarning?: boolean;
+  interruptedOutput?: boolean;
+  thinkingCharCount?: number;
+  /** Transient UI state while this card is hydrating its omitted body. */
+  hydrating?: boolean;
 }
 

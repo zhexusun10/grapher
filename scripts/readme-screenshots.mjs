@@ -323,6 +323,30 @@ try {
       colorScheme: 'light',
     });
     await context.addInitScript(({ lang, repository, config, title }) => {
+      // Simulate the native macOS Tauri desktop shell so README screenshots
+      // showcase the current macOS desktop UI (overlay titlebar + zero top card margin).
+      try {
+        Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+      } catch {
+        // Ignore if non-configurable.
+      }
+      window.isTauri = true;
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: 'main' },
+          currentWebview: { label: 'main', windowLabel: 'main' },
+        },
+        invoke(cmd) {
+          if (cmd === 'backend_url') return Promise.resolve(window.location.origin);
+          if (cmd === 'plugin:window|is_fullscreen') return Promise.resolve(false);
+          if (cmd === 'plugin:window|is_maximized') return Promise.resolve(false);
+          if (cmd === 'plugin:event|listen') return Promise.resolve(0);
+          if (cmd === 'plugin:event|unlisten') return Promise.resolve(null);
+          if (cmd === 'plugin:autostart|is_enabled') return Promise.resolve(false);
+          return Promise.resolve(null);
+        },
+      };
+
       localStorage.setItem('grapher_language_v1', lang);
       localStorage.setItem('grapher_plan_mode', 'graph');
       localStorage.setItem('grapher_projects', JSON.stringify([{
@@ -442,6 +466,45 @@ try {
     page.on('pageerror', error => errors.push(String(error)));
 
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}`, { waitUntil: 'domcontentloaded' });
+    await page.locator('.app-shell.is-tauri-macos').waitFor();
+    await page.locator('.desktop-titlebar.is-macos').waitFor();
+    // Render authentic macOS traffic light buttons in the 32px overlay titlebar
+    // (drawn natively by AppKit in the real macOS Tauri window).
+    await page.evaluate(() => {
+      const titlebar = document.querySelector('.desktop-titlebar.is-macos');
+      if (!titlebar || titlebar.querySelector('.macos-traffic-lights-capture')) return;
+      const group = document.createElement('div');
+      group.className = 'macos-traffic-lights-capture';
+      group.setAttribute('aria-hidden', 'true');
+      Object.assign(group.style, {
+        position: 'absolute',
+        left: '14px',
+        top: '50%',
+        transform: 'translateY(-50%)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        pointerEvents: 'none',
+        zIndex: '20',
+      });
+      for (const [bg, border] of [
+        ['#FF5F56', 'rgba(224, 68, 62, 0.85)'],
+        ['#FFBD2E', 'rgba(222, 161, 35, 0.85)'],
+        ['#27C93F', 'rgba(26, 171, 41, 0.85)'],
+      ]) {
+        const dot = document.createElement('span');
+        Object.assign(dot.style, {
+          width: '12px',
+          height: '12px',
+          borderRadius: '50%',
+          background: bg,
+          boxShadow: `inset 0 0 0 0.5px ${border}`,
+          display: 'block',
+        });
+        group.appendChild(dot);
+      }
+      titlebar.appendChild(group);
+    });
     await page.locator('.landing-screen').waitFor();
     await page.locator('.landing-screen textarea').fill(goal);
     await page.locator('.landing-screen textarea').blur();

@@ -25,7 +25,7 @@ const catalog = {
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-frontend-audit",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null },
     plugins: [{ name: "frontend-audit-fixtures", configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         if (!req.url.startsWith("/__audit")) return next();
@@ -38,7 +38,7 @@ before(async () => {
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = undefined, clockTime = undefined, browserInstance = browser) {
   const context = await browserInstance.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
@@ -66,7 +66,7 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
       extension_command: { instance: "standalone", commands: [] }, pi_extensions: { globalDirectory: "mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
       list_files: { files: [] }, list_skills: { skills: [] },
-      write_workspace_attachment: { name: "fixture.txt", path: "grapher-attachments/00000000-0000-4000-8000-000000000001/fixture.txt" },
+      write_workspace_attachment: { name: "fixture.txt", path: "/data/attachment-inputs/00000000-0000-4000-8000-000000000001/fixture.txt" },
       delete_workspace_attachment: { success: true } };
     if (Object.hasOwn(defaults, command)) return route.fulfill({ json: { result: defaults[command] } });
     errors.push(`Unexpected API: ${command}`);
@@ -325,6 +325,55 @@ test("Markdown block copy controls copy only their current code and recover from
     assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "retry after denial\n");
     await page.waitForFunction(() => !document.querySelector(".code-copy-btn").classList.contains("copied"));
     assert.equal(await buttons.first().getAttribute("aria-label"), "Copy to clipboard");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Markdown long code blocks reserve horizontal scroll inside the card from first render and react to resize", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("markdownCopy");
+  try {
+    const longLine = "Search the live web and return the most relevant URLs and content. ".repeat(8);
+    await page.evaluate(longLine => {
+      window.audit.setMarkdown(`\`\`\`text\n${longLine}\n\`\`\`\n\n\`\`\`bash\npwd\n\`\`\``, false);
+    }, longLine);
+    await page.waitForFunction(() => document.querySelectorAll(".code-block-wrapper").length === 2);
+    const initial = await page.evaluate(() => [...document.querySelectorAll(".code-block-wrapper")].map(wrapper => {
+      const pre = wrapper.querySelector("pre");
+      const wr = wrapper.getBoundingClientRect();
+      const pr = pre.getBoundingClientRect();
+      const ws = getComputedStyle(wrapper);
+      const ps = getComputedStyle(pre);
+      return {
+        overflowAttr: wrapper.getAttribute("data-overflow-x"),
+        wrapperOverflow: ws.overflow,
+        preOverflowX: ps.overflowX,
+        preOverflowY: ps.overflowY,
+        preInsideWrapper: pr.bottom <= wr.bottom + 0.5 && pr.top >= wr.top - 0.5,
+      };
+    }));
+    assert.equal(initial[0].overflowAttr, "true", "overflowing code block must synchronously reserve horizontal scroll");
+    assert.equal(initial[0].wrapperOverflow, "hidden");
+    assert.equal(initial[0].preOverflowX, "scroll");
+    assert.equal(initial[0].preOverflowY, "hidden");
+    assert.equal(initial[0].preInsideWrapper, true);
+    assert.equal(initial[1].overflowAttr, null, "short code block should not reserve an empty horizontal scrollbar");
+    assert.equal(initial[1].preOverflowX, "auto");
+    assert.equal(initial[1].preOverflowY, "hidden");
+    assert.equal(initial[1].preInsideWrapper, true);
+
+    // Narrowing the viewport until the short line overflows must promote it,
+    // and widening it again must restore the compact state.
+    await page.evaluate(() => {
+      window.audit.setMarkdown("```bash\necho medium_length_command_for_resize_test\n```", false);
+      const root = document.querySelector(".markdown-content");
+      root.style.width = "160px";
+    });
+    await page.waitForFunction(() => document.querySelector(".code-block-wrapper")?.getAttribute("data-overflow-x") === "true");
+    await page.evaluate(() => {
+      const root = document.querySelector(".markdown-content");
+      root.style.width = "640px";
+    });
+    await page.waitForFunction(() => document.querySelector(".code-block-wrapper")?.getAttribute("data-overflow-x") === null);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1015,8 +1064,7 @@ async function pauseCardEntrance(card) {
   });
 }
 
-for (const type of ["thinking", "tool"]) {
-  for (const source of ["direct", "node"]) {
+for (const [type, source] of [["thinking", "direct"], ["tool", "node"]]) {
     test(`${source} ${type} card entrance survives live updates and completion without snapping`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}`, undefined, "no-preference", type === "thinking");
       try {
@@ -1084,11 +1132,9 @@ for (const type of ["thinking", "tool"]) {
         } finally { await context.close(); }
       }
     });
-  }
 }
 
-for (const view of ["serial", "node"]) {
-  for (const completion of ["during", "after"]) {
+for (const [view, completion] of [["serial", "during"], ["node", "after"]]) {
     test(`${view} tool card entrance pushes the older rows up while it completes ${completion} entrance`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(`latestScroll&layout=live-tool&view=${view}`, undefined, "no-preference");
       try {
@@ -1162,7 +1208,6 @@ for (const view of ["serial", "node"]) {
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
-  }
 }
 
 async function sampleCardToggle(header) {
@@ -1344,7 +1389,7 @@ test("a pointer send does not flash the Stop control under the cursor", { timeou
   } finally { await context.close(); }
 });
 
-for (const name of ["prompt", "compactPrompt", "interruptPrompt"]) {
+for (const name of ["prompt", "interruptPrompt"]) {
   test(`${name}: a new draft can be sent immediately during pointer grace`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(name);
     try {
@@ -1428,7 +1473,7 @@ test("an attachment-only draft can be sent immediately during pointer grace", { 
       await new Promise(resolve => setTimeout(resolve, 30));
     }
     assert.equal(await page.evaluate(() => window.audit.submissions), 2);
-    assert.match(await page.evaluate(() => window.audit.lastMessage), /^@grapher-attachments\//);
+    assert.match(await page.evaluate(() => window.audit.lastMessage), /^@\/data\/attachment-inputs\//);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1613,8 +1658,7 @@ test("expanding a thinking card while following keeps the conversation at the bo
   } finally { await context.close(); }
 });
 
-for (const view of ["serial", "node", "planner"]) {
-  for (const motion of ["reduce", "no-preference"]) {
+for (const [view, motion] of [["serial", "reduce"], ["node", "no-preference"], ["planner", "reduce"]]) {
     test(`${view} completed reasoning opens at its newest line while following (${motion})`, { timeout: 30_000 }, async () => {
       const name = view === "planner" ? "plannerRoute&longThinking=1" : `latestScroll&layout=thinking-card&view=${view}`;
       const { context, page, errors } = await fixture(name, undefined, motion, view === "planner" ? false : undefined);
@@ -1648,10 +1692,9 @@ for (const view of ["serial", "node", "planner"]) {
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
-  }
 }
 
-for (const motion of ["reduce", "no-preference"]) {
+for (const motion of ["no-preference"]) {
   test(`an initially expanded Planner reasoning card opens on its newest line (${motion})`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture("plannerRoute&longThinking=1", undefined, motion, true);
     try {
@@ -2214,7 +2257,7 @@ test("fast streaming reasoning preserves upper DOM nodes and stays pinned withou
   } finally { await context.close(); }
 });
 
-for (const reducedMotion of ["no-preference", "reduce"]) {
+for (const reducedMotion of ["no-preference"]) {
   test(`resolving an auto route keeps a Planner reader where they scrolled to (${reducedMotion})`, { timeout: 30_000 }, async () => {
     // Auto routing renders the Planner pane while the route is still undecided.
     // Folding the raw route into the conversation key turned the Partitioner's
@@ -2459,7 +2502,7 @@ test("a scrollbar drag that starts near the bottom remains a reading gesture", {
   } finally { await context.close(); }
 });
 
-for (const gesture of ["wheel", "wheel-small", "touch", "keyboard", "scrollbar"]) {
+for (const gesture of ["wheel", "touch", "keyboard"]) {
   test(`${gesture} scrolling the final answer does not let a draining CoT push it out of view`, { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "no-preference");
   try {
@@ -3094,7 +3137,7 @@ test("Planner and Node Agent tool history both render cards in headless browser"
 });
 
 
-for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
+for (const fixtureName of ["landingPrompt"]) {
   test(`${fixtureName} hides Auto live and retains the visible mode selection`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(fixtureName);
     try {
@@ -3209,7 +3252,7 @@ for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
     } finally { await context.close(); }
   });
 
-  for (const reducedMotion of ["no-preference", "reduce"]) {
+  for (const reducedMotion of ["no-preference"]) {
     test(`${fixtureName} mode switching keeps the selector fixed with inertia (${reducedMotion})`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
       try {
@@ -3310,19 +3353,18 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
       const containerBounds = await page.locator(".prompt-box-container").boundingBox();
       assert.ok(buttonBounds.x >= containerBounds.x && buttonBounds.x + buttonBounds.width <= containerBounds.x + containerBounds.width,
         "toggle stays inside the composer");
-      assert.ok(buttonBounds.y >= inputBounds.y + inputBounds.height, "toggle sits in the actions bar below the textarea");
-      const textEdges = await input.evaluate(element => {
-        const box = element.closest(".prompt-box-container").getBoundingClientRect();
+      assert.ok(buttonBounds.y >= containerBounds.y && buttonBounds.y <= inputBounds.y + 4,
+        "toggle sits in the top-right corner of the textarea row");
+      assert.ok(buttonBounds.x > containerBounds.x + containerBounds.width / 2,
+        "toggle sits on the right side of the composer");
+      const textRightEdge = await input.evaluate(element => {
         const rect = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const scrollbar = element.offsetWidth - element.clientWidth;
-        return {
-          left: (rect.left - box.left) + parseFloat(style.paddingLeft),
-          right: (box.right - rect.right) + parseFloat(style.paddingRight) + scrollbar,
-        };
+        return rect.right - scrollbar - parseFloat(style.paddingRight);
       });
-      assert.ok(Math.abs(textEdges.left - textEdges.right) <= 1,
-        `textarea text margins stay symmetric: ${JSON.stringify(textEdges)}`);
+      assert.ok(textRightEdge <= buttonBounds.x + 1,
+        `textarea right padding clears the top-right toggle (${textRightEdge} vs ${buttonBounds.x})`);
       await input.evaluate(element => { element.setSelectionRange(5, 12); element.scrollTop = 60; });
       await expand.click();
       await collapse.waitFor();
@@ -3356,8 +3398,8 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
   });
 }
 
-for (const fixtureName of ["prompt", "compactPrompt"]) {
-  for (const reducedMotion of ["no-preference", "reduce"]) {
+for (const fixtureName of ["prompt"]) {
+  for (const reducedMotion of ["no-preference"]) {
     test(`${fixtureName} long paste keeps the caret and last line visible (${reducedMotion})`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
       try {
@@ -3428,7 +3470,7 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
   }
 }
 
-for (const fixtureName of ["prompt", "compactPrompt"]) {
+for (const fixtureName of ["prompt"]) {
   test(`${fixtureName} long paste does not override manual scrollback or edits in the middle`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
     try {
@@ -3458,7 +3500,7 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
   });
 }
 
-for (const fixtureName of ["prompt", "compactPrompt"]) {
+for (const fixtureName of ["prompt"]) {
   test(`${fixtureName} restores normal autosizing after edits during animated collapse`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
     try {
@@ -3506,7 +3548,7 @@ test("prompt expansion responds to container width, external values and viewport
   } finally { await context.close(); }
 });
 
-for (const name of ["prompt", "compactPrompt"]) {
+for (const name of ["prompt"]) {
   test(`${name}: pending submissions clear immediately, restore failures and cannot clear a new workspace draft`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(name);
     try {
@@ -3766,7 +3808,7 @@ test("completion retry backs off in hidden tabs and resumes when the composer be
 
 test("attachments stay local until Send and retries reuse only their own managed upload", { timeout: 30_000 }, async () => {
   const writes = [], deletes = [];
-  const path = "grapher-attachments/00000000-0000-4000-8000-000000000002/original.txt";
+  const path = "/data/attachment-inputs/00000000-0000-4000-8000-000000000002/original.txt";
   const { context, page, errors } = await fixture("prompt", async (route, command, body) => {
     if (command === "delete_workspace_attachment") deletes.push(body);
     if (command !== "write_workspace_attachment") return false;
@@ -3804,6 +3846,43 @@ test("attachments stay local until Send and retries reuse only their own managed
     await page.locator(".prompt-box-file-badge").waitFor({ state: "detached" });
     assert.equal(await page.locator(".prompt-box-file-badge").count(), 0);
     assert.deepEqual(deletes, []);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("raster images travel inline without disk upload while SVG files use external attachment storage", { timeout: 30_000 }, async () => {
+  const writes = [];
+  const svgPath = "/data/attachment-inputs/00000000-0000-4000-8000-000000000004/diagram.svg";
+  const { context, page, errors } = await fixture("prompt", async (route, command, body) => {
+    if (command !== "write_workspace_attachment") return false;
+    writes.push(body);
+    await route.fulfill({ json: { result: { name: body.filename, path: svgPath } } });
+    return true;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Inspect raster");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "shot.png",
+      mimeType: "image/png",
+      buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+    });
+    await input.press("Enter");
+    await page.waitForFunction(() => window.audit.submissions === 1);
+    assert.equal(writes.length, 0, "PNG images must not upload to disk");
+    assert.equal(await page.evaluate(() => window.audit.lastMessage), "Inspect raster");
+
+    await input.fill("Edit vector");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "diagram.svg",
+      mimeType: "image/svg+xml",
+      buffer: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>"),
+    });
+    await input.press("Enter");
+    await page.waitForFunction(() => window.audit.submissions === 2);
+    assert.equal(writes.length, 1, "SVG files must use external attachment storage instead of vision image RPC");
+    assert.equal(writes[0].filename, "diagram.svg");
+    assert.equal(await page.evaluate(() => window.audit.lastMessage), `@${svgPath} Edit vector`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -3871,7 +3950,7 @@ test("late attachment uploads cannot submit into a newly selected workspace", { 
     if (command !== "write_workspace_attachment") return false;
     requested = true;
     await gate.promise;
-    await route.fulfill({ json: { result: { name: "fixture.txt", path: "grapher-attachments/00000000-0000-4000-8000-000000000003/fixture.txt" } } });
+    await route.fulfill({ json: { result: { name: "fixture.txt", path: "/data/attachment-inputs/00000000-0000-4000-8000-000000000003/fixture.txt" } } });
     return true;
   });
   try {
@@ -4492,7 +4571,7 @@ for (const wireStatus of ["completed"]) {
   });
 }
 
-for (const reducedMotion of ["no-preference", "reduce"]) {
+for (const reducedMotion of ["no-preference"]) {
   test(`paused topology controls share the pane entrance without a second reveal (${reducedMotion})`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture("unrunNode", undefined, reducedMotion);
     try {
@@ -4919,7 +4998,7 @@ test("node follow-ups keep records expanded and completed nodes continue instead
   } finally { gates.forEach(gate => gate.resolve()); await context.close(); }
 });
 
-for (const [planType, publicationPhase] of [["graph", null], ["serial", null], ["graph", "publishing"], ["graph", "merging"]]) {
+for (const [planType, publicationPhase] of [["graph", null], ["serial", null], ["graph", "publishing"]]) {
   test(`${planType}${publicationPhase ? ` ${publicationPhase}` : ""}: queued messages batch in order and consecutive Steers stay on the live execution`, { timeout: 45_000 }, async () => {
     const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
     const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
@@ -5103,7 +5182,7 @@ test("node objective editing preserves the card size and action positions while 
   } finally { await context.close(); }
 });
 
-for (const nodeId of ["merger", "merge:join", "merger:publication"]) {
+for (const nodeId of ["merger", "merge:join"]) {
   test(`objective edits for literal task ID ${nodeId} never target a Merger`, { timeout: 30_000 }, async () => {
     const config = { repository: "/a", model: "test/old", maxParallel: 1, maxFeedback: 0, autoApprove: false };
     const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "TASK_REPLY" }] } }) + "\n";

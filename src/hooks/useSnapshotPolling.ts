@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } fr
 import type { RuntimeActivity, Snapshot } from "../types";
 import { RunNotFoundError, runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
-import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeRuntimeEventsStatus, subscribeSnapshotChanges } from "../services/runtimeEvents";
+import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeRuntimeEventsStatus, subscribeSettledOutputs, subscribeSnapshotChanges } from "../services/runtimeEvents";
 import { mapWithConcurrency } from "../services/boundedRequests";
 import { runHasActiveExecutions } from "../lib/runPhase";
 
-const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "paused", "needs_attention"]);
-const workingPhases = new Set(["planning", "running", "publishing", "merging"]);
+const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "launching_result", "paused", "needs_attention"]);
+const workingPhases = new Set(["planning", "running", "publishing", "merging", "launching_result"]);
 
 /** Poll all indexed workspaces, but publish only the selected conversation. */
 export function useSnapshotPolling(
@@ -21,6 +21,9 @@ export function useSnapshotPolling(
   /** Bootstrap is the first authoritative read. Polling earlier only adds
    * requests that contend with it for the primary runtime lock. */
   enabled = true,
+  /** Durable Run IDs whose sidebar indicator currently shows live work. They
+   * must never fall into the idle 30s background bucket or be skipped. */
+  workingRunIds: readonly string[] = [],
 ) {
   const versions = useRef(new Map<string, string>());
   const notifiedVersions = useRef(new Map<string, string>());
@@ -36,18 +39,23 @@ export function useSnapshotPolling(
   // Keep the latest held Run without resubscribing the poll effect mid-planning.
   const heldRunIdRef = useRef(heldRunId);
   heldRunIdRef.current = heldRunId;
+  const workingRunIdsRef = useRef(new Set<string>());
+  workingRunIdsRef.current = new Set(workingRunIds);
   const wakeRunRef = useRef<(id: string) => void>(() => {});
-  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution">> & { hasActiveExecutions?: boolean }) => {
+  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution" | "planning">> & { hasActiveExecutions?: boolean }) => {
     if (!status.runId || !status.phase) return;
     missingRuns.current.delete(status.runId);
     phases.current.set(status.runId, status.phase);
-    const hasRunningWork = status.hasActiveExecutions ?? runHasActiveExecutions(status);
+    const hasRunningWork = (status.hasActiveExecutions ?? runHasActiveExecutions(status)) || status.planning?.status === "running";
     if (hasRunningWork) writerRuns.current.add(status.runId);
     else writerRuns.current.delete(status.runId);
     versions.current.delete(status.runId);
     notifiedVersions.current.delete(status.runId);
     // Actions supersede polls already in flight, even at the same event sequence.
     revisions.current.set(status.runId, (revisions.current.get(status.runId) ?? 0) + 1);
+    if (hasRunningWork || workingPhases.has(status.phase)) {
+      dirtyRuns.current.add(status.runId);
+    }
     wakeRunRef.current(status.runId);
   }, []);
   if (viewedRunId && !missingRuns.current.has(viewedRunId)) {
@@ -80,16 +88,23 @@ export function useSnapshotPolling(
     const nextDelay = (foreground: boolean) => {
       const laneIds = ids.filter(id => inLane(id, foreground) && !missingRuns.current.has(id));
       if (!laneIds.length) return Infinity;
-      if (laneIds.some(id => dirtyRuns.current.has(id))) return 150;
+      if (laneIds.some(id => dirtyRuns.current.has(id))) return 50;
+      const laneHasActive = laneIds.some(id =>
+        (Boolean(id) && !phases.current.has(id)) || activeRuns.current.has(id) || writerRuns.current.has(id) ||
+        workingRunIdsRef.current.has(id) || workingPhases.has(phases.current.get(id) ?? "") || (id === viewedRunId &&
+          phases.current.get(id) === "needs_attention"));
       // Pushes are an accelerator, not the authority. Re-read durable state on a
-      // bounded cadence so one missed notification cannot freeze the view.
-      if (isRuntimeEventsConnected()) return RUNTIME_EVENTS_WATCHDOG_MS;
-      return laneIds.some(id => activeRuns.current.has(id) || writerRuns.current.has(id) ||
-        workingPhases.has(phases.current.get(id) ?? "") || (id === viewedRunId &&
-          phases.current.get(id) === "needs_attention")) ? 750 : 2500;
+      // bounded cadence so one missed notification cannot freeze the view; when
+      // a lane is completely idle and SSE is connected, relax the watchdog to
+      // avoid unnecessary 2s HTTP pings while keeping active runs snappy.
+      if (isRuntimeEventsConnected()) {
+        if (laneHasActive) return RUNTIME_EVENTS_WATCHDOG_MS;
+        return foreground ? 10_000 : 30_000;
+      }
+      return laneHasActive ? 750 : 2500;
     };
     const watchdogIds = () => ids.filter(id => !phases.current.has(id) || id === viewedRunId || activeRuns.current.has(id) ||
-      writerRuns.current.has(id) || workingPhases.has(phases.current.get(id) ?? ""));
+      writerRuns.current.has(id) || workingRunIdsRef.current.has(id) || workingPhases.has(phases.current.get(id) ?? ""));
     const poll = async (foreground: boolean) => {
       // Each lane owns its cadence and in-flight work. A blocked background
       // batch must not delay the foreground's next watchdog or pushed update.
@@ -108,7 +123,7 @@ export function useSnapshotPolling(
         const phase = phases.current.get(id);
         const isViewed = id === viewedRunId;
         if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id) &&
-            !notifiedVersions.current.has(id) && !requestedDirtyRuns.has(id)) return;
+            !workingRunIdsRef.current.has(id) && !notifiedVersions.current.has(id) && !requestedDirtyRuns.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
         const requestedNotificationVersion = notifiedVersions.current.get(id);
         try {
@@ -128,7 +143,7 @@ export function useSnapshotPolling(
             versions.current.delete(id);
             if (!snapshot?.runId) return;
             phases.current.set(snapshot.runId, snapshot.phase);
-            const hasRunningWork = runHasActiveExecutions(snapshot);
+            const hasRunningWork = runHasActiveExecutions(snapshot) || snapshot.planning?.status === "running";
             if (hasRunningWork) writerRuns.current.add(snapshot.runId);
             else writerRuns.current.delete(snapshot.runId);
             observeActivity(snapshot.runId, activity ?? []);
@@ -167,7 +182,7 @@ export function useSnapshotPolling(
           observeActivity(snapshot?.runId ?? id, activity ?? []);
           if (!snapshot?.runId) return;
           phases.current.set(snapshot.runId, snapshot.phase);
-          const hasRunningWork = runHasActiveExecutions(snapshot);
+          const hasRunningWork = runHasActiveExecutions(snapshot) || snapshot.planning?.status === "running";
           if (hasRunningWork) writerRuns.current.add(snapshot.runId);
           else writerRuns.current.delete(snapshot.runId);
           observeSnapshot(snapshot);
@@ -200,14 +215,26 @@ export function useSnapshotPolling(
       });
       return cancelled ? null : Math.max(retryDelay, nextDelay(foreground));
     };
-    const foregroundPolling = startVisibilityPolling(() => poll(true), nextDelay(true));
-    const backgroundPolling = startVisibilityPolling(() => poll(false), nextDelay(false));
+    const initialDelay = (foreground: boolean) => {
+      const laneIds = ids.filter(id => inLane(id, foreground) && !missingRuns.current.has(id));
+      if (laneIds.some(id => dirtyRuns.current.has(id))) return 0;
+      return nextDelay(foreground);
+    };
+    const foregroundPolling = startVisibilityPolling(() => poll(true), initialDelay(true));
+    const backgroundPolling = startVisibilityPolling(() => poll(false), initialDelay(false));
     const wakeRun = (id: string) => (inLane(id, true) ? foregroundPolling : backgroundPolling).wake();
     wakeRunRef.current = wakeRun;
     const unsubscribeSnapshot = subscribeSnapshotChanges(event => {
       const targetId = event.runId || (ids.includes("") ? "" : viewedRunId);
       if (missingRuns.current.has(targetId)) return;
-      if (targetId && !retained.has(targetId) && targetId !== viewedRunId) return;
+      if (targetId && !retained.has(targetId) && targetId !== viewedRunId) {
+        // Remember an early push for a brand-new Run until its ID lands in runIds.
+        if (dirtyRuns.current.size < 64) {
+          if (event.version) notifiedVersions.current.set(targetId, event.version);
+          dirtyRuns.current.add(targetId);
+        }
+        return;
+      }
       if (event.version && versions.current.get(targetId) === event.version && targetId !== heldRunIdRef.current) {
         return;
       }
@@ -217,17 +244,29 @@ export function useSnapshotPolling(
       dirtyRuns.current.add(targetId);
       wakeRun(targetId);
     });
+    const unsubscribeSettledOutput = subscribeSettledOutputs(event => {
+      const targetId = event.runId;
+      if (!targetId || missingRuns.current.has(targetId)) return;
+      if (!retained.has(targetId) && targetId !== viewedRunId) {
+        if (dirtyRuns.current.size < 64) dirtyRuns.current.add(targetId);
+        return;
+      }
+      dirtyRuns.current.add(targetId);
+      wakeRun(targetId);
+    });
     const unsubscribeConnect = subscribeRuntimeEventsStatus(status => {
       // A fallen push channel must hand suspended pollers back to timer polling;
       // a (re)connected channel re-reads everything it may have missed.
       const reconnected = status.connected && status.reconnected;
       const hasActive = activeRuns.current.size > 0 || writerRuns.current.size > 0 ||
+        workingRunIdsRef.current.size > 0 ||
         ids.some(id => workingPhases.has(phases.current.get(id) ?? ""));
       if (status.connected && (reconnected || hasActive)) {
         for (const id of ids) {
           if (missingRuns.current.has(id)) continue;
           if (reconnected || workingPhases.has(phases.current.get(id) ?? "") ||
-              writerRuns.current.has(id) || activeRuns.current.has(id) || id === viewedRunId) {
+              writerRuns.current.has(id) || activeRuns.current.has(id) ||
+              workingRunIdsRef.current.has(id) || id === viewedRunId) {
             dirtyRuns.current.add(id);
           }
         }
@@ -245,7 +284,7 @@ export function useSnapshotPolling(
         }
       }
       if (wakeRunRef.current === wakeRun) wakeRunRef.current = () => {};
-      unsubscribeSnapshot(); unsubscribeConnect(); foregroundPolling(); backgroundPolling(); abort.abort();
+      unsubscribeSnapshot(); unsubscribeSettledOutput(); unsubscribeConnect(); foregroundPolling(); backgroundPolling(); abort.abort();
     };
   }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, enabled]);
   // A phase/writer update changes cadence, not request ownership. Wake the

@@ -13,12 +13,12 @@ const snapshot = (runId, goal) => ({ ...empty, runId, config, phase: "completed"
   graph: { ...empty.graph, originalGoal: goal } });
 
 before(async () => {
-  server = await createServer({ cacheDir: "node_modules/.vite-sidebar-copy", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+  server = await createServer({ cacheDir: "node_modules/.vite-sidebar-copy", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   await server.listen();
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function openApp(handler, language = "en", reducedMotion = "reduce") {
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: language === "en" ? "en-US" : "zh-CN", reducedMotion });
@@ -106,7 +106,7 @@ test("the sidebar always opens expanded, even with a stale collapsed preference"
   } finally { await context.close(); }
 });
 
-test("a single CJK character stays with a following URL in sidebar and composer", { timeout: 30_000 }, async () => {
+test("sidebar URL titles and composer multi-line CJK prose wrap cleanly", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await openApp(async () => false);
   try {
     const sidebarLines = await page.locator('.run-item[data-run-id="a"] .run-title-text').evaluate(element => {
@@ -126,22 +126,30 @@ test("a single CJK character stays with a following URL in sidebar and composer"
       const textarea = document.createElement("textarea");
       textarea.className = "prompt-box-textarea";
       textarea.rows = 1;
-      textarea.value = "中https://example.com/a/very/long/path";
-      Object.assign(textarea.style, { position: "fixed", left: "-10000px", top: "0", width: "220px", height: "0px" });
+      Object.assign(textarea.style, { position: "fixed", left: "-10000px", top: "0", width: "400px", height: "0px" });
       document.body.append(textarea);
       const lineCount = () => {
         const style = getComputedStyle(textarea);
         const contentHeight = textarea.scrollHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
         return Math.round(contentHeight / parseFloat(style.lineHeight));
       };
+      // Punctuated CJK prose should fill each line across the available width
+      // instead of forcing each comma-delimited clause onto a new short line.
+      const punctuated = "第一行可以正确地占据输入框的宽度，第二行之后的中文内容也应该占满可用空间，而不是遇到逗号就提前换行。";
+      textarea.value = punctuated;
+      const punctuatedLines = lineCount();
+      textarea.value = punctuated.replace(/[，。]/g, "字");
+      const unpunctuatedLines = lineCount();
+      textarea.value = "https://example.com/a/very/long/path/that/must/wrap/without/horizontal/overflow";
       const urlLines = lineCount();
-      textarea.value = "中文内容会在窄输入框中继续正常折行".repeat(4);
-      const cjkLines = lineCount();
+      const urlOverflow = textarea.scrollWidth > textarea.clientWidth;
       textarea.remove();
-      return { urlLines, cjkLines };
+      return { punctuatedLines, unpunctuatedLines, urlLines, urlOverflow };
     });
-    assert.equal(composerLines.urlLines, 2, "the composer wraps the URL without stranding its leading CJK character");
-    assert.ok(composerLines.cjkLines > 1, "long CJK input still wraps to the composer width");
+    assert.equal(composerLines.punctuatedLines, composerLines.unpunctuatedLines,
+      `punctuated CJK prose must wrap across the full composer width without premature clause breaks: ${JSON.stringify(composerLines)}`);
+    assert.ok(composerLines.urlLines > 1 && !composerLines.urlOverflow,
+      `long URLs still wrap inside the composer width: ${JSON.stringify(composerLines)}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -193,11 +201,11 @@ test("sidebar cards and menus support keyboard navigation without opening conver
     const focused = () => items.evaluateAll(elements => elements.findIndex(item => item === document.activeElement));
     assert.equal(await focused(), 0);
     await page.keyboard.press("ArrowUp");
-    assert.equal(await focused(), 2);
+    assert.equal(await focused(), 3);
     await page.keyboard.press("ArrowDown");
     assert.equal(await focused(), 0);
     await page.keyboard.press("End");
-    assert.equal(await focused(), 2);
+    assert.equal(await focused(), 3);
     await page.keyboard.press("Home");
     assert.equal(await focused(), 0);
     await page.keyboard.press("Escape");
@@ -268,12 +276,13 @@ test("collapsed sidebar lists immediately leave the keyboard tab order", { timeo
     await page.locator(".project-workspace-item").waitFor({ state: "visible" });
     await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
     assert.equal(await page.locator(".project-workspace-item").evaluate(item => item === document.activeElement), true);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
 
-for (const reducedMotion of ["reduce", "no-preference"]) {
+for (const reducedMotion of ["no-preference"]) {
   test(`deleted conversations leave the sidebar (${reducedMotion})`, { timeout: 30_000 }, async () => {
     const deleted = new Set();
     const { context, page, errors } = await openApp(async (route, command, body) => {
@@ -821,6 +830,335 @@ test("adding workspace and conversation cards opens space smoothly without opaci
     assert.deepEqual(errors, []);
   } finally {
     releasePlanning();
+    await context.close();
+  }
+});
+
+for (const reducedMotion of ["no-preference"]) {
+  test(`workspaces and conversations support archiving, unarchiving, toggle animation and reload persistence (${reducedMotion})`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: "en-US", reducedMotion });
+    const errors = [];
+    const ws1 = "/mock/ws-alpha";
+    const ws2 = "/mock/ws-beta";
+    const wsConfig = { ...config, repository: ws1 };
+    try {
+      await context.addInitScript(({ ws1, ws2, wsConfig }) => {
+        if (localStorage.getItem("__archive_test_seeded")) return;
+        localStorage.setItem("__archive_test_seeded", "1");
+        localStorage.setItem("grapher_language_v1", "en");
+        localStorage.setItem("grapher_projects", JSON.stringify([
+          { id: ws1, path: ws1, name: "Alpha", branch: "main", clean: true, lastOpened: 200 },
+          { id: ws2, path: ws2, name: "Beta", branch: "main", clean: true, lastOpened: 100 },
+        ]));
+        localStorage.setItem("grapher_config", JSON.stringify(wsConfig));
+      }, { ws1, ws2, wsConfig });
+      await context.route("**/api/*", async route => {
+        const command = new URL(route.request().url()).pathname.slice(5);
+        const body = route.request().postDataJSON();
+        const summaries = [
+          { runId: "a1", repository: ws1, title: "Alpha conversation 1", phase: "completed", planType: "serial" },
+          { runId: "a2", repository: ws1, title: "Alpha conversation 2", phase: "completed", planType: "serial" },
+          { runId: "b1", repository: ws2, title: "Beta conversation 1", phase: "completed", planType: "serial" },
+        ];
+        const runRepo = id => (id && id.startsWith("b") ? ws2 : ws1);
+        const runSnap = id => ({
+          ...empty,
+          runId: id,
+          config: { ...wsConfig, repository: runRepo(id) },
+          phase: "completed",
+          planType: "serial",
+          graph: { ...empty.graph, originalGoal: `Prompt ${id}` },
+        });
+        const defaults = {
+          bootstrap: { config: wsConfig, snapshot: empty, runs: ["a1", "a2", "b1"], conversations: summaries, dataPath: "/mock", repositoryInfo: null },
+          save_config: { config: body?.config ?? wsConfig, snapshot: empty, runs: ["a1", "a2", "b1"], dataPath: "/mock", repositoryInfo: null },
+          snapshot: body.runId ? runSnap(body.runId) : empty,
+          history: body.runId ? runSnap(body.runId) : empty,
+          snapshot_if_changed: { version: "fixed", snapshot: null },
+          repository_status: { repository: body.repository, valid: true, error: null },
+          detect_repository: { path: body.repository, name: body.repository === ws2 ? "Beta" : "Alpha", branch: "main", head: "", clean: true },
+          list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] },
+          provider_auth: { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null },
+          pi_extensions: { globalDirectory: "mock", extensions: [] },
+          environment_capabilities: { platform: "darwin", arch: "arm64", nativeWorkspace: true },
+          composer_command: { instance: "i", commands: [] },
+          get_planning_output: { content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false },
+          get_execution_output: { content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false },
+          get_file_changes: { runId: body.runId, executionId: null, executionIds: null, summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0, totalAdditions: 0, totalDeletions: 0, isRunning: false } },
+        };
+        if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
+        await route.fulfill({ json: { result: defaults[command] ?? null } });
+      });
+
+      const page = await context.newPage();
+      page.setDefaultTimeout(8_000);
+      page.on("pageerror", error => errors.push(String(error)));
+      await page.goto(origin, { waitUntil: "domcontentloaded" });
+      await page.locator('.run-item[data-run-id="a1"]').waitFor();
+      await page.locator('.run-item[data-run-id="a2"]').waitFor();
+
+      // Archive buttons sit directly to the left of each section's + button.
+      const wsArchiveBtn = page.locator(".projects-label .sidebar-archive-btn[aria-pressed]");
+      const wsAddBtn = page.locator(".projects-label .sidebar-add-btn");
+      const runArchiveBtn = page.locator(".runs-label .sidebar-archive-btn[aria-pressed]");
+      const runAddBtn = page.locator(".runs-label .sidebar-add-btn");
+      const [wsArchBox, wsAddBox, runArchBox, runAddBox] = await Promise.all([
+        wsArchiveBtn.boundingBox(), wsAddBtn.boundingBox(),
+        runArchiveBtn.boundingBox(), runAddBtn.boundingBox(),
+      ]);
+      assert.ok(wsArchBox.x + wsArchBox.width <= wsAddBox.x, "workspace archive button sits left of +");
+      assert.ok(runArchBox.x + runArchBox.width <= runAddBox.x, "conversation archive button sits left of +");
+      assert.equal(await wsArchiveBtn.getAttribute("title"), null);
+      assert.equal(await runArchiveBtn.getAttribute("title"), null);
+
+      // Open conversation a1, then archive it via right-click: it leaves the active list and detaches to landing view.
+      await page.locator('.run-item[data-run-id="a1"]').click();
+      await page.locator('.run-item[data-run-id="a1"].chosen').waitFor();
+      await page.locator('.run-item[data-run-id="a1"]').click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Archive conversation", exact: true }).click();
+      await page.locator('.run-item[data-run-id="a1"]').waitFor({ state: "detached" });
+      assert.equal(await page.locator('.run-item[data-run-id="a2"]').count(), 1);
+      await page.locator(".landing-screen").waitFor();
+
+      // Toggle archived conversations view (reusing .runs-list), verify a1 is shown and animates smoothly without scrollbar flash.
+      if (reducedMotion === "no-preference") {
+        await page.evaluate(() => {
+          window.__archiveAnimSamples = [];
+          window.__archiveSampling = true;
+          const sample = () => {
+            const list = document.querySelector(".runs-list");
+            const view = list?.querySelector(".runs-list-view");
+            window.__archiveAnimSamples.push({
+              scrollable: list ? list.scrollHeight > list.clientHeight : false,
+              opacity: view ? Number(getComputedStyle(view).opacity) : null,
+              transform: view ? getComputedStyle(view).transform : null,
+            });
+            if (window.__archiveSampling) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        });
+      }
+      await runArchiveBtn.click();
+      assert.equal(await runArchiveBtn.getAttribute("aria-pressed"), "true");
+      await page.locator('.run-item[data-run-id="a1"]').waitFor();
+      assert.equal(await page.locator('.run-item[data-run-id="a2"]').count(), 0);
+      if (reducedMotion === "no-preference") {
+        await page.waitForTimeout(260);
+        const animSamples = await page.evaluate(() => {
+          window.__archiveSampling = false;
+          return window.__archiveAnimSamples;
+        });
+        assert.ok(animSamples.every(frame => !frame.scrollable), `archive view switch flashed overflow: ${JSON.stringify(animSamples)}`);
+        assert.ok(animSamples.some(frame => frame.opacity !== null && frame.opacity < 0.95),
+          `archive view switch should animate opacity/transform: ${JSON.stringify(animSamples)}`);
+      }
+
+      // Right-click in archived view shows Unarchive conversation and moves a1 back to active list.
+      await page.locator('.run-item[data-run-id="a1"]').click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Unarchive conversation", exact: true }).click();
+      await page.locator('.run-item[data-run-id="a1"]').waitFor({ state: "detached" });
+      await page.locator(".run-placeholder", { hasText: "No archived conversations" }).waitFor();
+
+      // Toggle back to active conversations: a1 is restored alongside a2.
+      await runArchiveBtn.click();
+      assert.equal(await runArchiveBtn.getAttribute("aria-pressed"), "false");
+      await page.locator('.run-item[data-run-id="a1"]').waitFor();
+      await page.locator('.run-item[data-run-id="a2"]').waitFor();
+
+      // Archive a2 and archive active workspace Alpha: Beta becomes active automatically.
+      await page.locator('.run-item[data-run-id="a2"]').click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Archive conversation", exact: true }).click();
+      await page.locator('.run-item[data-run-id="a2"]').waitFor({ state: "detached" });
+
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Archive workspace", exact: true }).click();
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).waitFor({ state: "detached" });
+      await page.locator(".project-workspace-item.active", { hasText: "Beta" }).waitFor();
+      await page.locator('.run-item[data-run-id="b1"]').waitFor();
+
+      // Reload persists both workspace and conversation archive states.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.locator(".project-workspace-item.active", { hasText: "Beta" }).waitFor();
+      assert.equal(await page.locator(".project-workspace-item", { hasText: "Alpha" }).count(), 0);
+
+      // Toggle archived workspaces, inspect Alpha, and verify a2 is still archived inside Alpha.
+      await wsArchiveBtn.click();
+      assert.equal(await wsArchiveBtn.getAttribute("aria-pressed"), "true");
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).waitFor();
+      assert.equal(await page.locator(".project-workspace-item", { hasText: "Beta" }).count(), 0);
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
+      await page.locator('.run-item[data-run-id="a1"]').waitFor();
+      assert.equal(await page.locator('.run-item[data-run-id="a2"]').count(), 0);
+      await runArchiveBtn.click();
+      await page.locator('.run-item[data-run-id="a2"]').waitFor();
+
+      // Unarchive Alpha from archived workspaces view, then toggle back to active workspaces.
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Unarchive workspace", exact: true }).click();
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).waitFor({ state: "detached" });
+      await page.locator(".projects-placeholder", { hasText: "No archived workspaces" }).waitFor();
+      await wsArchiveBtn.click();
+      await page.locator(".project-workspace-item", { hasText: "Alpha" }).waitFor();
+      await page.locator(".project-workspace-item", { hasText: "Beta" }).waitFor();
+      assert.deepEqual(errors, []);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("continuing an older conversation moves its card to the first position without reordering on passive view", { timeout: 30_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: "en-US", reducedMotion: "no-preference" });
+  const errors = [];
+  let releaseGraphFollowUp;
+  const graphFollowUpGate = new Promise(resolve => { releaseGraphFollowUp = resolve; });
+  const serialSnap = (runId, goal, events = []) => ({
+    ...empty,
+    runId,
+    config,
+    planType: "serial",
+    phase: "completed",
+    approved: true,
+    graph: { originalGoal: goal, nodes: [{ id: "task", task: goal }], edges: [] },
+    nodes: { task: { status: "completed", revision: 1 } },
+    executions: [{
+      id: `exec-${runId}`, node: "task", revision: 1, attempt: 1, sessionId: `sess-${runId}`,
+      worktree: repository, before: "", after: "", status: "completed", output: "", outputBytes: 0,
+      startedAt: 1, completedAt: 2,
+    }],
+    events,
+  });
+  const graphSnap = (runId, goal) => ({
+    ...empty,
+    runId,
+    config,
+    planType: "graph",
+    planningId: `plan-${runId}`,
+    phase: "awaiting_approval",
+    approved: false,
+    graph: { originalGoal: goal, nodes: [{ id: "a", task: "Task A" }], edges: [] },
+    nodes: { a: { status: "waiting", revision: 0 } },
+    events: [],
+  });
+  const snapshots = {
+    "conv-3": serialSnap("conv-3", "Newest conversation"),
+    "conv-2": graphSnap("conv-2", "Middle graph conversation"),
+    "conv-1": serialSnap("conv-1", "Oldest serial conversation"),
+  };
+  const summaries = [
+    { runId: "conv-3", repository, title: "Newest conversation", phase: "completed", planType: "serial" },
+    { runId: "conv-2", repository, title: "Middle graph conversation", phase: "awaiting_approval", planType: "graph" },
+    { runId: "conv-1", repository, title: "Oldest serial conversation", phase: "completed", planType: "serial" },
+  ];
+  try {
+    await context.addInitScript(({ repository, config }) => {
+      localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Repo", branch: "main", clean: true, lastOpened: 1 }]));
+      localStorage.setItem("grapher_config", JSON.stringify(config));
+    }, { repository, config });
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      if (command === "plan_goal_stream") {
+        const targetId = body.revisionRunId || "conv-2";
+        await graphFollowUpGate;
+        await route.fulfill({
+          contentType: "text/event-stream",
+          body: `event: run_started\ndata: ${JSON.stringify({ runId: targetId })}\n\nevent: complete\ndata: ${JSON.stringify({ snapshot: snapshots[targetId] })}\n\n`,
+        });
+        return;
+      }
+      if (command === "control" && body.action === "intervene") {
+        const current = snapshots[body.runId];
+        const next = {
+          ...current,
+          events: [...(current.events || []), { sequence: 10, type: "invalidated", target: body.node || "task", instruction: body.instruction, request_id: body.requestId }],
+        };
+        snapshots[body.runId] = next;
+        await route.fulfill({ json: { result: next } });
+        return;
+      }
+      const defaults = {
+        bootstrap: { config, snapshot: empty, runs: ["conv-3", "conv-2", "conv-1"], conversations: summaries, dataPath: "/mock", repositoryInfo: null },
+        save_config: { config: body?.config ?? config, snapshot: empty, runs: ["conv-3", "conv-2", "conv-1"], dataPath: "/mock", repositoryInfo: null },
+        snapshot: body?.runId ? snapshots[body.runId] ?? empty : empty,
+        history: body?.runId ? snapshots[body.runId] ?? empty : empty,
+        snapshot_if_changed: { version: "fixed", snapshot: null },
+        repository_status: { repository: body?.repository ?? repository, valid: true, error: null },
+        detect_repository: { path: repository, name: "Repo", branch: "main", head: "", clean: true },
+        list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] },
+        provider_auth: { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null },
+        pi_extensions: { globalDirectory: "mock", extensions: [] },
+        environment_capabilities: { platform: "darwin", arch: "arm64", nativeWorkspace: true },
+        composer_command: { instance: "i", commands: [] },
+        get_planning_output: { runId: body?.runId ?? "", planningId: body?.planningId ?? "", role: "planner", content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false },
+        get_execution_output: { runId: body?.runId ?? "", executionId: body?.executionId ?? "", content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false, status: "completed" },
+        get_file_changes: { runId: body?.runId, executionId: null, executionIds: null, summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0, totalAdditions: 0, totalDeletions: 0, isRunning: false } },
+      };
+      if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
+      await route.fulfill({ json: { result: defaults[command] ?? null } });
+    });
+
+    const page = await context.newPage();
+    page.setDefaultTimeout(8_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator('.run-item[data-run-id="conv-1"]').waitFor();
+    const cardOrder = () => page.locator(".runs-list .run-item").evaluateAll(items => items.map(item => item.dataset.runId));
+    assert.deepEqual(await cardOrder(), ["conv-3", "conv-2", "conv-1"]);
+
+    // Passively opening an older conversation must not change sidebar order.
+    await page.locator('.run-item[data-run-id="conv-1"]').click();
+    await page.locator('.run-item[data-run-id="conv-1"].chosen').waitFor();
+    await page.locator(".pane-bottom-chat textarea").waitFor();
+    assert.deepEqual(await cardOrder(), ["conv-3", "conv-2", "conv-1"]);
+
+    // Sending a follow-up in conv-1 moves it smoothly to the first position without flashing scroll overflow.
+    const conv1BeforeTop = await page.locator('.run-item[data-run-id="conv-1"]').evaluate(el => el.getBoundingClientRect().top);
+    await page.evaluate(() => {
+      window.__reorderSamples = [];
+      window.__samplingReorder = true;
+      const sample = () => {
+        const list = document.querySelector(".runs-list");
+        const conv1 = document.querySelector('.run-item[data-run-id="conv-1"]');
+        window.__reorderSamples.push({
+          scrollable: list ? list.scrollHeight > list.clientHeight : false,
+          conv1Top: conv1 ? conv1.getBoundingClientRect().top : null,
+        });
+        if (window.__samplingReorder) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await page.locator(".pane-bottom-chat textarea").fill("Follow up in oldest serial conversation");
+    await page.locator(".pane-bottom-chat textarea").press("Enter");
+    await page.waitForFunction(() => [...document.querySelectorAll(".runs-list .run-item")].map(el => el.dataset.runId).join(",") === "conv-1,conv-3,conv-2");
+    await page.waitForTimeout(300);
+    const reorderSamples = await page.evaluate(() => {
+      window.__samplingReorder = false;
+      return window.__reorderSamples;
+    });
+    const conv1AfterTop = await page.locator('.run-item[data-run-id="conv-1"]').evaluate(el => el.getBoundingClientRect().top);
+    assert.ok(conv1AfterTop < conv1BeforeTop - 20, `conv-1 should settle at the top (${conv1BeforeTop} -> ${conv1AfterTop})`);
+    assert.ok(reorderSamples.every(frame => !frame.scrollable), `reordering cards must not flash overflow: ${JSON.stringify(reorderSamples)}`);
+    assert.deepEqual(await cardOrder(), ["conv-1", "conv-3", "conv-2"]);
+    assert.deepEqual(
+      await page.evaluate((repoKey) => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))[repoKey], repository),
+      ["conv-1", "conv-3", "conv-2"],
+    );
+
+    // Continuing an older Graph conversation moves it to the first position immediately while Planner is still streaming.
+    await page.locator('.run-item[data-run-id="conv-2"]').click();
+    await page.locator('.run-item[data-run-id="conv-2"].chosen').waitFor();
+    assert.deepEqual(await cardOrder(), ["conv-1", "conv-3", "conv-2"], "opening conv-2 does not reorder yet");
+    await page.locator(".pane-bottom-chat textarea").fill("Revise the graph plan");
+    await page.locator(".pane-bottom-chat textarea").press("Enter");
+    await page.waitForFunction(() => [...document.querySelectorAll(".runs-list .run-item")].map(el => el.dataset.runId).join(",") === "conv-2,conv-1,conv-3");
+    releaseGraphFollowUp();
+    await page.waitForTimeout(100);
+    assert.deepEqual(await cardOrder(), ["conv-2", "conv-1", "conv-3"]);
+    assert.deepEqual(errors, []);
+  } finally {
+    releaseGraphFollowUp();
     await context.close();
   }
 });

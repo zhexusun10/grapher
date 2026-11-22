@@ -52,9 +52,6 @@ pub struct Job {
     pub parent_heads: Vec<String>,
     pub config: Config,
     pub task: String,
-    /// Accepted filesystem-input references. Continuity resumes Pi without
-    /// resending a prompt, but must still deliver an input interrupted before copy.
-    pub attachment_instructions: String,
     pub images: Option<Vec<ImageAttachment>>,
     pub resume_execution_id: Option<String>,
     pub session_fork: Option<Execution>,
@@ -1284,6 +1281,14 @@ impl Runtime {
         // Production workspace admission is resolved by Rust after planning;
         // it is not a frontend environment choice.
         let automatic = config.environment.is_none() && !cfg!(feature = "fixture");
+        let mut attachment_texts = vec![graph.original_goal.as_str()];
+        attachment_texts.extend(graph.nodes.iter().map(|node| node.task.as_str()));
+        crate::attachment_inputs::adopt_for_run(
+            &self.root,
+            &self.store,
+            &self.state.run_id,
+            &attachment_texts,
+        )?;
         let mut events = vec![
             EventKind::Created {
                 graph,
@@ -1302,6 +1307,14 @@ impl Runtime {
     }
 
     pub fn set_route(&mut self, plan_type: &str) -> Result<(), String> {
+        self.set_route_with_images(plan_type, None)
+    }
+
+    pub fn set_route_with_images(
+        &mut self,
+        plan_type: &str,
+        images: Option<Vec<ImageAttachment>>,
+    ) -> Result<(), String> {
         if self.state.phase != "awaiting_approval"
             || !matches!(plan_type, "serial" | "graph")
             || (plan_type == "serial"
@@ -1313,8 +1326,10 @@ impl Runtime {
         if plan_type == "graph" && self.state.isolated_workspaces.is_none() {
             crate::native::require_graph_execution()?;
         }
+        let images = images.filter(|imgs| !imgs.is_empty());
         self.emit(EventKind::Routed {
             plan_type: plan_type.into(),
+            images,
         })
     }
 
@@ -3385,136 +3400,6 @@ impl Runtime {
         Ok(())
     }
 
-    /// A Merger attachment targets its own repair workspace. A settled
-    /// publication Merger has already returned to the user's source directory.
-    pub(crate) fn merger_attachment_workspace(&self, node: &str) -> Result<PathBuf, String> {
-        let merger = self
-            .state
-            .mergers
-            .iter()
-            .rev()
-            .find(|execution| execution.node == node)
-            .ok_or("Merger workspace not found in this Run")?;
-        if merger.status != "running"
-            && node == "merger"
-            && self
-                .state
-                .publication
-                .as_ref()
-                .is_some_and(|publication| publication.status == "completed")
-        {
-            return self
-                .state
-                .config
-                .as_ref()
-                .map(|config| PathBuf::from(&config.repository))
-                .ok_or_else(|| "Missing Run config".into());
-        }
-        Ok(PathBuf::from(&merger.worktree))
-    }
-
-    /// The workspace a Planner attachment would resolve to, if one exists. A
-    /// running turn reports its live cwd; otherwise the next turn's selection.
-    pub(crate) fn planner_attachment_workspace(&self) -> Result<Option<PathBuf>, String> {
-        if let Some(worktree) = self
-            .state
-            .planning
-            .as_ref()
-            .filter(|planning| planning.status.as_deref() == Some("running"))
-            .and_then(|planning| planning.worktree.as_ref())
-        {
-            return Ok(Some(PathBuf::from(worktree)));
-        }
-        Ok(self
-            .planner_workspace()?
-            .map(|execution| PathBuf::from(execution.worktree)))
-    }
-
-    /// Shared-source nodes and source-direct follow-ups accept attachments in
-    /// place. Private nodes need staged delivery,
-    /// including a node that has not run yet and therefore has no workspace.
-    pub(crate) fn node_attachment_is_source_direct(&self, node: &str) -> bool {
-        self.shared_source_workspace() || self.source_direct_context(node)
-    }
-
-    /// Filesystem inputs accepted for the unfinished turn(s) of a node session.
-    /// Continue does not resend the prompt, so references are rebuilt from the
-    /// durable `Started` message claims and accepted steers. An initial recovery
-    /// that does resend the task contributes that text as well, so a batched
-    /// turn never loses one of its claimed attachment references.
-    fn recovery_attachment_instructions(
-        &self,
-        node: &str,
-        session: &str,
-        resent_task: &str,
-    ) -> String {
-        let across_forks = self.batch_workspaces();
-        let executions: BTreeSet<_> = self
-            .state
-            .executions
-            .iter()
-            .rev()
-            .filter(|execution| {
-                execution.node == node
-                    && (across_forks || execution.session_id == session)
-                    && !self.state.superseded_execution_ids.contains(&execution.id)
-            })
-            // A cwd-changing recovery forks Pi's session ID, not the unfinished
-            // turn's input ownership. Walk its retained failed predecessors too.
-            .skip_while(|execution| execution.session_id != session)
-            // Only the unfinished turn and its recovery attempts need inputs;
-            // older completed turns must not resurrect deliberately removed files.
-            .take_while(|execution| execution.status != "completed")
-            .map(|execution| execution.id.as_str())
-            .collect();
-        let mut sequences: BTreeSet<i64> = BTreeSet::new();
-        let withdrawn = self.state.withdrawn_steer_sequences();
-        let mut parts: Vec<String> = Vec::new();
-        if !resent_task.trim().is_empty() {
-            parts.push(resent_task.to_string());
-        }
-        for event in &self.state.events {
-            match &event.kind {
-                EventKind::Started {
-                    execution,
-                    message_sequences,
-                    ..
-                } if executions.contains(execution.id.as_str()) => {
-                    sequences.extend(message_sequences.clone().unwrap_or_default());
-                }
-                EventKind::Steered {
-                    execution_id,
-                    instruction,
-                    ..
-                } if executions.contains(execution_id.as_str())
-                    && !withdrawn.contains(&event.sequence) =>
-                {
-                    parts.push(instruction.clone())
-                }
-                _ => {}
-            }
-        }
-        for event in &self.state.events {
-            match &event.kind {
-                EventKind::Invalidated {
-                    target,
-                    instruction,
-                    ..
-                }
-                | EventKind::NodeMessaged {
-                    node: target,
-                    instruction,
-                    queued: true,
-                    ..
-                } if target == node && sequences.contains(&event.sequence) => {
-                    parts.push(instruction.clone());
-                }
-                _ => {}
-            }
-        }
-        parts.join("\n")
-    }
-
     /// Only callers that proved the previous input was unstarted may use this
     /// binding. Started/Prepared by themselves are not consumption receipts.
     fn bound_node_input(
@@ -4192,8 +4077,7 @@ impl Runtime {
                             .is_some_and(|input| !input.additional_sources.is_empty())
                         || self.state.executions.iter().any(|execution| {
                             execution.node == node.id
-                                && (execution.pid.is_some()
-                                    || execution.output_bytes > 0
+                                && (self.execution_has_session_activity(execution)
                                     || execution.status == "completed")
                         })
                     {
@@ -4203,7 +4087,9 @@ impl Runtime {
                 });
             // A missing file alone does not prove Pi never ran: a session can
             // have been removed after tools executed. Fail closed if any attempt
-            // in that session has launch/output evidence or a completed turn.
+            // in that session has model/tool activity or a completed turn, while
+            // still allowing recovery when only startup lifecycle lines were
+            // emitted before Pi persisted a session file.
             let no_unfinished_activity = |previous: &Execution| {
                 self.state
                     .executions
@@ -4214,7 +4100,7 @@ impl Runtime {
                             && execution.session_id == previous.session_id
                     })
                     .take_while(|execution| execution.status != "completed")
-                    .all(|execution| execution.pid.is_none() && execution.output_bytes == 0)
+                    .all(|execution| !self.execution_has_session_activity(execution))
             };
             let no_session_activity = |previous: &Execution| {
                 no_unfinished_activity(previous)
@@ -4896,14 +4782,6 @@ impl Runtime {
             } else {
                 format!("{}\n{}", node.task, state.instruction)
             };
-            let attachment_instructions = if continuation || initial_recovery {
-                let input_session = resume
-                    .map(|previous| previous.session_id.as_str())
-                    .unwrap_or(&execution.session_id);
-                self.recovery_attachment_instructions(&node.id, input_session, &task)
-            } else {
-                task.clone()
-            };
             let mut images = retained_images;
             images.extend(
                 queued_prompt
@@ -5240,7 +5118,6 @@ impl Runtime {
                 parent_heads,
                 config: node_config,
                 task,
-                attachment_instructions,
                 images,
                 resume_execution_id,
                 session_fork,
@@ -7547,20 +7424,8 @@ fn perform_with_merger_inner(
         }
     }
     // Capture the exact pre-input session boundary after forking and before
-    // attachments/launch, either of which can fail without delivering the turn.
+    // launch, which can fail without delivering the turn.
     feedback_continuation::record_feedback_input(root, job)?;
-    // Uploads for a closed node are staged outside its immutable project
-    // view. Deliver accepted inputs only after validation/preparation and the
-    // durable Prepared boundary, so failed/interrupted delivery is recoverable.
-    crate::attachment_inputs::deliver_prepared(
-        root,
-        &job.run_id,
-        &job.execution.node,
-        &job.attachment_instructions,
-        path,
-        // Proven deletions in a retained partial view or source remain edits.
-        job.preserved_workspace.is_some() || (job.batch_workspaces && source_tree),
-    )?;
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;

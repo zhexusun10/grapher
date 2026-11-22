@@ -252,6 +252,7 @@ fn sidebar_title_edits_use_the_canonical_reducer() {
             &mut state,
             EventKind::Routed {
                 plan_type: "serial".into(),
+                images: None,
             },
         )
         .unwrap();

@@ -13,6 +13,7 @@ import {
   type ConversationModelConfig, type OpenWorkspaceFileRequest, type RoleModelConfig
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
+import { extractLeadingAttachmentPrefix, prependAttachmentPrefix, stripManagedAttachmentMentions } from "./utils/attachmentPath";
 import { tokens } from "./tokens";
 import { RunNotFoundError, runtimeService } from "./services/runtime";
 import {
@@ -24,6 +25,7 @@ import {
   DesktopBackendError,
   getDesktopBackendState,
   invalidateBackendBaseUrl,
+  isTauriDesktop,
   resolveBackendBaseUrl,
   subscribeDesktopBackendState,
 } from "./services/apiBase";
@@ -59,19 +61,29 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { selectedMergerNode } from "./lib/graphNodeIdentity";
+import type { ConversationSearchMatch } from "./services/apiContract.generated";
 import { createUuid } from "./lib/uuid";
 import { PlannerGraphEditQueue, plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
-import { runHasActiveExecutions } from "./lib/runPhase";
-import { ComposerDrafts } from "./services/composerDrafts";
+import { runHasActiveExecutions, runHasLiveWork } from "./lib/runPhase";
+import { ComposerDrafts, type ComposerDraftAttachment } from "./services/composerDrafts";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { Sidebar } from "./components/layout/Sidebar";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { bindRunToWorkspace, normalizeWorkspacePath, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
-import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
-import { useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
+import { bindRunToWorkspace, normalizeWorkspacePath, promoteRunInWorkspace, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
+import { landingDraftKey, loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
+import { useCompletionNotifications, useCompletionNotificationSound, useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
+import {
+  formatNotificationBody,
+  isCompletionNotificationPhase,
+  isWindowUnfocused,
+  requestBrowserNotificationPermission,
+  resolveFinalAgentOutput,
+  sendCompletionNotification,
+  subscribeDesktopNotificationClicks,
+} from "./services/completionNotifications";
 import { STORAGE_KEYS, readStorageJson, readStorageString, writeStorageJson, writeStorageString } from "./services/appStorage";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
@@ -83,6 +95,7 @@ const ConfirmModal = lazy(() =>
 );
 const SettingsModal = lazy(() => import("./components/modals/SettingsModal"));
 const EditorModal = lazy(() => import("./components/modals/EditorModal"));
+const SearchModal = lazy(() => import("./components/modals/SearchModal"));
 
 type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
 type WorkbenchLoadKind = "initial" | "navigation";
@@ -106,6 +119,36 @@ function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: 
 export default function App() {
   const landingBackground = useLandingBackground();
   const hideAutoMode = useHideAutoMode();
+  const completionNotifications = useCompletionNotifications();
+  const completionNotificationSound = useCompletionNotificationSound();
+  const completionNotificationSoundRef = useRef(completionNotificationSound);
+  completionNotificationSoundRef.current = completionNotificationSound;
+  const openNotificationRunRef = useRef<(runId: string) => void>(() => {});
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    const desktop = isTauriDesktop();
+    const sync = (blurred?: boolean) => {
+      const inactive = document.hidden || (desktop && (blurred ?? !document.hasFocus()));
+      document.documentElement.classList.toggle("window-inactive", inactive);
+    };
+    sync();
+    const onVisibility = () => sync();
+    const onBlur = () => sync(true);
+    const onFocus = () => sync(false);
+    document.addEventListener("visibilitychange", onVisibility);
+    if (desktop) {
+      window.addEventListener("blur", onBlur);
+      window.addEventListener("focus", onFocus);
+    }
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (desktop) {
+        window.removeEventListener("blur", onBlur);
+        window.removeEventListener("focus", onFocus);
+      }
+      document.documentElement.classList.remove("window-inactive");
+    };
+  }, []);
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     const items = readStorageJson(STORAGE_KEYS.projects);
@@ -126,10 +169,8 @@ export default function App() {
     }
     const list = readStorageJson(STORAGE_KEYS.projects);
     if (Array.isArray(list) && list.length > 0) {
-      const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-      if (sorted[0]?.path) {
-        initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
-      }
+      const sorted = [...list].filter((p) => !p.archived).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+      initialConfig.repository = sorted[0]?.path ? normalizeWorkspacePath(sorted[0].path) : "";
     }
     return {
       ...initialConfig,
@@ -154,6 +195,14 @@ export default function App() {
 
   useEffect(() => {
     setLandingGoal(loadLandingDraft(config.repository));
+    if (config.repository) {
+      const targetKey = landingDraftKey(config.repository);
+      const unboundKey = landingDraftKey(undefined);
+      const landingDrafts = landingComposerDraftsRef.current;
+      if (landingDrafts.attachments(targetKey).length === 0) {
+        landingDrafts.moveAttachments(unboundKey, targetKey);
+      }
+    }
   }, [config.repository]);
 
   const handleLandingGoalChange = useCallback((val: string) => {
@@ -171,7 +220,7 @@ export default function App() {
   useEffect(() => {
     if (!selected) setSelectedMergerId("");
   }, [selected]);
-  const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
+  const [modal, setModal] = useState<"settings" | "editor" | "approval" | "search" | null>(null);
   const [error, setError] = useState("");
   const [hostPreflight, setHostPreflight] = useState<HostPreflight | null>(null);
   const [recheckingHostPreflight, setRecheckingHostPreflight] = useState(false);
@@ -196,6 +245,7 @@ export default function App() {
   const workbenchIdentityRef = useRef({ runId: "", key: "initial" });
   // Session-local unsent text outlives a mounted workbench, but never crosses Runs.
   const composerDraftsRef = useRef(new Map<string, ComposerDrafts>());
+  const landingComposerDraftsRef = useRef(new ComposerDrafts());
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
@@ -203,9 +253,16 @@ export default function App() {
   const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
   // Wait for the backend's data-directory identity and authoritative index.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
+  const [archivedRunIds, setArchivedRunIds] = useState<string[]>(() => readStorageJson(STORAGE_KEYS.archivedRuns) ?? []);
+  const archivedRunIdSet = useMemo(() => new Set(archivedRunIds), [archivedRunIds]);
+  const [openedProjectSeq, setOpenedProjectSeq] = useState(0);
   // Current cache IDs only suppress re-entry motion after the index validates a
   // card; they never render a card or trigger a history read before bootstrap.
-  const [initialRunIds] = useState(() => readStorageJson(STORAGE_KEYS.workspaceRuns)?.[workspaceKey(config.repository)] ?? []);
+  const [initialRunIds] = useState(() => {
+    const archived = new Set(readStorageJson(STORAGE_KEYS.archivedRuns) ?? []);
+    return (readStorageJson(STORAGE_KEYS.workspaceRuns)?.[workspaceKey(config.repository)] ?? [])
+      .filter(id => !archived.has(id));
+  });
   const [isSidebarReady, setIsSidebarReady] = useState(false);
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
   // Settings can be ready before compatibility indexing and foreground restore.
@@ -231,7 +288,37 @@ export default function App() {
   const currentRepoPath = useMemo(() => workspaceKey(config.repository), [config.repository]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
-  const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot, observeRunSummary } = useRunIndicators(state);
+  const latestSnapshotsRef = useRef(new Map<string, Snapshot>());
+  const rememberLatestSnapshot = useCallback((snapshot: Snapshot) => {
+    if (!snapshot.runId || snapshot.runId.startsWith("pending-")) return;
+    const existing = latestSnapshotsRef.current.get(snapshot.runId);
+    if (existing) {
+      const existingSeq = existing.events.at(-1)?.sequence ?? -1;
+      const candidateSeq = snapshot.events.at(-1)?.sequence ?? -1;
+      if (candidateSeq < existingSeq) return;
+      if (candidateSeq === existingSeq && runHasLiveWork(snapshot.phase, snapshot) && !runHasLiveWork(existing.phase, existing)) {
+        return;
+      }
+    }
+    latestSnapshotsRef.current.set(snapshot.runId, snapshot);
+  }, []);
+  useEffect(() => {
+    rememberLatestSnapshot(state);
+  }, [state, rememberLatestSnapshot]);
+  const {
+    runIndicators,
+    markSnapshotRead,
+    clearRunUnread,
+    observeRunSnapshot: observeIndicatorSnapshot,
+    observeRunSummary,
+    beginLocalWork,
+    endLocalWork,
+    transferLocalWork,
+  } = useRunIndicators(state);
+  const observeRunSnapshot = useCallback((snapshot: Snapshot) => {
+    rememberLatestSnapshot(snapshot);
+    observeIndicatorSnapshot(snapshot);
+  }, [rememberLatestSnapshot, observeIndicatorSnapshot]);
   const syncRunLabelFromSnapshot = useCallback((snapshot: Snapshot) => {
     if (!snapshot.runId || snapshot.runId.startsWith("pending-")) return;
     const label = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
@@ -247,7 +334,172 @@ export default function App() {
     observeRunSnapshot(snapshot);
     syncRunLabelFromSnapshot(snapshot);
   }, [observeRunSnapshot, syncRunLabelFromSnapshot]);
-  const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
+
+  const prevRunWorkingRef = useRef(new Map<string, boolean>());
+  const runLabelsRef = useRef(runLabels);
+  runLabelsRef.current = runLabels;
+  const viewedSnapshotRef = useRef(state);
+  viewedSnapshotRef.current = state;
+
+  useEffect(() => {
+    const prevMap = prevRunWorkingRef.current;
+    const completedRuns: Array<{ runId: string; phase: string }> = [];
+
+    for (const [runId, indicator] of Object.entries(runIndicators)) {
+      if (!runId || runId.startsWith("pending-")) continue;
+      const wasWorking = prevMap.get(runId) === true;
+      const nowWorking = Boolean(indicator.working);
+      prevMap.set(runId, nowWorking);
+      if (wasWorking && !nowWorking) {
+        completedRuns.push({ runId, phase: indicator.phase });
+      }
+    }
+    for (const existingId of prevMap.keys()) {
+      if (!(existingId in runIndicators)) {
+        prevMap.delete(existingId);
+      }
+    }
+
+    if (!completionNotifications || completedRuns.length === 0) return;
+    // In browser mode, skip output reads immediately while the tab is focused.
+    // In Tauri desktop, the native Rust command checks authoritative OS focus.
+    if (!isTauriDesktop() && !isWindowUnfocused()) return;
+
+    for (const { runId, phase } of completedRuns) {
+      if (deletedRunIdsRef.current.has(runId)) continue;
+      const cached =
+        latestSnapshotsRef.current.get(runId)
+        ?? (viewedSnapshotRef.current.runId === runId ? viewedSnapshotRef.current : null)
+        ?? null;
+      if (!isCompletionNotificationPhase(phase, cached)) continue;
+
+      void (async () => {
+        try {
+          let snapshot = cached;
+          if (!snapshot || snapshot.phase !== phase || runHasLiveWork(snapshot.phase, snapshot)) {
+            const fresh = await runtimeService.snapshotForRun(runId).catch(() => null);
+            if (fresh && !deletedRunIdsRef.current.has(runId)) {
+              rememberLatestSnapshot(fresh);
+              snapshot = fresh;
+            }
+          }
+          const effectivePhase = snapshot?.phase ?? phase;
+          if (!isCompletionNotificationPhase(effectivePhase, snapshot)) return;
+          const finalOutput = await resolveFinalAgentOutput(runId, snapshot);
+          const fallbackBody = effectivePhase === "awaiting_approval"
+            ? t("方案已生成，等待确认。")
+            : t("对话已完成");
+          const rawTitle =
+            runLabelsRef.current[runId]
+            || snapshot?.title
+            || snapshot?.graph?.originalGoal
+            || "Grapher";
+          const title = formatNotificationBody(rawTitle, 80) || "Grapher";
+          await sendCompletionNotification({
+            title,
+            body: finalOutput || fallbackBody,
+            runId,
+            sound: completionNotificationSoundRef.current,
+            onClick: (clickedRunId) => {
+              if (clickedRunId) openNotificationRunRef.current(clickedRunId);
+            },
+          });
+        } catch (error) {
+          console.warn("Failed to deliver completion notification:", runId, error);
+        }
+      })();
+    }
+  }, [runIndicators, completionNotifications, rememberLatestSnapshot]);
+
+  const activeNotificationRunIdsKey = useMemo(
+    () => Object.entries(runIndicators)
+      .filter(([id, indicator]) => indicator.working && !!id && !id.startsWith("pending-"))
+      .map(([id]) => id)
+      .sort()
+      .join("\u0000"),
+    [runIndicators],
+  );
+
+  // Regular snapshot polling and SSE pause while the document is hidden
+  // (e.g. macOS window hidden on close, minimized, or another Space). While
+  // completion notifications are enabled and a conversation is still working,
+  // check only those active runs on a light cadence so completions still fire.
+  useEffect(() => {
+    if (!completionNotifications || !isBootstrapReady || !activeNotificationRunIdsKey) return;
+    if (typeof document === "undefined") return;
+    const ids = activeNotificationRunIdsKey.split("\u0000");
+    const versions = new Map<string, string>();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let inFlight = false;
+    const controller = new AbortController();
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const pollOnce = async () => {
+      if (cancelled || !document.hidden || inFlight) return;
+      inFlight = true;
+      try {
+        for (const id of ids) {
+          if (cancelled || !document.hidden) break;
+          try {
+            const response = await runtimeService.snapshotIfChanged(
+              versions.get(id) ?? null,
+              controller.signal,
+              id,
+            );
+            if (!cancelled && response.version) {
+              versions.set(id, response.version);
+            }
+            if (!cancelled && response.snapshot?.runId === id) {
+              observePolledSnapshot(response.snapshot);
+            }
+          } catch {
+            // Transient failures retry on the next hidden poll tick.
+          }
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled && document.hidden) {
+          timer = setTimeout(() => { void pollOnce(); }, 2500);
+        }
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        clearTimer();
+        timer = setTimeout(() => { void pollOnce(); }, 2500);
+      } else {
+        clearTimer();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (document.hidden) {
+      timer = setTimeout(() => { void pollOnce(); }, 2500);
+    }
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      controller.abort();
+    };
+  }, [completionNotifications, isBootstrapReady, activeNotificationRunIdsKey, observePolledSnapshot]);
+  const allRunIdsKey = useMemo(
+    () => [...new Set(Object.values(workspaceRuns).flat().filter(id => !!id && !id.startsWith("pending-")))].sort().join("\u0000"),
+    [workspaceRuns],
+  );
+  const allRunIds = useMemo(
+    () => (allRunIdsKey ? allRunIdsKey.split("\u0000") : []),
+    [allRunIdsKey],
+  );
   const [activities, setActivities] = useState<Record<string, RuntimeActivity[]>>({});
   const observeActivity = useCallback((runId: string, activity: RuntimeActivity[]) => {
     if (!runId) return;
@@ -288,7 +540,18 @@ export default function App() {
     });
   };
 
+  const promoteRunToTop = useCallback((runId: string, repo: string) => {
+    if (!runId || !repo || deletedRunIdsRef.current.has(runId)) return;
+    setWorkspaceRuns((prev) => {
+      const updated = promoteRunInWorkspace(prev, runId, repo);
+      if (updated === prev) return prev;
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, updated);
+      return updated;
+    });
+  }, []);
+
   const replaceProvisionalRunId = (oldId: string, newId: string, label: string, repository: string) => {
+    transferLocalWork(oldId, newId);
     // Keep the sidebar card keyed by the provisional ID so adopting the durable
     // Run ID reuses the same node instead of replaying its entrance/exit.
     setRunCardKeys((prev) => (prev[newId] === oldId ? prev : { ...prev, [newId]: oldId }));
@@ -514,11 +777,16 @@ export default function App() {
   // Initial live planning carries its provisional Run identity.
   const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId || state.planning?.runId || "";
   useConversationTranscriptCache(transcriptRunId);
+  const activeWorkingRunIds = useMemo(
+    () => (activeNotificationRunIdsKey ? activeNotificationRunIdsKey.split("\u0000") : []),
+    [activeNotificationRunIdsKey],
+  );
   const setBackendStatus = useSnapshotPolling(setState, observePolledSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
     // While a live Planner SSE stream owns this Run's draft topology, durable
     // snapshot polls must not clobber the incrementally assembled graph.
     isPlanning && plannerStream.runId && !plannerStream.runId.startsWith("pending-") ? plannerStream.runId : "",
-    isBootstrapReady);
+    isBootstrapReady,
+    activeWorkingRunIds);
 
   // Composer metadata/queue mutations do not commit the Planner's live draft.
   // Check the current stream at response time, not the submitting render.
@@ -565,22 +833,32 @@ export default function App() {
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
     const generation = foregroundGeneration.current;
-    if (["approve", "resume", "resume_node", "intervene", "resolve", "retry_publication"].includes(action)) {
-      await requireRepository(state.config?.repository || config.repository);
+    const startsWork = ["approve", "resume", "resume_node", "retry_publication"].includes(action) && !!state.runId;
+    const workToken = startsWork ? Symbol(action) : null;
+    if (workToken) beginLocalWork(workToken, state.runId);
+    try {
+      if (["approve", "resume", "resume_node", "intervene", "resolve", "retry_publication"].includes(action)) {
+        await requireRepository(state.config?.repository || config.repository);
+      }
+      if (generation !== foregroundGeneration.current) return;
+      const isGlobalGraphAction = ["pause", "resume", "approve", "reject", "retry_publication"].includes(action);
+      const defaultNode = !isGlobalGraphAction
+        ? (selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.id || "task") : undefined))
+        : undefined;
+      const targetNode = extra.node !== undefined ? extra.node : defaultNode;
+      const payload: Record<string, unknown> = { runId: state.runId, ...extra };
+      if (targetNode !== undefined) {
+        payload.node = targetNode;
+      }
+      const snapshot = await runtimeService.control(action, payload);
+      if (startsWork && snapshot.runId) {
+        promoteRunToTop(snapshot.runId, snapshot.config?.repository || config.repository);
+      }
+      if (!applyForegroundSnapshot(snapshot, generation)) return false;
+      setModal(null);
+    } finally {
+      if (workToken) endLocalWork(workToken);
     }
-    if (generation !== foregroundGeneration.current) return;
-    const isGlobalGraphAction = ["pause", "resume", "approve", "reject", "retry_publication"].includes(action);
-    const defaultNode = !isGlobalGraphAction
-      ? (selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.id || "task") : undefined))
-      : undefined;
-    const targetNode = extra.node !== undefined ? extra.node : defaultNode;
-    const payload: Record<string, unknown> = { runId: state.runId, ...extra };
-    if (targetNode !== undefined) {
-      payload.node = targetNode;
-    }
-    const snapshot = await runtimeService.control(action, payload);
-    if (!applyForegroundSnapshot(snapshot, generation)) return false;
-    setModal(null);
   });
 
   const handleSendMessage = (
@@ -656,11 +934,19 @@ export default function App() {
       setPlannerStream(prev => ({ ...prev, items: prev.items.filter(item => item.id !== message.id) }));
     };
     const submitNodeMessage = (action: "steer" | "intervene" | "continue_merger", message: ChatMessage, executionId?: string, nodeOverride?: string, onAccepted?: (snapshot: Snapshot) => void) => run(async () => {
+      const resolvedNode = nodeOverride ?? targetNodeName;
+      const nodeStatus = resolvedNode ? state.nodes[resolvedNode]?.status : undefined;
+      const startsWork = !!state.runId && (
+        action === "continue_merger"
+        || (action === "intervene" && !state.paused && (nodeStatus === "completed" || nodeStatus === "failed"))
+      );
+      const workToken = startsWork ? Symbol(action) : null;
+      if (workToken) beginLocalWork(workToken, state.runId);
       try {
         await requireRepository(state.config?.repository || config.repository);
         if (!isCurrent()) { removeMessage(message); return false; }
         let snapshot = await runtimeService.control(options?.interrupt && action === "steer" ? "interrupt_steer" : action, {
-          runId: state.runId, node: nodeOverride ?? targetNodeName, executionId, instruction: text, images: options?.images,
+          runId: state.runId, node: resolvedNode, executionId, instruction: text, images: options?.images,
           requestId: message.steerRequestId,
         });
         // Passive input for waiting/dirty nodes must not wake the Run. Use the
@@ -669,6 +955,9 @@ export default function App() {
           ?? snapshot.events.at(-1);
         const queuedOnly = accepted?.type === "node_messaged" && accepted.queued;
         if (snapshot.paused && !queuedOnly) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
+        if (snapshot.runId) {
+          promoteRunToTop(snapshot.runId, snapshot.config?.repository || config.repository);
+        }
         const applied = applyForegroundSnapshot(snapshot, generation);
         if (applied) {
           onAccepted?.(snapshot);
@@ -682,6 +971,8 @@ export default function App() {
       } catch (error) {
         removeMessage(message);
         throw error;
+      } finally {
+        if (workToken) endLocalWork(workToken);
       }
     });
 
@@ -772,6 +1063,9 @@ export default function App() {
           const status: ChatMessage["plannerSteerStatus"] | undefined = !submitted ? "unknown"
             : latest?.status === "queued" || latest?.status === "accepted" || latest?.status === "consumed" || latest?.status === "handled" || latest?.status === "failed" || latest?.status === "unknown"
               ? latest.status : "submitted";
+          if (submitted && plannerSteerOwner({ recorded: submitted, status }) !== "composer") {
+            promoteRunToTop(planningRunId, snapshot.config?.repository || state.config?.repository || config.repository);
+          }
           // A send the reader left behind is owned by the durable record: the
           // card must not linger as "submitting" in the conversation it left.
           if (!isCurrent()) { removeMessage(message); return false; }
@@ -799,6 +1093,7 @@ export default function App() {
           const durable = await recoverPlannerSteer(planningRunId, message.plannerSteerId);
           if (!isCurrent()) { removeMessage(message); return false; }
           if (plannerSteerOwner(durable) === "pending") {
+            promoteRunToTop(planningRunId, state.config?.repository || config.repository);
             setSessionEntries(prev => prev.map(entry => entry.id === message.id
               ? { ...entry, plannerSteerStatus: "unknown", plannerSteerError: durable.error ?? failure } : entry));
             setError(t("送达状态未知，请检查对话后再重试：{0}", localizeError(durable.error ?? failure)));
@@ -843,34 +1138,43 @@ export default function App() {
       : null;
 
     const storedWorkspaceRuns = readStorageJson(STORAGE_KEYS.workspaceRuns);
+    const storedArchivedRuns = readStorageJson(STORAGE_KEYS.archivedRuns) ?? [];
+    const storedArchivedRunSet = new Set(storedArchivedRuns);
+    setArchivedRunIds(storedArchivedRuns);
 
     let activeRepo = "";
     let activeInfo: RepositoryInfo | null = null;
 
     if (storedProjects !== null && storedProjects.length > 0) {
       const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-      const latestProj = sorted[0];
-      activeRepo = latestProj.path;
+      const latestProj = sorted.find((p) => !p.archived);
+      if (latestProj) {
+        activeRepo = latestProj.path;
 
-      if (data.repositoryInfo && workspaceKey(data.repositoryInfo.path) === workspaceKey(latestProj.path)) {
-        activeInfo = data.repositoryInfo;
-        const updatedProjects = sorted.map((p) =>
-          p.path === latestProj.path
-            ? { ...p, branch: data.repositoryInfo!.branch, clean: data.repositoryInfo!.clean, isShadow: data.repositoryInfo!.isShadow }
-            : p
-        );
-        setProjects(updatedProjects);
-        writeStorageJson(STORAGE_KEYS.projects, updatedProjects);
+        if (data.repositoryInfo && workspaceKey(data.repositoryInfo.path) === workspaceKey(latestProj.path)) {
+          activeInfo = data.repositoryInfo;
+          const updatedProjects = sorted.map((p) =>
+            p.path === latestProj.path
+              ? { ...p, branch: data.repositoryInfo!.branch, clean: data.repositoryInfo!.clean, isShadow: data.repositoryInfo!.isShadow }
+              : p
+          );
+          setProjects(updatedProjects);
+          writeStorageJson(STORAGE_KEYS.projects, updatedProjects);
+        } else {
+          activeInfo = {
+            name: latestProj.name,
+            path: latestProj.path,
+            branch: latestProj.branch,
+            head: latestProj.branch || "",
+            clean: latestProj.clean,
+            isShadow: latestProj.isShadow,
+          };
+          setProjects(sorted);
+        }
       } else {
-        activeInfo = {
-          name: latestProj.name,
-          path: latestProj.path,
-          branch: latestProj.branch,
-          head: latestProj.branch || "",
-          clean: latestProj.clean,
-          isShadow: latestProj.isShadow,
-        };
         setProjects(sorted);
+        activeRepo = "";
+        activeInfo = null;
       }
     } else if (storedProjects === null && data.repositoryInfo) {
       const info = { ...data.repositoryInfo, path: normalizeWorkspacePath(data.repositoryInfo.path) };
@@ -1008,13 +1312,22 @@ export default function App() {
         return next;
       });
       writeStorageJson(STORAGE_KEYS.workspaceRuns, indexedRuns);
+      const knownIds = new Set([
+        ...Object.values(indexedRuns).flat(),
+        ...(data.unavailableConversationIds ?? []),
+      ]);
+      const prunedArchivedRuns = storedArchivedRuns.filter(id => knownIds.has(id));
+      if (prunedArchivedRuns.length !== storedArchivedRuns.length) {
+        writeStorageJson(STORAGE_KEYS.archivedRuns, prunedArchivedRuns);
+      }
+      setArchivedRunIds(prunedArchivedRuns);
       setIsSidebarReady(true);
       if (data.snapshot.runId) setBackendStatus(data.snapshot);
     } else {
       throw new Error("Conversation index is unavailable");
     }
 
-    const currentRuns = indexedRuns[workspaceKey(activeRepo)] || [];
+    const currentRuns = (indexedRuns[workspaceKey(activeRepo)] || []).filter(id => !storedArchivedRunSet.has(id));
     const isActivelyRunning = Boolean(
       data.snapshot.runId &&
       data.snapshot.phase === "running" &&
@@ -1110,6 +1423,7 @@ export default function App() {
             writeStorageJson(STORAGE_KEYS.projects, next);
             return next;
           });
+          setOpenedProjectSeq((seq) => seq + 1);
           const nextSnapshot = emptySnapshot;
           resetSessionMessages();
           setState(nextSnapshot);
@@ -1146,7 +1460,7 @@ export default function App() {
     setSelected("");
     setError("");
     resetSessionMessages();
-    return run(async () => {
+    void (async () => {
       try {
         const info = await runtimeService.detectRepository(proj.path);
         if (!planningRecovery.current(scope)) return;
@@ -1167,13 +1481,17 @@ export default function App() {
           setConfig((prev) => ({ ...prev, repository: proj.path }));
         }
         setError("");
+      } catch (err) {
+        if (planningRecovery.current(scope)) {
+          setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
+        }
       } finally {
         // Clear this workspace's spinner even if a newer foreground action
         // superseded the switch; a different switch keeps its own spinner.
         setSwitchingProjectPath(current =>
           current && workspaceKey(current) === workspaceKey(proj.path) ? null : current);
       }
-    });
+    })();
   };
 
   // A renamed or deleted source folder is not a repairable binding. Drop the
@@ -1192,7 +1510,7 @@ export default function App() {
     // either operation; the effect runs again once it has settled.
     if (isOpeningProject || !isBootstrapReady) return;
     if (workspaceKey(config.repository) !== key) return;
-    const nextProject = [...remaining].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0))[0];
+    const nextProject = [...remaining].filter(project => !project.archived).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0))[0];
     const nextRepository = nextProject ? normalizeWorkspacePath(nextProject.path) : "";
     detachForeground("");
     setConfig(prev => {
@@ -1239,8 +1557,10 @@ export default function App() {
           deletedRunIdsRef.current.add(id);
           messagesByRunRef.current.delete(id);
           composerDraftsRef.current.delete(id);
+          latestSnapshotsRef.current.delete(id);
         });
         clearLandingDraft(pathToRemove);
+        landingComposerDraftsRef.current.clearAttachment(landingDraftKey(pathToRemove));
         setRunCardKeys((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id))));
         setProjects(prev => {
           const remaining = prev.filter(p => workspaceKey(p.path) !== key);
@@ -1264,6 +1584,11 @@ export default function App() {
         setRunModes(prev => {
           const next = Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id)));
           writeStorageJson(STORAGE_KEYS.runModes, next);
+          return next;
+        });
+        setArchivedRunIds(prev => {
+          const next = prev.filter(id => !deletedIds.has(id));
+          if (next.length !== prev.length) writeStorageJson(STORAGE_KEYS.archivedRuns, next);
           return next;
         });
 
@@ -1291,6 +1616,7 @@ export default function App() {
   // Shared by successful deletion and reads proving that a cached card is stale.
   const forgetDeletedRun = (runIdToDelete: string) => {
     deletedRunIdsRef.current.add(runIdToDelete);
+    latestSnapshotsRef.current.delete(runIdToDelete);
     invalidateTranscriptCaches(runIdToDelete);
     setRunCardKeys((prev) => {
       if (!(runIdToDelete in prev)) return prev;
@@ -1319,8 +1645,87 @@ export default function App() {
       writeStorageJson(STORAGE_KEYS.runModes, copy);
       return copy;
     });
+    setArchivedRunIds((prev) => {
+      if (!prev.includes(runIdToDelete)) return prev;
+      const next = prev.filter((id) => id !== runIdToDelete);
+      writeStorageJson(STORAGE_KEYS.archivedRuns, next);
+      return next;
+    });
     messagesByRunRef.current.delete(runIdToDelete);
     composerDraftsRef.current.delete(runIdToDelete);
+  };
+
+  const handleArchiveProject = (project: ProjectItem) => {
+    const key = workspaceKey(project.path);
+    const nextProjects = projects.map((p) =>
+      workspaceKey(p.path) === key ? { ...p, archived: true } : p
+    );
+    setProjects(nextProjects);
+    writeStorageJson(STORAGE_KEYS.projects, nextProjects);
+    if (workspaceKey(config.repository) === key) {
+      const nextProject = nextProjects
+        .filter((p) => !p.archived)
+        .sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0))[0];
+      if (nextProject) {
+        void handleSelectProject(nextProject);
+      } else {
+        detachForeground("");
+        setPlannerStream(initialPlannerStream);
+        setConfig((prev) => {
+          const next = applyModelConfig({ ...prev, repository: "" }, defaultSettings);
+          writeStorageJson(STORAGE_KEYS.config, next);
+          return next;
+        });
+        setRepoInfo(null);
+        setState(emptySnapshot);
+        setGoal("");
+        setLandingGoal(loadLandingDraft(""));
+        setSelected("");
+        setSwitchingProjectPath(null);
+        resetSessionMessages();
+        setRouteType("undecided");
+        setError("");
+      }
+    }
+  };
+
+  const handleUnarchiveProject = (project: ProjectItem) => {
+    const key = workspaceKey(project.path);
+    let restored: ProjectItem | null = null;
+    const nextProjects = projects.map((p) => {
+      if (workspaceKey(p.path) !== key) return p;
+      const { archived: _archived, ...rest } = p;
+      restored = rest;
+      return rest;
+    });
+    setProjects(nextProjects);
+    writeStorageJson(STORAGE_KEYS.projects, nextProjects);
+    if (!config.repository && restored) {
+      void handleSelectProject(restored);
+    }
+  };
+
+  const handleArchiveRun = (runId: string) => {
+    if (!runId || runId.startsWith("pending-")) return;
+    setArchivedRunIds((prev) => {
+      if (prev.includes(runId)) return prev;
+      const next = [runId, ...prev];
+      writeStorageJson(STORAGE_KEYS.archivedRuns, next);
+      return next;
+    });
+    if (state.runId === runId || loadingRunId === runId || plannerStream.runId === runId) {
+      handleNewConversation();
+    }
+  };
+
+  const handleUnarchiveRun = (runId: string) => {
+    if (!runId) return;
+    setArchivedRunIds((prev) => {
+      if (!prev.includes(runId)) return prev;
+      const next = prev.filter((id) => id !== runId);
+      writeStorageJson(STORAGE_KEYS.archivedRuns, next);
+      return next;
+    });
   };
 
   const handleDeleteRun = (runIdToDelete: string) => run(async () => {
@@ -1339,7 +1744,10 @@ export default function App() {
       setRouteType("undecided");
       setGoal("");
       setSelected("");
-      const remainingRuns = (workspaceRuns[currentRepoPath] || []).filter((id) => id !== runIdToDelete);
+      const wasArchived = archivedRunIdSet.has(runIdToDelete);
+      const remainingRuns = wasArchived
+        ? []
+        : (workspaceRuns[currentRepoPath] || []).filter((id) => id !== runIdToDelete && !archivedRunIdSet.has(id));
       if (remainingRuns.length > 0) {
         try {
           const snapshot = await runtimeService.snapshotForRun(remainingRuns[0]);
@@ -1649,16 +2057,29 @@ export default function App() {
       }
     }
     const scope = planningRecovery.begin(targetRepo);
+    if (completionNotifications) {
+      void requestBrowserNotificationPermission();
+    }
     let startedRunId: string | undefined;
 
     let provisionalRunId: string | undefined;
+    const landingAttachmentKey = landingDraftKey(targetRepo);
+    const rawLandingGoal = options?.rawText !== undefined
+      ? options.rawText
+      : stripManagedAttachmentMentions(targetGoal);
+    let clearedLandingAttachments: ComposerDraftAttachment[] = [];
+    let restoredLandingAttachments = false;
 
     if (!isContinuing) {
       provisionalRunId = `pending-${Date.now()}`;
       setGoal("");
       setLandingGoal("");
       clearLandingDraft(targetRepo);
+      clearedLandingAttachments = [...landingComposerDraftsRef.current.attachments(landingAttachmentKey)];
+      landingComposerDraftsRef.current.clearAttachments(landingAttachmentKey, { revoke: false });
+      landingComposerDraftsRef.current.clearAttachments(landingDraftKey(undefined));
       setIsPlanning(true);
+      beginLocalWork(scope, provisionalRunId);
       setRouteType(effectiveMode === "auto" ? "undecided" : effectiveMode);
       setSelected("");
 
@@ -1736,6 +2157,10 @@ export default function App() {
       }));
     } else {
       setIsPlanning(true);
+      if (effectiveRevisionRunId) {
+        beginLocalWork(scope, effectiveRevisionRunId);
+        promoteRunToTop(effectiveRevisionRunId, targetRepo);
+      }
       // A Planner turn does not change the draft/runtime phase. The workbench
       // displays planning separately, including while old snapshots are polled.
       const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
@@ -1841,6 +2266,12 @@ export default function App() {
                     return updated;
                   });
                 }
+                endLocalWork(scope);
+                observeRunSnapshot(event.snapshot);
+                syncRunLabelFromSnapshot(event.snapshot);
+                setBackendStatus(event.snapshot);
+              } else if (event.type === "error") {
+                endLocalWork(scope);
               }
               return;
             }
@@ -2037,6 +2468,7 @@ export default function App() {
                 queuePlannerStream((prev) => (!!prev.compacting === compacting ? prev : { ...prev, compacting }));
               }
             } else if (event.type === "error") {
+              endLocalWork(scope);
               const errorMsg = event.error;
               if (errorMsg) {
                 setPlannerStream((prev) => appendPlannerError(prev, errorMsg));
@@ -2044,6 +2476,7 @@ export default function App() {
               void planningRecovery.finish(scope, event.summary, event.planningId);
             } else if (event.type === "complete") {
               if (event.snapshot) {
+                endLocalWork(scope);
                 // Terminal events supersede in-flight draft polls immediately;
                 // planning must not wait for the SSE transport to close.
                 applyForegroundSnapshot(event.snapshot, foregroundGeneration.current);
@@ -2066,7 +2499,15 @@ export default function App() {
           effectiveRevisionRunId,
           continuePlanningId
         );
-        if (!planningRecovery.current(scope)) return;
+        endLocalWork(scope);
+        if (!planningRecovery.current(scope)) {
+          if (snapshot?.runId) {
+            observeRunSnapshot(snapshot);
+            syncRunLabelFromSnapshot(snapshot);
+            setBackendStatus(snapshot);
+          }
+          return;
+        }
         applyForegroundSnapshot(snapshot, foregroundGeneration.current);
         setRouteType(deduceRouteType(snapshot));
         recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
@@ -2107,8 +2548,15 @@ export default function App() {
         };
         if (provisionalRunId && !startedRunId) {
           setGoal(targetGoal);
-          setLandingGoal(targetGoal);
-          saveLandingDraft(targetRepo, targetGoal);
+          setLandingGoal(rawLandingGoal);
+          saveLandingDraft(targetRepo, rawLandingGoal);
+          if (
+            clearedLandingAttachments.length > 0 &&
+            landingComposerDraftsRef.current.attachments(landingAttachmentKey).length === 0
+          ) {
+            landingComposerDraftsRef.current.setAttachments(landingAttachmentKey, clearedLandingAttachments, { revokeReplaced: false });
+            restoredLandingAttachments = true;
+          }
         }
         const isAbort =
           err?.name === "AbortError" ||
@@ -2144,6 +2592,15 @@ export default function App() {
         void planningRecovery.finish(scope, err?.summary, err?.planningId);
         setPlannerStream((prev) => appendPlannerError(prev, errorMsg, true));
     } finally {
+      if (!restoredLandingAttachments && clearedLandingAttachments.length > 0 &&
+          typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+        for (const item of clearedLandingAttachments) {
+          if (item.previewIsObjectUrl && item.imagePreview) {
+            URL.revokeObjectURL(item.imagePreview);
+          }
+        }
+      }
+      endLocalWork(scope);
       if (abortController && planningAbortControllerRef.current === abortController) {
         planningAbortControllerRef.current = null;
       }
@@ -2187,6 +2644,9 @@ export default function App() {
       return isCurrent();
     };
     const acceptNodeEdit = async (snapshot: Snapshot) => {
+      if (snapshot.runId) {
+        promoteRunToTop(snapshot.runId, snapshot.config?.repository || config.repository);
+      }
       if (!applyForegroundSnapshot(snapshot, generation)) return false;
       if (!snapshot.paused) return true;
       const resumed = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
@@ -2222,9 +2682,9 @@ export default function App() {
       return;
     }
 
-    const fileTagsMatch = targetMsg.text.match(/(?:<file name="[^"]+">[\s\S]*?<\/file>\s*)+/);
-    const fileTags = fileTagsMatch ? fileTagsMatch[0] : "";
-    const backendGoal = fileTags ? `${fileTags}${cleanText}` : cleanText;
+    const attachmentPrefix = extractLeadingAttachmentPrefix(targetMsg.text);
+    const oldBackendText = prependAttachmentPrefix(attachmentPrefix, cleanExisting);
+    const backendGoal = prependAttachmentPrefix(attachmentPrefix, cleanText);
 
     const isPlannerHistoryInitial = routeType === "graph" && !targetMsg.node &&
       targetMsg.id.startsWith("planner-history-") &&
@@ -2286,6 +2746,9 @@ export default function App() {
             requestId: selectedMessage.steerRequestId,
           });
           if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
+          if (snapshot.runId) {
+            promoteRunToTop(snapshot.runId, snapshot.config?.repository || config.repository);
+          }
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
           const base = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
           setSessionEntries(applySelectedVersionToEntries(
@@ -2361,17 +2824,17 @@ export default function App() {
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
-          runId: state.runId, oldText: cleanExisting, instruction: backendGoal,
+          runId: state.runId, oldText: oldBackendText, instruction: backendGoal,
         });
         if (!applyForegroundSnapshot(snap, generation)) return false;
-        const updated: ChatMessage = { ...targetMsg, text: cleanText, files: parsedExisting.attachments, runId: state.runId,
+        const updated: ChatMessage = { ...targetMsg, text: backendGoal, files: parsedExisting.attachments, runId: state.runId,
           versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, timestamp: Date.now() }]),
-            { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, timestamp: Date.now() }],
+            { id: `v${Date.now()}`, text: backendGoal, files: parsedExisting.attachments, timestamp: Date.now() }],
           currentVersionIndex: (targetMsg.versions?.length ?? 1),
         };
         setSessionEntries([updated]);
         setGoal(cleanText);
-        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updated);
+        await handlePlanGoal(backendGoal, { displayText: backendGoal, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updated);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -2384,24 +2847,24 @@ export default function App() {
       const previousEntry = previous[previous.length - 1];
       const versions = [
         ...(current.versions ?? [{ id: "v1", text: current.text, files: current.files, images: current.images, timestamp: current.timestamp || Date.now() }]),
-        { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+        { id: `v${Date.now()}`, text: backendGoal, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
       ];
       const updatedPlannerMessage: ChatMessage = withoutPlannerSteerIdentity({
         ...current, id: current.id || targetMsg.id, parentId: previousEntry?.id ?? null,
-        text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, runId: state.runId,
+        text: backendGoal, files: parsedExisting.attachments, images: targetMsg.images, runId: state.runId,
         timestamp: Date.now(), versions, currentVersionIndex: versions.length - 1,
       });
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
-          runId: state.runId, oldText: cleanExisting, instruction: backendGoal,
+          runId: state.runId, oldText: oldBackendText, instruction: backendGoal,
         });
         if (!applyForegroundSnapshot(snap, generation)) return false;
         // Planner history is rendered from the durable Pi transcript. Keep only
         // the local prefix here; inserting a historical follow-up as the first
         // effective message would place it above the route decision card.
         setSessionEntries(previous);
-        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
+        await handlePlanGoal(backendGoal, { displayText: backendGoal, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -2424,9 +2887,9 @@ export default function App() {
           });
           if (!await acceptNodeEdit(snap)) return false;
           setGoal(cleanText);
-          setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: cleanText, files: parsedExisting.attachments,
+          setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: backendGoal, files: parsedExisting.attachments,
             versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: Date.now() }]),
-              { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now() }],
+              { id: `v${Date.now()}`, text: backendGoal, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now() }],
             currentVersionIndex: (targetMsg.versions?.length ?? 1),
           }]);
           setEditingMessage(null);
@@ -2455,7 +2918,7 @@ export default function App() {
       };
       const newVersion: ChatMessageVersion = {
         id: `v${Date.now()}`,
-        text: cleanText,
+        text: backendGoal,
         files: parsedExisting.attachments,
         images: targetMsg.images,
         timestamp: Date.now(),
@@ -2467,7 +2930,7 @@ export default function App() {
         id: "msg-initial-goal",
         parentId: null,
         role: "user",
-        text: cleanText,
+        text: backendGoal,
         files: parsedExisting.attachments,
         images: targetMsg.images,
         timestamp: Date.now(),
@@ -2480,7 +2943,7 @@ export default function App() {
 
       await handlePlanGoal(
         backendGoal,
-        { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images },
+        { displayText: backendGoal, files: parsedExisting.attachments, images: targetMsg.images },
         routeType === "undecided" ? "auto" : routeType,
         undefined,
         true
@@ -2511,7 +2974,7 @@ export default function App() {
       const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
       const requestId = running ? createUuid() : undefined;
       const { rolledBackEntries } = branchEditedMessageEntries(
-        baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments,
+        baseEntries, targetMsg, cleanExisting, backendGoal, parsedExisting.attachments,
         msg => running ? newExecutionSteer(msg, targetMerger.id, requestId) : withoutPlannerSteerIdentity({
           ...msg, delivery: undefined, executionId: undefined,
         })
@@ -2524,11 +2987,14 @@ export default function App() {
             runId: state.runId,
             node: targetMerger.node,
             executionId: targetMerger.id,
-            instruction: cleanText,
+            instruction: backendGoal,
             images: targetMsg.images,
             requestId,
           });
           if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
+          if (snapshot.runId) {
+            promoteRunToTop(snapshot.runId, snapshot.config?.repository || config.repository);
+          }
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
           setSessionEntries(rolledBackEntries);
           const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
@@ -2546,7 +3012,7 @@ export default function App() {
       sessionEntries,
       targetMsg,
       cleanExisting,
-      cleanText,
+      backendGoal,
       parsedExisting.attachments,
       msg => withoutPlannerSteerIdentity({
         ...msg,
@@ -2567,10 +3033,10 @@ export default function App() {
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({ runId: state.runId,
-          oldText: cleanExisting, instruction: backendGoal });
+          oldText: oldBackendText, instruction: backendGoal });
         if (!applyForegroundSnapshot(snap, generation)) return false;
         setSessionEntries(rolledBackEntries);
-        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
+        await handlePlanGoal(backendGoal, { displayText: backendGoal, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -2595,7 +3061,7 @@ export default function App() {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editNode({
           runId: state.runId, node: targetNodeName, executionId: execution.id,
-          oldText: cleanExisting, instruction: backendGoal, images: targetMsg.images,
+          oldText: oldBackendText, instruction: backendGoal, images: targetMsg.images,
           userTurnOffset: targetMsg.userTurnOffset,
         });
         if (!await acceptNodeEdit(snap)) return false;
@@ -2629,6 +3095,7 @@ export default function App() {
     handlePlanGoal,
     requireRepository,
     applyForegroundSnapshot,
+    promoteRunToTop,
     run,
   ]);
 
@@ -2873,7 +3340,11 @@ export default function App() {
       // topology control. Durable/live recovery can report the Planner without
       // the local stream flag, so include both sources.
       const action = stoppingPlanner ? "stop_planner" : "stop";
-      await runtimeService.control(action, payload);
+      const stoppedSnapshot = await runtimeService.control(action, payload);
+      if (stoppedSnapshot?.runId) {
+        observeRunSnapshot(stoppedSnapshot);
+        setBackendStatus(stoppedSnapshot);
+      }
     } catch (e) {
       if (generation === foregroundGeneration.current) console.warn("Stop command failed:", e);
     }
@@ -2886,7 +3357,7 @@ export default function App() {
         stage: "error",
       }));
     }
-  }, [backendPlanning, isPlanning, routeType, state.runId, plannerStream.runId]);
+  }, [backendPlanning, isPlanning, routeType, state.runId, plannerStream.runId, observeRunSnapshot, setBackendStatus]);
 
   const { nodes, edges } = useGraphElements(
     state,
@@ -3019,6 +3490,8 @@ export default function App() {
     copyRunPrompt: useStableCallback(handleCopyRunPrompt),
     cancelPromptCopy: useStableCallback(() => { copyPromptRequestRef.current += 1; }),
     removeProject: useStableCallback(handleRemoveWorkspaceConfirm), deleteRun: useStableCallback(handleDeleteRunConfirm),
+    archiveProject: useStableCallback(handleArchiveProject), unarchiveProject: useStableCallback(handleUnarchiveProject),
+    archiveRun: useStableCallback(handleArchiveRun), unarchiveRun: useStableCallback(handleUnarchiveRun),
     newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
     control: useStableCallback(control), save: useStableCallback(save), addManualNode: useStableCallback(addManualNode),
@@ -3028,8 +3501,8 @@ export default function App() {
     openFile: handleOpenFile,
     plan: useStableCallback(async (val: string, options?: Parameters<typeof handlePlanGoal>[1]) => (await handlePlanGoal(val, options)) !== false),
   };
-  const handleLoadRun = useStableCallback((id: string) => {
-    if (!runs.includes(id)) return;
+  const handleLoadRun = useStableCallback((id: string, allowUnlisted = false) => {
+    if (!allowUnlisted && !runs.includes(id)) return;
     setWorkbenchLoadKind("navigation");
     // Download the view while its authoritative snapshot is in flight, without
     // mounting it or speculatively reading any transcript bytes.
@@ -3119,6 +3592,110 @@ export default function App() {
     })();
   });
 
+  const [pendingNotificationRun, setPendingNotificationRun] = useState<{ runId: string; repoKey: string } | null>(null);
+
+  const handleOpenNotificationRun = useStableCallback((runId: string) => {
+    const cleanRunId = runId.trim();
+    if (!cleanRunId || deletedRunIdsRef.current.has(cleanRunId)) return;
+    setModal(null);
+
+    const openInCurrentWorkspace = () => {
+      if (cleanRunId === state.runId && !isPlanning && !recoveredPlanning && !loadingRunId) {
+        clearRunUnread(cleanRunId);
+        setSelected("");
+        return;
+      }
+      handleLoadRun(cleanRunId, true);
+    };
+
+    const resolveTargetRepo = (): string => {
+      const cachedRepo = latestSnapshotsRef.current.get(cleanRunId)?.config?.repository;
+      if (cachedRepo) return cachedRepo;
+      for (const [repo, ids] of Object.entries(workspaceRuns)) {
+        if (ids.includes(cleanRunId)) return repo;
+      }
+      return "";
+    };
+
+    const switchAndOpen = (targetRepo: string) => {
+      const targetKey = workspaceKey(targetRepo);
+      if (targetKey && targetKey !== workspaceKey(config.repository)) {
+        const targetProject = projects.find((proj) => workspaceKey(proj.path) === targetKey);
+        if (targetProject) {
+          setPendingNotificationRun({ runId: cleanRunId, repoKey: targetKey });
+          void handleSelectProject(targetProject);
+          return;
+        }
+      }
+      openInCurrentWorkspace();
+    };
+
+    const knownRepo = resolveTargetRepo();
+    if (knownRepo) {
+      switchAndOpen(knownRepo);
+      return;
+    }
+
+    void (async () => {
+      const fresh = await runtimeService.snapshotForRun(cleanRunId).catch(() => null);
+      if (deletedRunIdsRef.current.has(cleanRunId)) return;
+      if (fresh) {
+        rememberLatestSnapshot(fresh);
+        if (fresh.config?.repository) {
+          recordRunToWorkspace(fresh.runId, fresh.config.repository);
+          switchAndOpen(fresh.config.repository);
+          return;
+        }
+      }
+      openInCurrentWorkspace();
+    })();
+  });
+
+  openNotificationRunRef.current = handleOpenNotificationRun;
+
+  useEffect(() => {
+    if (!pendingNotificationRun) return;
+    if (switchingProjectPath) return;
+    if (workspaceKey(config.repository) !== pendingNotificationRun.repoKey) return;
+    const { runId } = pendingNotificationRun;
+    setPendingNotificationRun(null);
+    if (!deletedRunIdsRef.current.has(runId)) {
+      handleLoadRun(runId, true);
+    }
+  }, [pendingNotificationRun, switchingProjectPath, config.repository, handleLoadRun]);
+
+  useEffect(() => {
+    if (!isBootstrapReady) return;
+    return subscribeDesktopNotificationClicks(handleOpenNotificationRun);
+  }, [isBootstrapReady, handleOpenNotificationRun]);
+
+  const handleOpenSearch = useStableCallback(() => {
+    setModal("search");
+  });
+
+  const handleSelectSearchMatch = useStableCallback((match: ConversationSearchMatch) => {
+    if (match.runId === state.runId && !isPlanning && !recoveredPlanning && !loadingRunId) {
+      setSelected("");
+      return;
+    }
+    handleLoadRun(match.runId, true);
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey === event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== "g") return;
+      if (confirmModal) return;
+      if (modal && modal !== "search") return;
+      if (modal !== "search" && document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      event.preventDefault();
+      setModal((prev) => (prev === "search" ? null : "search"));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [modal, confirmModal]);
+
   const desktopTitlebar = useDesktopTitlebar();
   const isMacosDesktop = desktopTitlebar.platform === "macos";
   const isWindowsDesktop = desktopTitlebar.platform === "windows";
@@ -3150,7 +3727,11 @@ export default function App() {
             onOpenProject={actions.openProject}
             isOpeningProject={isOpeningProject}
             onRemoveProject={actions.removeProject}
+            onArchiveProject={actions.archiveProject}
+            onUnarchiveProject={actions.unarchiveProject}
+            openedProjectSeq={openedProjectSeq}
             runs={runs}
+            archivedRunIds={archivedRunIdSet}
             runLabels={runLabels}
             runCardKeys={runCardKeys}
             initialRunIds={initialRunIds}
@@ -3161,8 +3742,11 @@ export default function App() {
             onLoadRun={handleLoadRun}
             onCopyRunPrompt={actions.copyRunPrompt}
             onCancelPendingPromptCopy={actions.cancelPromptCopy}
+            onArchiveRun={actions.archiveRun}
+            onUnarchiveRun={actions.unarchiveRun}
             onDeleteRun={actions.deleteRun}
             onNewConversation={actions.newConversation}
+            onOpenSearch={handleOpenSearch}
             onOpenSettings={actions.openSettings}
             isSettingsOpen={modal === "settings"}
             hasUpdateAvailable={
@@ -3299,6 +3883,8 @@ export default function App() {
                   isWorking={!waitingForConversation && isAgentWorking}
                   onInterrupt={handleInterrupt}
                   repository={config?.repository}
+                  draftStore={landingComposerDraftsRef.current}
+                  draftKey={landingDraftKey(config?.repository)}
                 />
               ) : (
                 <motion.div
@@ -3419,6 +4005,18 @@ export default function App() {
                   busy={busy || repositoryBlocked}
                   onAdjustPlan={() => setModal("editor")}
                   onApprove={() => control("approve")}
+                />
+              )}
+
+              {modal === "search" && (
+                <SearchModal
+                  key={`search-modal-${currentRepoPath}`}
+                  repository={config.repository}
+                  currentRunId={state.runId}
+                  archivedRunIds={archivedRunIdSet}
+                  runLabels={runLabels}
+                  onClose={() => setModal(null)}
+                  onSelectMatch={handleSelectSearchMatch}
                 />
               )}
 

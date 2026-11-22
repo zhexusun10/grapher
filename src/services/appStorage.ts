@@ -4,6 +4,7 @@ import { normalizeWorkspacePath } from "./workspaceConversations";
 export const STORAGE_KEYS = {
   projects: "grapher_projects",
   workspaceRuns: "grapher_workspace_runs",
+  archivedRuns: "grapher_archived_runs",
   runLabels: "grapher_run_labels",
   runModes: "grapher_run_modes",
   config: "grapher_config",
@@ -14,6 +15,7 @@ export const STORAGE_KEYS = {
 type StoredJson = {
   grapher_projects: ProjectItem[];
   grapher_workspace_runs: Record<string, string[]>;
+  grapher_archived_runs: string[];
   grapher_run_labels: Record<string, string>;
   grapher_run_modes: Record<string, PlanMode>;
   grapher_config: Partial<Config>;
@@ -34,6 +36,7 @@ function projects(value: unknown): ProjectItem[] | null {
       branch: typeof item.branch === "string" ? item.branch : "",
       clean: item.clean === true,
       ...(typeof item.isShadow === "boolean" ? { isShadow: item.isShadow } : {}),
+      ...(item.archived === true ? { archived: true } : {}),
       lastOpened: typeof item.lastOpened === "number" && Number.isFinite(item.lastOpened) ? item.lastOpened : 0,
     }];
   });
@@ -73,6 +76,9 @@ const decoders: { [K in keyof StoredJson]: (value: unknown) => StoredJson[K] | n
   grapher_workspace_runs: value => record(value) ? Object.fromEntries(Object.entries(value)
     .filter(([, ids]) => Array.isArray(ids))
     .map(([path, ids]) => [path, (ids as unknown[]).filter((id): id is string => typeof id === "string")])) : null,
+  grapher_archived_runs: value => Array.isArray(value)
+    ? [...new Set(value.filter((id): id is string => typeof id === "string" && id.length > 0 && !id.startsWith("pending-")))]
+    : null,
   grapher_run_labels: value => record(value) ? Object.fromEntries(Object.entries(value)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")) : null,
   grapher_run_modes: value => record(value) ? Object.fromEntries(Object.entries(value)
@@ -84,7 +90,7 @@ export function readStorageString(key: string): string | null {
 }
 
 export function storageJsonKey(key: string): string {
-  if ([STORAGE_KEYS.workspaceRuns, STORAGE_KEYS.runLabels, STORAGE_KEYS.runModes, STORAGE_KEYS.config].includes(key as any)) {
+  if ([STORAGE_KEYS.workspaceRuns, STORAGE_KEYS.archivedRuns, STORAGE_KEYS.runLabels, STORAGE_KEYS.runModes, STORAGE_KEYS.config].includes(key as any)) {
     return `grapher-format-1:${readStorageString(STORAGE_KEYS.dataPath) ?? ""}:${key}`;
   }
   return key;

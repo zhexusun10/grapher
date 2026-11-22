@@ -261,6 +261,7 @@ mod tests {
         runtime
             .emit(EventKind::Routed {
                 plan_type: "graph".into(),
+                images: None,
             })
             .unwrap();
         runtime.store.select_run(Some("retained")).unwrap();

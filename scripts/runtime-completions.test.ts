@@ -64,14 +64,12 @@ for (const type of ["files", "skills"] as const) {
 }
 
 for (const operation of ["upload", "delete"] as const) {
-  test(`attachment ${operation} invalidates file-list reads already in flight`, async () => {
+  test(`external attachment ${operation} leaves repository file-list cache untouched`, async () => {
     const originalFetch = globalThis.fetch;
     const originalReader = globalThis.FileReader;
     const repository = `/test/attachment-${operation}-file-list`;
-    const path = "grapher-attachments/00000000-0000-4000-8000-000000000009/input.txt";
-    let release!: (value: Response) => void;
+    const path = "/data/attachment-inputs/00000000-0000-4000-8000-000000000009/input.txt";
     let reads = 0;
-    const current = operation === "upload" ? [path] : [];
     try {
       globalThis.FileReader = class {
         result = "data:text/plain;base64,Zml4dHVyZQ==";
@@ -79,15 +77,13 @@ for (const operation of ["upload", "delete"] as const) {
         readAsDataURL() { queueMicrotask(() => this.onload?.()); }
       } as unknown as typeof FileReader;
       globalThis.fetch = async url => String(url).endsWith("list_files")
-        ? ++reads === 1 ? new Promise<Response>(resolve => { release = resolve; }) : response({ files: current })
+        ? (++reads, response({ files: ["src/index.ts"] }))
         : response({ name: "input.txt", path, success: true });
-      const old = runtimeService.listFiles(repository, true);
+      assert.deepEqual(await runtimeService.listFiles(repository, true), ["src/index.ts"]);
       if (operation === "upload") await runtimeService.writeWorkspaceFile(new File(["fixture"], "input.txt"), repository);
       else await runtimeService.deleteWorkspaceFile(path, repository);
-      release(response({ files: operation === "upload" ? [] : [path] }));
-      await old;
-      assert.deepEqual(await runtimeService.listFiles(repository), current);
-      assert.equal(reads, 2, "a pre-mutation read cannot repopulate the invalidated cache");
+      assert.deepEqual(await runtimeService.listFiles(repository), ["src/index.ts"]);
+      assert.equal(reads, 1, "external attachments do not mutate repository files or invalidate list_files cache");
     } finally {
       globalThis.fetch = originalFetch;
       globalThis.FileReader = originalReader;
@@ -121,8 +117,10 @@ for (const type of ["files", "skills"] as const) {
 test("attachment requests preserve Run targeting and reject missing, legacy or traversing response paths", async () => {
   const originalFetch = globalThis.fetch;
   const originalReader = globalThis.FileReader;
+  const runId = "11111111-1111-4111-8111-111111111111";
   const id = "00000000-0000-4000-8000-000000000004";
-  const path = `grapher-attachments/${id}/中文说明.txt`;
+  const path = `/data/attachment-inputs/${runId}/${id}/中文说明.txt`;
+  const windowsPath = `C:/Users/dev/.grapher/attachment-inputs/${id}/中文说明.txt`;
   const file = new File(["fixture"], "中文说明.txt", { type: "text/plain" });
   let result: unknown = { name: file.name, path };
   let sent: Record<string, unknown> | undefined;
@@ -139,16 +137,23 @@ test("attachment requests preserve Run targeting and reject missing, legacy or t
       return response(result);
     };
     assert.deepEqual(await runtimeService.writeWorkspaceFile(file, "/repo", {
-      runId: "owning-run", node: "merge:worker", attachmentId: id,
+      runId, node: "merge:worker", attachmentId: id,
     }), result);
-    assert.equal(sent?.runId, "owning-run");
+    assert.equal(sent?.runId, runId);
     assert.equal(sent?.node, "merge:worker");
     assert.equal(sent?.attachmentId, id);
     assert.equal(commands.at(-1), "/api/write_workspace_attachment");
-    await runtimeService.writeWorkspaceFile(file, "/repo", { runId: "", node: "" });
-    assert.equal(Object.hasOwn(sent!, "runId"), false, "a failed/empty conversation uploads as a new source input");
+    result = { name: file.name, path: windowsPath };
+    assert.deepEqual(await runtimeService.writeWorkspaceFile(file, "/repo", { runId: "", node: "" }), result);
+    assert.equal(Object.hasOwn(sent!, "runId"), false, "a failed/empty conversation uploads without a Run ID");
     assert.equal(Object.hasOwn(sent!, "node"), false);
-    for (const invalid of [undefined, file.name, `grapher-attachments/${id}/../../original.txt`]) {
+    for (const invalid of [
+      undefined,
+      file.name,
+      `grapher-attachments/${id}/中文说明.txt`,
+      `/data/attachment-inputs/${id}/../../original.txt`,
+      `/data/other/${id}/中文说明.txt`,
+    ]) {
       result = { name: file.name, path: invalid };
       await assert.rejects(runtimeService.writeWorkspaceFile(file, "/repo"));
     }

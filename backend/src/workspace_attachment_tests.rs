@@ -1,59 +1,98 @@
-use super::super::{api_service, collect_files_from_dir, dispatch, service_for_run, Service};
-use super::*;
-use crate::model::{Config, EventKind, Execution, Graph, Node, PlanningSummary};
-use std::sync::{atomic::AtomicBool, Condvar, Mutex};
+use super::super::{dispatch, Service};
+use crate::{
+    attachment_inputs,
+    cleanup::Target,
+    model::{Config, Execution, Graph, NodeState},
+    runtime::Runtime,
+};
+use std::{
+    fs,
+    path::Path,
+    sync::{atomic::AtomicBool, Arc, Mutex},
+};
+use uuid::Uuid;
 
 const UPLOAD: &str = "write_workspace_attachment";
 const DELETE: &str = "delete_workspace_attachment";
 
-fn service(runtime: Runtime) -> Arc<Service> {
+fn service_with_root(root: &Path) -> Arc<Service> {
     Arc::new(Service {
-        runtime: Mutex::new(runtime),
+        runtime: Mutex::new(Runtime::open(root).unwrap()),
         driving: AtomicBool::new(false),
-        drive_signal: (Mutex::new(0), Condvar::new()),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
-        extension: PathBuf::from("unused.ts"),
+        extension: root.join("unused.ts"),
     })
 }
 
-fn run(primary: &Arc<Service>, repo: &std::path::Path) -> (Arc<Service>, String) {
-    fs::create_dir_all(repo).unwrap();
-    let id = Uuid::new_v4().to_string();
-    let child = service_for_run(primary, &id, true).unwrap();
-    let config: Config = serde_json::from_value(serde_json::json!({
-        "repository": repo, "model": "test/model", "maxParallel": 1,
-    }))
-    .unwrap();
-    child
-        .runtime
-        .lock()
-        .unwrap()
-        .create(
-            Graph {
-                original_goal: "attachments".into(),
-                nodes: vec![Node {
-                    id: "worker".into(),
-                    task: "work".into(),
-                }],
-                edges: vec![],
-            },
-            config,
-        )
-        .unwrap();
-    (child, id)
+fn init_repo(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("original.txt"), "tracked original\n").unwrap();
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "Test"],
+        &["add", "."],
+        &["commit", "-m", "init"],
+    ] {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
 }
 
-fn execution(worktree: &std::path::Path, node: &str) -> Execution {
-    fs::create_dir_all(worktree).unwrap();
-    Execution {
+fn seed_run(service: &Arc<Service>, repo: &Path, worktree: &Path) -> String {
+    let run_id = Uuid::new_v4().to_string();
+    let mut runtime = service.runtime.lock().unwrap();
+    runtime.state.run_id = run_id.clone();
+    runtime.state.phase = "running".into();
+    runtime.state.config = Some(
+        serde_json::from_value(serde_json::json!({
+            "repository": repo,
+            "model": "test/model",
+            "maxParallel": 1,
+        }))
+        .unwrap(),
+    );
+    runtime.state.nodes.insert(
+        "worker".into(),
+        NodeState {
+            status: "completed".into(),
+            ..Default::default()
+        },
+    );
+    runtime.state.executions.push(Execution {
         id: Uuid::new_v4().to_string(),
-        node: node.into(),
-        revision: 0,
+        node: "worker".into(),
+        revision: 1,
         attempt: 1,
         session_id: Uuid::new_v4().to_string(),
         worktree: worktree.to_string_lossy().into(),
-        before: String::new(),
-        workspace_lineage: vec![node.into()],
+        before: "HEAD".into(),
+        workspace_lineage: Default::default(),
+        after: Some("HEAD".into()),
+        input: None,
+        result: None,
+        status: "completed".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 0,
+        completed_at: Some(1),
+        metrics: None,
+    });
+    runtime.state.mergers.push(Execution {
+        id: Uuid::new_v4().to_string(),
+        node: "merge:worker".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: Uuid::new_v4().to_string(),
+        worktree: worktree.to_string_lossy().into(),
+        before: "HEAD".into(),
+        workspace_lineage: Default::default(),
         after: None,
         input: None,
         result: None,
@@ -61,1034 +100,698 @@ fn execution(worktree: &std::path::Path, node: &str) -> Execution {
         output: String::new(),
         output_bytes: 0,
         pid: None,
-        started_at: 1,
+        started_at: 0,
         completed_at: None,
         metrics: None,
-    }
-}
-
-fn start(child: &Arc<Service>, worktree: &std::path::Path) -> String {
-    let execution = execution(worktree, "worker");
-    let id = execution.id.clone();
-    let mut runtime = child.runtime.lock().unwrap();
-    let repository = std::path::Path::new(&runtime.state.config.as_ref().unwrap().repository);
-    let isolated = worktree.canonicalize().unwrap() != repository.canonicalize().unwrap();
-    runtime
-        .emit(EventKind::WorkspaceIsolationSelected { isolated })
-        .unwrap();
-    runtime
-        .emit(EventKind::Started {
-            execution,
-            message_sequences: Some(vec![]),
-            fresh_restart: false,
-        })
-        .unwrap();
-    id
-}
-
-fn upload(repo: &std::path::Path, id: &str, node: Option<&str>) -> serde_json::Value {
-    serde_json::json!({ "repository": repo, "runId": id, "node": node,
-        "filename": "original.txt", "content": "aGVsbG8=" })
-}
-
-fn request(
-    primary: &Arc<Service>,
-    command: &str,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let selected = api_service(primary, command, &body)?;
-    dispatch(&selected, command, body)
-}
-
-fn completed(
-    primary: &Arc<Service>,
-    repo: &std::path::Path,
-) -> (Arc<Service>, String, crate::runtime::Job, String) {
-    let (child, id) = run(primary, repo);
-    fs::write(repo.join("base.txt"), "original").unwrap();
-    crate::workspace::git(repo, &["init", "-q"]).unwrap();
-    crate::workspace::git(repo, &["add", "-A"]).unwrap();
-    crate::workspace::git(repo, &["commit", "-qm", "fixture"]).unwrap();
-    let first = {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime.set_route("graph").unwrap();
-        runtime
-            .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
-            .unwrap();
-        runtime
-            .emit(EventKind::PrivateBatchSelected {
-                nodes: vec!["worker".into()],
-            })
-            .unwrap();
-        runtime.approve().unwrap();
-        let mut job = runtime.jobs().unwrap().remove(0);
-        if job.materialize_source {
-            runtime.attach_job_source(&mut job, &[]).unwrap();
-        }
-        job
-    };
-    let path = std::path::Path::new(&first.execution.worktree);
-    crate::workspace::prepare_with_merger_expected_for_run(
-        repo,
-        path,
-        &first.execution.before,
-        &[],
-        &first.expected_source_head,
-        Some(&id),
-        || Err("unexpected conflict".into()),
-    )
-    .unwrap();
-    let head = crate::workspace::snapshot_node_for_run(path, repo, "worker", Some(&id)).unwrap();
-    {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime
-            .emit(EventKind::Prepared {
-                execution_id: first.execution.id.clone(),
-                head: first.execution.before.clone(),
-            })
-            .unwrap();
-        runtime
-            .emit(EventKind::Output {
-                execution_id: first.execution.id.clone(),
-                text: "finished".into(),
-            })
-            .unwrap();
-        runtime
-            .emit(EventKind::Finished {
-                execution_id: first.execution.id.clone(),
-                head: head.clone(),
-                output: String::new(),
-                output_bytes: "finished".len(),
-                metrics: None,
-            })
-            .unwrap();
-    }
-    (child, id, first, head)
-}
-
-#[cfg(feature = "fixture")]
-fn followup(child: &Arc<Service>, path: &str) -> crate::runtime::Job {
-    let mut runtime = child.runtime.lock().unwrap();
-    runtime
-        .intervene("worker", &format!("Read @{path}"))
-        .unwrap();
-    if runtime.state.paused {
-        runtime.pause(false).unwrap();
-    }
-    runtime.jobs().unwrap().remove(0)
-}
-
-#[cfg(feature = "fixture")]
-fn perform(child: &Arc<Service>, job: &crate::runtime::Job) -> Result<(String, String), String> {
-    let root = child.runtime.lock().unwrap().root.clone();
-    let script = root.join("attachment-fixture.mjs");
-    fs::write(&script, r#"import fs from 'node:fs';
-let task = ''; for await (const bytes of process.stdin) task += bytes;
-let path = task.match(/grapher-attachments\/[0-9a-f-]+\/original\.txt/)?.[0];
-if (!path) {
-  const input = fs.readdirSync('grapher-attachments', {recursive:true}).find(name => name.endsWith('original.txt'));
-  if (input) path = 'grapher-attachments/' + input;
-}
-if (!path) throw Error('No accepted attachment was delivered: ' + task);
-const input = fs.readFileSync(path, 'utf8');
-fs.writeFileSync('agent-observed.txt', input);
-console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'Consumed ' + input}]}}));
-"#).unwrap();
-    let mut local = job.clone();
-    local.config.pi_command = crate::native::trusted_node()
-        .unwrap()
-        .to_string_lossy()
-        .into();
-    local.config.pi_args = vec![script.to_string_lossy().into()];
-    crate::runtime::perform_with_merger(
-        &local,
-        &root,
-        &[],
-        |_| {},
-        |head| {
-            child.runtime.lock().unwrap().emit(EventKind::Prepared {
-                execution_id: job.execution.id.clone(),
-                head,
-            })
-        },
-        |event| child.runtime.lock().unwrap().emit(event),
-    )
-}
-
-#[test]
-fn malformed_attachment_content_fails_before_direct_or_staged_files_are_created() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    let tree = temp.path().join("node");
-    start(&child, &tree);
-    let root = child.runtime.lock().unwrap().root.clone();
-    for node in [None, Some("worker")] {
-        for content in [
-            "%%%%",
-            "Zg=",
-            "Zg==trailer",
-            "Z",
-            "not-a-data-url,Zg==",
-            "data:text/plain,Zg==",
-            "data:application/octet-stream;base64",
-            "data:;base64,Zg==trailer",
-        ] {
-            let mut body = upload(&repo, &id, node);
-            body["content"] = content.into();
-            let error = request(&primary, UPLOAD, body).unwrap_err();
-            assert!(error.contains("Invalid base64"), "{error}");
-            assert!(!repo.join(ATTACHMENTS).exists());
-            assert!(!tree.join(ATTACHMENTS).exists());
-            assert!(!root.join(crate::attachment_inputs::BUCKET).exists());
-        }
-    }
-}
-
-#[test]
-fn raw_and_data_url_uploads_preserve_bytes_and_browser_retry_compatibility() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    for (content, expected) in [
-        ("AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
-        (
-            "data:application/octet-stream;base64,AAEC/f7/",
-            &b"\x00\x01\x02\xfd\xfe\xff"[..],
-        ),
-        (
-            "DATA:application/octet-stream;BASE64,AAEC/f7/",
-            &b"\x00\x01\x02\xfd\xfe\xff"[..],
-        ),
-        ("data:text/plain;base64, Z m 8\r\n", &b"fo"[..]),
-        ("data:;base64,", &b""[..]),
-    ] {
-        let body = serde_json::json!({
-            "repository": repo, "filename": "input.bin",
-            "attachmentId": Uuid::new_v4().to_string(), "content": content,
-        });
-        let uploaded = request(&primary, UPLOAD, body.clone()).unwrap();
-        let retried = request(&primary, UPLOAD, body).unwrap();
-        assert_eq!(retried["path"], uploaded["path"]);
-        assert_eq!(retried["size"], expected.len());
-        assert_eq!(
-            fs::read(repo.join(uploaded["path"].as_str().unwrap())).unwrap(),
-            expected,
-        );
-    }
-}
-
-#[test]
-fn uploads_are_staged_per_run_and_delivered_only_to_their_owning_workspace() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (first, first_id) = run(&primary, &repo);
-    let (second, second_id) = run(&primary, &repo);
-    let first_tree = temp.path().join("first");
-    let second_tree = temp.path().join("second");
-    start(&first, &first_tree);
-    start(&second, &second_tree);
-    for tree in [&repo, &first_tree, &second_tree] {
-        fs::write(tree.join("original.txt"), "unsaved original").unwrap();
-    }
-    let root = primary.runtime.lock().unwrap().root.clone();
-    for (id, tree, other) in [
-        (&first_id, &first_tree, &second_tree),
-        (&second_id, &second_tree, &first_tree),
-    ] {
-        let body = upload(&repo, id, Some("worker"));
-        let result = request(&primary, UPLOAD, body.clone()).unwrap();
-        let path = result["path"].as_str().unwrap();
-        // A private workspace is never edited at upload time.
-        assert_eq!(result["staged"], true);
-        assert!(!tree.join(path).exists());
-        assert!(!other.join(path).exists());
-        assert!(!repo.join(path).exists());
-        // Delivery resolves the owning Run's scope only.
-        crate::attachment_inputs::deliver(&root, id, "worker", &format!("Read @{path}"), tree)
-            .unwrap();
-        assert_eq!(fs::read_to_string(tree.join(path)).unwrap(), "hello");
-        assert!(!other.join(path).exists());
-        assert!(!repo.join(path).exists());
-        let mut delete = body;
-        delete["filename"] = path.into();
-        request(&primary, DELETE, delete).unwrap();
-    }
-    for tree in [&repo, &first_tree, &second_tree] {
-        assert_eq!(
-            fs::read_to_string(tree.join("original.txt")).unwrap(),
-            "unsaved original"
-        );
-    }
-}
-
-#[test]
-fn publication_allows_staged_private_attachments_but_not_source_uploads() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    for private in [true, false] {
-        let (child, id) = run(&primary, &repo);
-        let tree = if private {
-            temp.path().join("private")
-        } else {
-            repo.clone()
-        };
-        start(&child, &tree);
-        child
-            .runtime
-            .lock()
-            .unwrap()
-            .emit(EventKind::WorkspaceIsolationSelected { isolated: private })
-            .unwrap();
-        child
-            .runtime
-            .lock()
-            .unwrap()
-            .emit(EventKind::PublicationStarted {
-                repository: repo.to_string_lossy().into(),
-                heads: vec!["other-node".into()],
-            })
-            .unwrap();
-        let result = request(&primary, UPLOAD, upload(&repo, &id, Some("worker")));
-        if private {
-            let result = result.unwrap();
-            assert_eq!(result["staged"], true);
-            let path = result["path"].as_str().unwrap();
-            assert!(!tree.join(path).exists() && !repo.join(path).exists());
-        } else {
-            assert!(result.unwrap_err().contains("Wait for publication"));
-        }
-        assert!(request(&primary, UPLOAD, upload(&repo, &id, None)).is_err());
-        assert_eq!(child.runtime.lock().unwrap().state.phase, "publishing");
-    }
-}
-
-#[test]
-fn legacy_commands_are_rejected_without_writing_or_deleting_project_basenames() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    fs::write(repo.join("original.txt"), "unsaved original").unwrap();
-    for command in ["write_workspace_file", "delete_workspace_file"] {
-        assert!(dispatch(
-            &primary,
-            command,
-            serde_json::json!({
-                "repository": repo, "filename": "original.txt", "content": "aGVsbG8=",
-            })
-        )
-        .unwrap_err()
-        .contains("Unknown command"));
-    }
-    assert_eq!(
-        fs::read_to_string(repo.join("original.txt")).unwrap(),
-        "unsaved original"
-    );
-    assert!(!repo.join(ATTACHMENTS).exists());
-}
-
-#[test]
-fn staged_upload_retries_are_idempotent_and_reject_changed_bytes() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    let first = temp.path().join("first");
-    start(&child, &first);
-    let mut body = upload(&repo, &id, Some("worker"));
-    body["attachmentId"] = Uuid::new_v4().to_string().into();
-    let initial = request(&primary, UPLOAD, body.clone()).unwrap();
-    assert_eq!(initial["staged"], true);
-    assert_eq!(initial, request(&primary, UPLOAD, body.clone()).unwrap());
-    let mut changed = body.clone();
-    changed["content"] = "Y2hhbmdlZA==".into();
-    assert!(request(&primary, UPLOAD, changed).is_err());
-    let root = child.runtime.lock().unwrap().root.clone();
-    let path = initial["path"].as_str().unwrap();
-    crate::attachment_inputs::deliver(&root, &id, "worker", &format!("Read @{path}"), &first)
-        .unwrap();
-    assert_eq!(fs::read_to_string(first.join(path)).unwrap(), "hello");
-    assert!(!repo.join(ATTACHMENTS).exists());
-}
-
-#[test]
-fn missing_mismatched_or_unwritable_targets_fail_without_source_fallback() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    let tree = temp.path().join("node");
-    let mut body = upload(&repo, &id, Some("worker"));
-    // A node without any attempt has no conversation to address yet.
-    assert!(request(&primary, UPLOAD, body.clone()).is_err());
-    start(&child, &tree);
-    body["node"] = "unknown".into();
-    assert!(request(&primary, UPLOAD, body.clone()).is_err());
-    body["node"] = "worker".into();
-    body["repository"] = temp.path().to_string_lossy().as_ref().into();
-    assert!(request(&primary, UPLOAD, body.clone()).is_err());
-    body["repository"] = repo.to_string_lossy().as_ref().into();
-    assert!(dispatch(&primary, UPLOAD, body.clone()).is_err());
-    let mut stale = body.clone();
-    stale["runId"] = Uuid::new_v4().to_string().into();
-    assert!(request(&primary, UPLOAD, stale).is_err());
-    // A private workspace is only written through delivery, never at upload, so
-    // its state (even a missing directory) cannot affect the upload target.
-    assert!(request(&primary, UPLOAD, body.clone()).is_ok());
-    assert!(!repo.join(ATTACHMENTS).exists());
-    // A direct source upload still requires a usable directory.
-    let missing_repo = temp.path().join("missing-repo");
-    assert!(dispatch(
-        &primary,
-        UPLOAD,
-        serde_json::json!({ "repository": missing_repo, "filename": "a.txt", "content": "aGVsbG8=" })
-    )
-    .is_err());
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn settled_node_upload_survives_reload_and_is_consumed_by_a_real_followup() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (_child, id, first, old_head) = completed(&primary, &repo);
-    let path = std::path::Path::new(&first.execution.worktree);
-    let body = upload(&repo, &id, Some("worker"));
-    let uploaded = request(&primary, UPLOAD, body).unwrap();
-    let relative = uploaded["path"].as_str().unwrap();
-    assert_eq!(uploaded["staged"], true);
-    assert!(
-        !path.join(relative).exists(),
-        "upload must not modify the completed project view"
-    );
-    crate::workspace_view::verify_result(path, &repo, &old_head).unwrap();
-    let reopened = service(primary.runtime.lock().unwrap().open_run(&id).unwrap());
-    assert_eq!(
-        reopened.runtime.lock().unwrap().state.nodes["worker"]
-            .head
-            .as_deref(),
-        Some(old_head.as_str())
-    );
-    let job = followup(&reopened, relative);
-    let result = perform(&reopened, &job);
-    assert!(
-        result.is_ok(),
-        "actual followup preparation failed: {result:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(std::path::Path::new(&job.execution.worktree).join(relative)).unwrap(),
-        "hello"
-    );
-    reopened
-        .runtime
-        .lock()
-        .unwrap()
-        .finish(&job.execution, result)
-        .unwrap();
-    let state = reopened.runtime.lock().unwrap().store.load(&id).unwrap();
-    assert_eq!(state.nodes["worker"].status, "completed");
-    assert_eq!(
-        state.executions[0].after.as_deref(),
-        Some(old_head.as_str()),
-        "old evidence stays immutable"
-    );
-    crate::workspace_view::verify_result(
-        std::path::Path::new(&job.execution.worktree),
-        &repo,
-        state.nodes["worker"].head.as_deref().unwrap(),
-    )
-    .unwrap();
-    assert!(!repo.join(relative).exists());
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn staged_inputs_do_not_weaken_completed_view_validation() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, first, _) = completed(&primary, &repo);
-    let uploaded = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let relative = uploaded["path"].as_str().unwrap();
-    fs::write(
-        std::path::Path::new(&first.execution.worktree).join("base.txt"),
-        "foreign modification",
-    )
-    .unwrap();
-    let job = followup(&child, relative);
-    assert!(perform(&child, &job)
-        .unwrap_err()
-        .contains("changed outside its recorded execution"));
-    assert!(!std::path::Path::new(&job.execution.worktree)
-        .join(relative)
-        .exists());
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn prepared_attachment_delivery_remains_retryable_after_failure_and_restart() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, _, _) = completed(&primary, &repo);
-    let uploaded = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let relative = uploaded["path"].as_str().unwrap();
-    let job = followup(&child, relative);
-    perform(&child, &job).unwrap();
-    let attachment = std::path::Path::new(&job.execution.worktree).join(relative);
-    fs::write(&attachment, "partial agent work").unwrap();
-    child
-        .runtime
-        .lock()
-        .unwrap()
-        .finish(
-            &job.execution,
-            Err("application interrupted after preparation".into()),
-        )
-        .unwrap();
-    let reopened = service(primary.runtime.lock().unwrap().open_run(&id).unwrap());
-    let retry = followup(&reopened, relative);
-    assert!(retry.preserved_workspace.is_some());
-    let result = perform(&reopened, &retry);
-    assert!(
-        result.is_ok(),
-        "prepared partial work must remain recoverable: {result:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(&attachment).unwrap(),
-        "partial agent work"
-    );
-    reopened
-        .runtime
-        .lock()
-        .unwrap()
-        .finish(&retry.execution, result)
-        .unwrap();
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn interrupted_before_attachment_copy_recovers_without_resending_the_user_prompt() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, first, _) = completed(&primary, &repo);
-    let root = child.runtime.lock().unwrap().root.clone();
-    // This continuation has an existing Pi session, so Continue must not send
-    // the user message again merely to reconstruct its filesystem inputs.
-    let session = root.join("sessions").join(&first.execution.id);
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join(format!("fixture_{}.jsonl", first.execution.session_id)),
-        serde_json::to_vec(&serde_json::json!({ "type": "session", "version": 3,
-            "id": first.execution.session_id, "cwd": first.execution.worktree }))
-        .unwrap(),
-    )
-    .unwrap();
-    let uploaded = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let relative = uploaded["path"].as_str().unwrap();
-    let job = followup(&child, relative);
-    let result = crate::runtime::perform_with_merger(
-        &job,
-        &root,
-        &[],
-        |_| {},
-        |head| {
-            child.runtime.lock().unwrap().emit(EventKind::Prepared {
-                execution_id: job.execution.id.clone(),
-                head,
-            })?;
-            Err("interrupted immediately after Prepared".into())
-        },
-        |_| Ok(()),
-    );
-    assert!(result
-        .as_ref()
-        .unwrap_err()
-        .contains("immediately after Prepared"));
-    assert!(!std::path::Path::new(&job.execution.worktree)
-        .join(relative)
-        .exists());
-    {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime.pause(true).unwrap();
-        runtime.request_execution_stop(Some("worker")).unwrap();
-        runtime.finish(&job.execution, result).unwrap();
-    }
-    let reopened = service(primary.runtime.lock().unwrap().open_run(&id).unwrap());
-    let retry = {
-        let mut runtime = reopened.runtime.lock().unwrap();
-        runtime.pause(false).unwrap();
-        runtime.jobs().unwrap().remove(0)
-    };
-    assert!(retry.continuation);
-    assert!(
-        retry.task.is_empty(),
-        "continuity must not resend the user prompt"
-    );
-    assert!(retry.attachment_instructions.contains(relative));
-    let result = perform(&reopened, &retry);
-    assert!(
-        result.is_ok(),
-        "accepted inputs must recover before Pi continuity: {result:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(
-            std::path::Path::new(&retry.execution.worktree).join("agent-observed.txt")
-        )
-        .unwrap(),
-        "hello"
-    );
-    reopened
-        .runtime
-        .lock()
-        .unwrap()
-        .finish(&retry.execution, result)
-        .unwrap();
-}
-
-#[test]
-fn incomplete_delivery_is_not_confused_with_an_agents_preserved_partial_work() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, _, _) = completed(&primary, &repo);
-    let uploaded = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let relative = uploaded["path"].as_str().unwrap();
-    let root = child.runtime.lock().unwrap().root.clone();
-    let target = temp.path().join("prepared-target");
-    let path = target.join(relative);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, "truncated upload").unwrap();
-    let task = format!("Read @{relative}");
-    assert!(
-        crate::attachment_inputs::deliver(&root, &id, "worker", &task, &target)
-            .unwrap_err()
-            .contains("incomplete")
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), "truncated upload");
-    fs::write(&path, "hello").unwrap();
-    crate::attachment_inputs::deliver(&root, &id, "worker", &task, &target).unwrap();
-    fs::write(&path, "agent edited this input").unwrap();
-    crate::attachment_inputs::deliver(&root, &id, "worker", &task, &target).unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        "agent edited this input"
-    );
-    fs::remove_file(&path).unwrap();
-    crate::attachment_inputs::deliver_prepared(&root, &id, "worker", &task, &target, true).unwrap();
-    assert!(
-        !path.exists(),
-        "recovery must preserve an agent's deletion too"
-    );
-    crate::attachment_inputs::deliver(&root, &id, "worker", &task, &target).unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        "hello",
-        "a newly prepared input may be restored after recomposition"
-    );
-}
-
-#[test]
-fn staged_scope_isolation_integrity_rejected_uploads_and_owned_cleanup() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, first, old_head) = completed(&primary, &repo);
-    let mut body = upload(&repo, &id, Some("worker"));
-    let input_id = Uuid::new_v4().to_string();
-    body["attachmentId"] = input_id.clone().into();
-    let uploaded = request(&primary, UPLOAD, body.clone()).unwrap();
-    assert_eq!(uploaded, request(&primary, UPLOAD, body.clone()).unwrap());
-    let mut changed = body.clone();
-    changed["content"] = "Y2hhbmdlZA==".into();
-    assert!(request(&primary, UPLOAD, changed).is_err());
-    let relative = uploaded["path"].as_str().unwrap();
-    let root = child.runtime.lock().unwrap().root.clone();
-    let alternate = temp.path().join("alternate");
-    fs::create_dir(&alternate).unwrap();
-    crate::attachment_inputs::deliver(
-        &root,
-        &id,
-        "other-node",
-        &format!("Read @{relative}"),
-        &alternate,
-    )
-    .unwrap();
-    crate::attachment_inputs::deliver(
-        &root,
-        &Uuid::new_v4().to_string(),
-        "worker",
-        &format!("Read @{relative}"),
-        &alternate,
-    )
-    .unwrap();
-    crate::attachment_inputs::deliver(
-        &root,
-        &id,
-        "worker",
-        "This job accepted no attachment",
-        &alternate,
-    )
-    .unwrap();
-    assert!(!alternate.join(ATTACHMENTS).exists());
-    let content = root
-        .join(crate::attachment_inputs::BUCKET)
-        .join(&id)
-        .join(
-            git2::Oid::hash_object(git2::ObjectType::Blob, b"worker")
-                .unwrap()
-                .to_string(),
-        )
-        .join(&input_id)
-        .join("content");
-    fs::write(&content, "damaged input").unwrap();
-    assert!(crate::attachment_inputs::deliver(
-        &root,
-        &id,
-        "worker",
-        &format!("Read @{relative}"),
-        &alternate
-    )
-    .unwrap_err()
-    .contains("damaged"));
-    crate::workspace_view::verify_result(
-        std::path::Path::new(&first.execution.worktree),
-        &repo,
-        &old_head,
-    )
-    .unwrap();
-    child.runtime.lock().unwrap().delete_run(&id).unwrap();
-    assert!(!root
-        .join(crate::attachment_inputs::BUCKET)
-        .join(&id)
-        .exists());
-    assert_eq!(
-        fs::read_to_string(repo.join("base.txt")).unwrap(),
-        "original"
-    );
-}
-
-#[test]
-fn deleting_pending_staged_input_leaves_the_completed_view_untouched() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, first, old_head) = completed(&primary, &repo);
-    let mut body = upload(&repo, &id, Some("worker"));
-    let uploaded = request(&primary, UPLOAD, body.clone()).unwrap();
-    body["filename"] = uploaded["path"].clone();
-    request(&primary, DELETE, body.clone()).unwrap();
-    request(&primary, DELETE, body).unwrap();
-    crate::workspace_view::verify_result(
-        std::path::Path::new(&first.execution.worktree),
-        &repo,
-        &old_head,
-    )
-    .unwrap();
-    assert_eq!(
-        child.runtime.lock().unwrap().state.nodes["worker"].status,
-        "completed"
-    );
-}
-
-#[test]
-fn planner_and_merger_attachments_are_staged_for_their_scope_and_delivered_on_use() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    let planner = temp.path().join("planner");
-    fs::create_dir(&planner).unwrap();
-    child.runtime.lock().unwrap().state.planning = Some(PlanningSummary {
-        worktree: Some(planner.to_string_lossy().into()),
-        status: Some("running".into()),
-        ..Default::default()
     });
-    let root = child.runtime.lock().unwrap().root.clone();
-    // A completed Planner upload must not edit the borrowed node view.
-    let result = request(&primary, UPLOAD, upload(&repo, &id, None)).unwrap();
-    let relative = result["path"].as_str().unwrap();
-    assert_eq!(result["staged"], true);
-    assert!(!planner.join(relative).exists());
-    crate::attachment_inputs::deliver(
-        &root,
-        &id,
-        "planner",
-        &format!("Read @{relative}"),
-        &planner,
-    )
-    .unwrap();
-    assert!(planner.join(relative).is_file());
-    let merger = temp.path().join("merger");
-    child
-        .runtime
-        .lock()
-        .unwrap()
-        .emit(EventKind::MergerStarted {
-            execution: execution(&merger, "merge:worker"),
-        })
-        .unwrap();
-    let result = request(&primary, UPLOAD, upload(&repo, &id, Some("merge:worker"))).unwrap();
-    let relative = result["path"].as_str().unwrap();
-    assert_eq!(result["staged"], true);
-    assert!(!merger.join(relative).exists());
-    crate::attachment_inputs::deliver(
-        &root,
-        &id,
-        "merge:worker",
-        &format!("Read @{relative}"),
-        &merger,
-    )
-    .unwrap();
-    assert!(merger.join(relative).is_file());
-    assert!(!repo.join(ATTACHMENTS).exists());
+    run_id
 }
 
-#[test]
-fn post_publication_node_followups_upload_to_source_not_the_old_slot() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    let tree = temp.path().join("old-slot");
-    start(&child, &tree);
-    {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime.state.phase = "completed".into();
-        runtime.state.nodes.get_mut("worker").unwrap().status = "completed".into();
-        runtime.state.executions.last_mut().unwrap().status = "completed".into();
+fn upload_body(
+    repo: &Path,
+    run_id: Option<&str>,
+    node: Option<&str>,
+    content: &str,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "repository": repo.to_string_lossy(),
+        "filename": "original.txt",
+        "content": content,
+    });
+    if let Some(run_id) = run_id {
+        body["runId"] = run_id.into();
     }
-    let result = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let path = result["path"].as_str().unwrap();
-    assert_eq!(result["staged"], false);
-    assert!(repo.join(path).is_file());
-    assert!(!tree.join(path).exists());
+    if let Some(node) = node {
+        body["node"] = node.into();
+    }
+    body
 }
 
 #[test]
-fn linked_attachment_directories_cannot_escape_the_selected_workspace() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-    let outside = temp.path().join("outside");
-    fs::create_dir(&outside).unwrap();
-    let id = Uuid::new_v4().to_string();
-    fs::create_dir(outside.join(&id)).unwrap();
-    fs::write(outside.join(&id).join("original.txt"), "must survive").unwrap();
-    crate::path_safety::directory_link(&outside, &repo.join(ATTACHMENTS));
-    assert!(dispatch(
-        &primary,
-        UPLOAD,
-        serde_json::json!({ "repository": repo, "filename": "original.txt", "content": "aGVsbG8=" })
-    )
-    .is_err());
-    assert!(dispatch(&primary, DELETE, serde_json::json!({ "repository": repo, "filename": format!("{ATTACHMENTS}/{id}/original.txt") })).is_err());
-    assert_eq!(
-        fs::read_to_string(outside.join(&id).join("original.txt")).unwrap(),
-        "must survive"
-    );
-    crate::path_safety::remove_directory_link(&repo.join(ATTACHMENTS));
-}
-
-#[test]
-fn planner_upload_does_not_mutate_a_completed_node_view_before_acceptance() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (_child, id, first, head) = completed(&primary, &repo);
-    // The Planner borrows the latest node workspace, so this upload resolves to
-    // a sealed project view even though no Planner turn has been accepted yet.
-    let result = request(&primary, UPLOAD, upload(&repo, &id, None)).unwrap();
-    assert_eq!(result["staged"], true);
-    crate::workspace_view::verify_result(
-        std::path::Path::new(&first.execution.worktree),
-        &repo,
-        &head,
-    )
-    .unwrap();
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn upload_during_the_sealed_window_does_not_corrupt_the_recorded_result() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
-    let repo = temp.path().join("repo");
-    let (child, id, _, _) = completed(&primary, &repo);
-    let next = followup(&child, "nothing attached yet");
-    let path = std::path::Path::new(&next.execution.worktree);
-    // A worker seals its result before Runtime::finish records `Finished`, so
-    // `running` alone must never authorize an in-place write.
-    let sealed = crate::workspace::snapshot_node_for_run(path, &repo, "worker", Some(&id)).unwrap();
-    let uploaded = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    assert_eq!(uploaded["staged"], true);
-    child
-        .runtime
-        .lock()
-        .unwrap()
-        .finish(&next.execution, Ok((sealed.clone(), "finished".into())))
-        .unwrap();
-    crate::workspace_view::verify_result(path, &repo, &sealed).unwrap();
-}
-
-#[test]
-fn recovery_preserves_deletion_of_the_whole_attachment_directory() {
+fn malformed_attachment_content_fails_before_any_files_are_created() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("data");
-    fs::create_dir(&root).unwrap();
-    let workspace = temp.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    let run = Uuid::new_v4().to_string();
-    let id = Uuid::new_v4().to_string();
-    crate::attachment_inputs::stage(&root, &run, "worker", &id, "input.txt", b"hello").unwrap();
-    let task = format!("Read @grapher-attachments/{id}/input.txt");
-    crate::attachment_inputs::deliver_prepared(&root, &run, "worker", &task, &workspace, false)
-        .unwrap();
-    assert!(workspace.join(ATTACHMENTS).is_dir());
-    fs::remove_dir_all(workspace.join(ATTACHMENTS)).unwrap();
-    crate::attachment_inputs::deliver_prepared(&root, &run, "worker", &task, &workspace, true)
-        .unwrap();
-    assert!(
-        !workspace.join(ATTACHMENTS).exists(),
-        "recovery resurrected a directory the agent deleted"
-    );
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    let service = service_with_root(&root);
+    let run_id = seed_run(&service, &repo, &worktree);
+
+    for bad in [
+        "!!!not-base64!!!",
+        "data:text/plain,not-base64",
+        "data:text/plain;base64,@@@",
+    ] {
+        for (run, node) in [(None, None), (Some(run_id.as_str()), Some("worker"))] {
+            let err = dispatch(&service, UPLOAD, upload_body(&repo, run, node, bad)).unwrap_err();
+            assert!(err.contains("Invalid base64"), "unexpected error: {err}");
+        }
+    }
+    assert!(!root.join(attachment_inputs::BUCKET).exists());
+    assert!(!repo.join("grapher-attachments").exists());
+    assert!(!worktree.join("grapher-attachments").exists());
 }
 
-#[cfg(feature = "fixture")]
 #[test]
-fn initial_recovery_keeps_every_claimed_attachment_reference_in_a_batch() {
+fn raw_and_data_url_uploads_store_externally_and_support_idempotent_retries() {
     let temp = tempfile::tempdir().unwrap();
-    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
+    let root = temp.path().join("data");
     let repo = temp.path().join("repo");
-    let (child, id) = run(&primary, &repo);
-    fs::write(repo.join("base.txt"), "base").unwrap();
-    crate::workspace::git(&repo, &["init", "-q"]).unwrap();
-    crate::workspace::git(&repo, &["add", "-A"]).unwrap();
-    crate::workspace::git(&repo, &["commit", "-qm", "fixture"]).unwrap();
-    let initial = {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime.set_route("graph").unwrap();
-        runtime.approve().unwrap();
-        runtime.jobs().unwrap().remove(0)
-    };
-    crate::workspace::prepare(
-        &repo,
-        std::path::Path::new(&initial.execution.worktree),
-        &initial.execution.before,
-        &[],
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("original.txt"), "project file").unwrap();
+    let service = service_with_root(&root);
+
+    for content in [
+        "aGVsbG8gd29ybGQ=",
+        "data:text/plain;charset=utf-8;base64,aGVsbG8gd29ybGQ=",
+    ] {
+        let attachment_id = Uuid::new_v4().to_string();
+        let mut body = upload_body(&repo, None, None, content);
+        body["attachmentId"] = attachment_id.clone().into();
+        let uploaded = dispatch(&service, UPLOAD, body.clone()).unwrap();
+        let retried = dispatch(&service, UPLOAD, body.clone()).unwrap();
+        assert_eq!(retried, uploaded);
+        assert_eq!(uploaded["external"], true);
+        let stored_path = uploaded["path"].as_str().unwrap();
+        assert!(stored_path.contains(&format!("/attachment-inputs/{attachment_id}/original.txt")));
+        assert_eq!(fs::read(stored_path).unwrap(), b"hello world");
+
+        // Same attachmentId with different bytes must be rejected.
+        let mut mutated = body;
+        mutated["content"] = "ZGlmZmVyZW50".into();
+        assert!(dispatch(&service, UPLOAD, mutated)
+            .unwrap_err()
+            .contains("contents changed"));
+    }
+
+    // Repository remains completely untouched.
+    assert!(!repo.join("grapher-attachments").exists());
+    assert_eq!(fs::read_to_string(repo.join("original.txt")).unwrap(), "project file");
+}
+
+#[test]
+fn run_scoped_uploads_work_for_planner_node_and_merger_even_during_publication_without_touching_workspaces()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    let service = service_with_root(&root);
+    let run_id = seed_run(&service, &repo, &worktree);
+    service.runtime.lock().unwrap().state.phase = "publishing".into();
+
+    for node in [None, Some("worker"), Some("merge:worker")] {
+        let uploaded = dispatch(
+            &service,
+            UPLOAD,
+            upload_body(&repo, Some(&run_id), node, "Ynl0ZXM="),
+        )
+        .unwrap();
+        let path = uploaded["path"].as_str().unwrap();
+        assert!(path.contains(&format!("/attachment-inputs/{run_id}/")));
+        assert_eq!(fs::read(path).unwrap(), b"bytes");
+    }
+
+    // Neither the source repo nor the private worktree received any file.
+    assert!(fs::read_dir(&repo).unwrap().next().is_none());
+    assert!(fs::read_dir(&worktree).unwrap().next().is_none());
+
+    // Cleanup targets recorded the run's attachment bucket.
+    let owned = service
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .owned_cleanup_targets(&run_id)
+        .unwrap();
+    assert!(owned.contains(&Target::data(attachment_inputs::BUCKET, &run_id)));
+}
+
+#[test]
+fn scoped_validation_and_deletion_reject_invalid_targets_and_arbitrary_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let repo = temp.path().join("repo");
+    let other_repo = temp.path().join("other-repo");
+    let worktree = temp.path().join("worktree");
+    for dir in [&repo, &other_repo, &worktree] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(repo.join("keep.txt"), "keep").unwrap();
+    let service = service_with_root(&root);
+    let run_id = seed_run(&service, &repo, &worktree);
+
+    // Node without runId is rejected.
+    assert!(dispatch(&service, UPLOAD, upload_body(&repo, None, Some("worker"), "YWI=")).is_err());
+    // Wrong runId or mismatched repo is rejected.
+    assert!(dispatch(
+        &service,
+        UPLOAD,
+        upload_body(&repo, Some(&Uuid::new_v4().to_string()), None, "YWI=")
+    )
+    .is_err());
+    assert!(dispatch(
+        &service,
+        UPLOAD,
+        upload_body(&other_repo, Some(&run_id), None, "YWI=")
+    )
+    .is_err());
+    // Missing node is rejected.
+    assert!(dispatch(
+        &service,
+        UPLOAD,
+        upload_body(&repo, Some(&run_id), Some("ghost"), "YWI=")
+    )
+    .is_err());
+
+    // Upload a real run-scoped attachment and verify deletion safety.
+    let uploaded = dispatch(
+        &service,
+        UPLOAD,
+        upload_body(&repo, Some(&run_id), Some("worker"), "YWI="),
     )
     .unwrap();
-    {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime
-            .emit(EventKind::Prepared {
-                execution_id: initial.execution.id.clone(),
-                head: initial.execution.before.clone(),
+    let path = uploaded["path"].as_str().unwrap().to_string();
+
+    // Cannot delete project files, wrong-scope paths, or lookalike external paths.
+    let spoof = temp
+        .path()
+        .join("elsewhere/attachment-inputs")
+        .join(&run_id)
+        .join(Uuid::new_v4().to_string())
+        .join("keep.txt");
+    fs::create_dir_all(spoof.parent().unwrap()).unwrap();
+    fs::write(&spoof, "do not delete").unwrap();
+    for bad in [
+        "keep.txt".to_string(),
+        repo.join("keep.txt").to_string_lossy().into_owned(),
+        spoof.to_string_lossy().into_owned(),
+    ] {
+        assert!(dispatch(
+            &service,
+            DELETE,
+            serde_json::json!({
+                "repository": repo,
+                "runId": run_id,
+                "node": "worker",
+                "filename": bad,
             })
-            .unwrap();
-        runtime
-            .finish(
-                &initial.execution,
-                Err("extension failed before Pi created its session".into()),
-            )
-            .unwrap();
-        runtime.pause(true).unwrap();
+        )
+        .is_err());
     }
-    let first = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let second = request(&primary, UPLOAD, upload(&repo, &id, Some("worker"))).unwrap();
-    let first_path = first["path"].as_str().unwrap().to_string();
-    let second_path = second["path"].as_str().unwrap().to_string();
-    assert_ne!(first_path, second_path);
-    let batch = {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime
-            .intervene("worker", &format!("First @{first_path}"))
-            .unwrap();
-        runtime
-            .intervene("worker", &format!("Second @{second_path}"))
-            .unwrap();
-        runtime.pause(false).unwrap();
-        runtime.jobs().unwrap().remove(0)
-    };
-    assert!(batch.attachment_instructions.contains(&first_path));
-    assert!(batch.attachment_instructions.contains(&second_path));
-    let root = child.runtime.lock().unwrap().root.clone();
-    let result = crate::runtime::perform_with_merger(
-        &batch,
-        &root,
-        &[],
-        |_| {},
-        |head| {
-            child.runtime.lock().unwrap().emit(EventKind::Prepared {
-                execution_id: batch.execution.id.clone(),
-                head,
-            })?;
-            Err("interrupted after Prepared, before input delivery".into())
-        },
-        |_| Ok(()),
-    );
-    assert!(result
-        .as_ref()
-        .unwrap_err()
-        .contains("before input delivery"));
-    {
-        let mut runtime = child.runtime.lock().unwrap();
-        runtime.pause(true).unwrap();
-        runtime.request_execution_stop(Some("worker")).unwrap();
-        runtime.finish(&batch.execution, result).unwrap();
-    }
-    let reopened = service(primary.runtime.lock().unwrap().open_run(&id).unwrap());
-    let retry = {
-        let mut runtime = reopened.runtime.lock().unwrap();
-        runtime.pause(false).unwrap();
-        runtime.jobs().unwrap().remove(0)
-    };
-    assert!(retry.initial_recovery);
-    assert!(
-        retry.attachment_instructions.contains(&first_path)
-            && retry.attachment_instructions.contains(&second_path),
-        "recovery dropped a claimed batch input: {:?}",
-        retry.attachment_instructions
-    );
+    assert!(spoof.is_file());
+    assert!(repo.join("keep.txt").is_file());
+
+    // Deleting without runId cannot delete a run-scoped attachment.
+    assert!(dispatch(
+        &service,
+        DELETE,
+        serde_json::json!({
+            "repository": repo,
+            "filename": path,
+        })
+    )
+    .is_err());
+    assert!(Path::new(&path).is_file());
+
+    // Relative attachment paths are rejected; only the returned managed absolute path is accepted.
+    let suffix = path.rsplit_once("/attachment-inputs/").unwrap().1;
+    assert!(dispatch(
+        &service,
+        DELETE,
+        serde_json::json!({
+            "repository": repo,
+            "runId": run_id,
+            "node": "worker",
+            "filename": format!("attachment-inputs/{suffix}"),
+        })
+    )
+    .is_err());
+    assert!(Path::new(&path).is_file());
+
+    // Deleting with matching runId removes the file and its empty UUID directory.
+    let removed = dispatch(
+        &service,
+        DELETE,
+        serde_json::json!({
+            "repository": repo,
+            "runId": run_id,
+            "node": "worker",
+            "filename": path,
+        }),
+    )
+    .unwrap();
+    assert_eq!(removed["success"], true);
+    assert!(!Path::new(&path).exists());
+    assert!(!Path::new(&path).parent().unwrap().exists());
 }
 
 #[test]
-fn git_completions_preserve_unicode_whitespace_and_special_filenames() {
+fn pre_run_attachments_are_adopted_into_new_runs_exposed_read_only_and_isolated_from_other_runs() {
     let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path();
-    crate::workspace::git(repo, &["init", "-q"]).unwrap();
-    crate::workspace::git(repo, &["config", "core.quotePath", "true"]).unwrap();
-    let names = [
-        "中文说明.txt",
-        "résumé.md",
-        "with spaces.txt",
-        " leading.txt",
-        #[cfg(unix)]
-        "trailing ",
-        #[cfg(unix)]
-        "line\nbreak.txt",
-        #[cfg(unix)]
-        "quote\".txt",
-        #[cfg(unix)]
-        "slash\\.txt",
+    let root = temp.path().join("data");
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+
+    // Pre-run landing-page attachment (no Run ID yet).
+    let pre_id = Uuid::new_v4().to_string();
+    let pre_path = attachment_inputs::store(&root, None, &pre_id, "spec.md", b"# Spec").unwrap();
+    let pre_display = attachment_inputs::display_path(&pre_path);
+
+    // Another Run's attachment must never be adopted by mentioning its path.
+    let other_run = Uuid::new_v4().to_string();
+    let other_id = Uuid::new_v4().to_string();
+    let other_path =
+        attachment_inputs::store(&root, Some(&other_run), &other_id, "secret.txt", b"secret")
+            .unwrap();
+    let other_display = attachment_inputs::display_path(&other_path);
+
+    let mut runtime = Runtime::open(&root).unwrap();
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "originalGoal": format!("Implement @{pre_display} and ignore @{other_display}"),
+        "nodes": [{
+            "id": "task",
+            "task": format!("Read @{pre_display}"),
+        }],
+        "edges": [],
+    }))
+    .unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo,
+        "model": "test/model",
+        "maxParallel": 1,
+    }))
+    .unwrap();
+    runtime.create(graph, config).unwrap();
+    let run_id = runtime.state.run_id.clone();
+
+    let owned = runtime.store.owned_cleanup_targets(&run_id).unwrap();
+    assert!(owned.contains(&Target::data(attachment_inputs::BUCKET, &pre_id)));
+    assert!(!owned.contains(&Target::data(attachment_inputs::BUCKET, &other_run)));
+    assert!(!owned.contains(&Target::data(attachment_inputs::BUCKET, &other_id)));
+
+    let ro_dirs =
+        attachment_inputs::read_only_directories_for_run(&root, &run_id, Some(&runtime.store))
+            .unwrap();
+    let canonical_run_dir =
+        attachment_inputs::ensure_run_directory(&root, &run_id).unwrap();
+    let canonical_pre_dir = pre_path.parent().unwrap().to_path_buf();
+    assert!(ro_dirs.contains(&canonical_run_dir));
+    assert!(ro_dirs.contains(&canonical_pre_dir));
+    assert!(!ro_dirs.iter().any(|dir| dir.starts_with(other_path.parent().unwrap().parent().unwrap())));
+
+    // Run deletion manifest includes both the run's attachment dir and the adopted pre-run dir.
+    let manifest = crate::cleanup::manifest(&root, &runtime.store, &runtime.state, true).unwrap();
+    assert!(manifest
+        .targets
+        .contains(&Target::data(attachment_inputs::BUCKET, &run_id)));
+    assert!(manifest
+        .targets
+        .contains(&Target::data(attachment_inputs::BUCKET, &pre_id)));
+
+    // If a second Run also adopts the same pre-run attachment (e.g. retry after a
+    // failed first planning attempt), deleting the first Run keeps the file alive.
+    let graph2: Graph = serde_json::from_value(serde_json::json!({
+        "originalGoal": format!("Retry @{pre_display}"),
+        "nodes": [{ "id": "task", "task": format!("Read @{pre_display}") }],
+        "edges": [],
+    }))
+    .unwrap();
+    let config2: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo,
+        "model": "test/model",
+        "maxParallel": 1,
+    }))
+    .unwrap();
+    runtime.create(graph2, config2).unwrap();
+    assert!(runtime
+        .store
+        .cleanup_target_is_shared(&run_id, &Target::data(attachment_inputs::BUCKET, &pre_id))
+        .unwrap());
+}
+
+#[test]
+fn serial_initial_route_delivers_images_to_first_job_and_survives_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+
+    let image = crate::model::ImageAttachment {
+        r#type: "image".into(),
+        mime_type: "image/png".into(),
+        data: "iVBORw0KGgo=".into(),
+        name: Some("screen.png".into()),
+    };
+    let mut runtime = Runtime::open(&root).unwrap();
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "originalGoal": "Explain this screenshot",
+        "nodes": [{ "id": "task", "task": "Explain this screenshot" }],
+        "edges": [],
+    }))
+    .unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo,
+        "model": "test/model",
+        "maxParallel": 1,
+    }))
+    .unwrap();
+    runtime.create(graph, config).unwrap();
+    runtime
+        .set_route_with_images("serial", Some(vec![image.clone()]))
+        .unwrap();
+    runtime.approve().unwrap();
+    let run_id = runtime.state.run_id.clone();
+
+    // Replay from SQLite before dispatch must retain the initial images.
+    drop(runtime);
+    let mut replayed = Runtime::open(&root).unwrap().open_run(&run_id).unwrap();
+    replayed.resume_scheduling().unwrap();
+    assert_eq!(
+        serde_json::to_value(&replayed.state.nodes["task"].instruction_images).unwrap(),
+        serde_json::to_value(&Some(vec![image.clone()])).unwrap(),
+    );
+    let jobs = replayed.jobs().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&jobs[0].images).unwrap(),
+        serde_json::to_value(&Some(vec![image])).unwrap(),
+    );
+    assert!(!repo.join("grapher-attachments").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_sandbox_grants_read_only_access_to_run_attachments_including_live_steers() {
+    if !crate::sandbox::supported() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let repo = base.join("source");
+    let worktree_root = base.join("worktrees");
+    let current = worktree_root.join("run/node");
+    let data = base.join("data");
+    let session = data.join("sessions/exec-1");
+    let engine = base.join("engine");
+    let installation = base.join("installation");
+    for dir in [&repo, &current, &session, &engine, &installation] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(data.join("events.sqlite"), "private-db").unwrap();
+
+    let run_id = Uuid::new_v4().to_string();
+    let other_run = Uuid::new_v4().to_string();
+    let initial_id = Uuid::new_v4().to_string();
+    let initial_file =
+        attachment_inputs::store(&data, Some(&run_id), &initial_id, "input.txt", b"initial-data")
+            .unwrap();
+    let other_file = attachment_inputs::store(
+        &data,
+        Some(&other_run),
+        &Uuid::new_v4().to_string(),
+        "secret.txt",
+        b"other-run-secret",
+    )
+    .unwrap();
+    let run_attach_dir = attachment_inputs::ensure_run_directory(&data, &run_id).unwrap();
+
+    // Generate the profile BEFORE a live-steer attachment exists.
+    let profile = session.join("attachments.sb");
+    crate::sandbox::write_execution_profile_scoped(
+        &profile,
+        &repo,
+        &worktree_root,
+        &current,
+        &data,
+        &session,
+        &engine,
+        &installation,
+        &[],
+        &[],
+        &[run_attach_dir.clone()],
+    )
+    .unwrap();
+
+    // Simulate a live-steer upload arriving AFTER the sandbox profile was written.
+    let steer_id = Uuid::new_v4().to_string();
+    let steer_file =
+        attachment_inputs::store(&data, Some(&run_id), &steer_id, "steer.txt", b"live-steer")
+            .unwrap();
+
+    let output = std::process::Command::new("/usr/bin/sandbox-exec")
+        .arg("-f")
+        .arg(&profile)
+        .args([
+            "/bin/sh",
+            "-c",
+            r#"
+set -e
+test "$(cat "$1")" = "initial-data"
+test "$(cat "$2")" = "live-steer"
+if (echo bad >> "$1") 2>/dev/null; then exit 11; fi
+if (echo bad > "$3/new.txt") 2>/dev/null; then exit 12; fi
+if cat "$4" >/dev/null 2>&1; then exit 13; fi
+if cat "$5" >/dev/null 2>&1; then exit 14; fi
+"#,
+            "probe",
+        ])
+        .arg(&initial_file)
+        .arg(&steer_file)
+        .arg(&run_attach_dir)
+        .arg(&other_file)
+        .arg(data.join("events.sqlite"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sandbox attachment check failed (code {:?}): {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&initial_file).unwrap(), b"initial-data");
+    assert!(!run_attach_dir.join("new.txt").exists());
+}
+
+#[test]
+fn prune_orphaned_unscoped_removes_only_stale_unowned_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    let root = temp.path().join("data");
+    let mut runtime = Runtime::open(&root).unwrap();
+
+    let stale_unowned_id = Uuid::new_v4().to_string();
+    let stale_unowned_file =
+        attachment_inputs::store(&root, None, &stale_unowned_id, "orphan.txt", b"orphan").unwrap();
+    let adopted_id = Uuid::new_v4().to_string();
+    let adopted_file =
+        attachment_inputs::store(&root, None, &adopted_id, "spec.md", b"# Spec").unwrap();
+    let adopted_display = attachment_inputs::display_path(&adopted_file);
+
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "originalGoal": format!("@{adopted_display} implement"),
+        "nodes": [{ "id": "task", "task": "implement" }],
+        "edges": [],
+    }))
+    .unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo,
+        "model": "test/model",
+        "maxParallel": 1,
+    }))
+    .unwrap();
+    runtime.create(graph, config).unwrap();
+    let run_id = runtime.state.run_id.clone();
+
+    let run_scoped_id = Uuid::new_v4().to_string();
+    let run_scoped_file = attachment_inputs::store(
+        &root,
+        Some(&run_id),
+        &run_scoped_id,
+        "live.txt",
+        b"live",
+    )
+    .unwrap();
+
+    // Fresh unowned attachments within max_age must survive.
+    let removed_none = attachment_inputs::prune_orphaned_unscoped(
+        &root,
+        &runtime.store,
+        std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
+    assert_eq!(removed_none, 0);
+    assert!(stale_unowned_file.is_file());
+
+    // With max_age = 0, only the unowned unscoped directory is reclaimed;
+    // adopted pre-run and run-scoped directories remain intact.
+    let removed = attachment_inputs::prune_orphaned_unscoped(
+        &root,
+        &runtime.store,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(removed, 1);
+    assert!(!stale_unowned_file.exists());
+    assert!(!root.join(attachment_inputs::BUCKET).join(&stale_unowned_id).exists());
+    assert!(adopted_file.is_file());
+    assert!(run_scoped_file.is_file());
+}
+
+#[test]
+fn snapshot_metadata_strips_duplicate_node_images_while_preserving_routed_event_images() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    let root = temp.path().join("data");
+    let mut runtime = Runtime::open(&root).unwrap();
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "originalGoal": "Inspect image",
+        "nodes": [{ "id": "task", "task": "Inspect image" }],
+        "edges": [],
+    }))
+    .unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo,
+        "model": "test/model",
+        "maxParallel": 1,
+    }))
+    .unwrap();
+    runtime.create(graph, config).unwrap();
+    let image = crate::model::ImageAttachment {
+        r#type: "image".into(),
+        mime_type: "image/png".into(),
+        data: "iVBORw0KGgo=".into(),
+        name: Some("ui.png".into()),
+    };
+    runtime
+        .set_route_with_images("serial", Some(vec![image]))
+        .unwrap();
+
+    let view = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
+    assert!(
+        view["nodes"]["task"].get("instructionImages").is_none(),
+        "node state must not duplicate base64 images already carried on events"
+    );
+    let routed = view["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "routed")
+        .unwrap();
+    assert_eq!(routed["images"][0]["data"], "iVBORw0KGgo=");
+}
+
+#[test]
+fn graph_planner_images_persist_under_run_attachments_and_support_session_branch_matching() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data with space");
+    let run_id = Uuid::new_v4().to_string();
+    let images = vec![
+        crate::model::ImageAttachment {
+            r#type: "image".into(),
+            mime_type: "image/jpeg".into(),
+            data: "aGVsbG8=".into(),
+            name: Some("retina.png".into()),
+        },
+        crate::model::ImageAttachment {
+            r#type: "image".into(),
+            mime_type: "image/png".into(),
+            data: "d29ybGQ=".into(),
+            name: None,
+        },
     ];
-    for name in &names {
-        fs::write(repo.join(name), "fixture").unwrap();
-    }
-    crate::workspace::git(repo, &["add", "--", "中文说明.txt"]).unwrap();
-    let files = collect_files_from_dir(repo);
-    for name in names {
-        assert!(
-            files.iter().any(|file| file == name),
-            "missing {name:?}: {files:?}"
-        );
-    }
+
+    let stored = attachment_inputs::store_run_images(&root, &run_id, &images).unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].file_name().unwrap().to_str().unwrap(), "retina.jpg");
+    assert_eq!(stored[1].file_name().unwrap().to_str().unwrap(), "image-2.png");
+    assert_eq!(fs::read(&stored[0]).unwrap(), b"hello");
+    assert_eq!(fs::read(&stored[1]).unwrap(), b"world");
+
+    let prompt = attachment_inputs::prepend_mentions(&stored, "Implement this layout");
+    assert!(prompt.starts_with("@\""));
+    assert!(prompt.ends_with(" Implement this layout"));
+    assert_eq!(
+        attachment_inputs::strip_leading_managed_mentions(&prompt),
+        "Implement this layout"
+    );
+    assert_eq!(
+        attachment_inputs::strip_leading_managed_mentions("@src/App.tsx keep this"),
+        "@src/App.tsx keep this"
+    );
+
+    // Editing a Planner turn whose transport text received backend-injected
+    // `@<image_path>` mentions must still match the clean user text.
+    let session_dir = temp.path().join("planner-session");
+    fs::create_dir_all(&session_dir).unwrap();
+    let session_id = Uuid::new_v4().to_string();
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let session_file = session_dir.join(format!("grapher_{session_id}.jsonl"));
+    let followup_prompt = format!(
+        "You are now at nodeA's workspace.\nCurrent graph node status:\n- nodeA: completed\n{}",
+        attachment_inputs::prepend_mentions(&stored, "Refine spacing")
+    );
+    let lines = [
+        serde_json::json!({
+            "type": "session",
+            "version": 3,
+            "grapherFormat": 1,
+            "id": session_id,
+            "cwd": cwd.to_string_lossy(),
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "u1",
+            "parentId": null,
+            "message": { "role": "user", "content": prompt },
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "a1",
+            "parentId": "u1",
+            "message": { "role": "assistant", "content": [{ "type": "text", "text": "Planned" }] },
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "u2",
+            "parentId": "a1",
+            "message": { "role": "user", "content": followup_prompt },
+        }),
+    ];
+    fs::write(
+        &session_file,
+        lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    // Follow-up turn with context header + injected `@<image_path>` matches clean user text.
+    let followup_branch = crate::session_branch::branch_before_planner_user(
+        &session_dir,
+        &session_id,
+        &cwd,
+        "Refine spacing",
+    )
+    .unwrap();
+    assert!(!followup_branch.first_user_turn);
+
+    // Initial turn with injected `@<image_path>` also matches clean user text.
+    let initial_branch = crate::session_branch::branch_before_planner_user(
+        &session_dir,
+        &session_id,
+        &cwd,
+        "Implement this layout",
+    )
+    .unwrap();
+    assert!(initial_branch.first_user_turn);
 }

@@ -60,6 +60,7 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   assert.equal(mainWindow.title, 'Grapher');
   assert.equal(mainWindow.titleBarStyle, 'Overlay');
   assert.equal(mainWindow.hiddenTitle, true);
+  assert.equal(mainWindow.dragDropEnabled, false, 'HTML5 drag-and-drop must not be intercepted by Tauri native dragDropHandler');
   assert.equal(conf.build.devUrl, 'http://127.0.0.1:1420');
   assert.equal(conf.build.frontendDist, '../dist');
 
@@ -70,6 +71,7 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   const windowProps = schema.definitions.WindowConfig.properties;
   assert.ok(windowProps.titleBarStyle, 'WindowConfig schema must define titleBarStyle');
   assert.equal(windowProps.hiddenTitle.type, 'boolean');
+  assert.equal(windowProps.dragDropEnabled.type, 'boolean');
   const titleBarStyles = schema.definitions.TitleBarStyle.oneOf.flatMap(entry => entry.enum ?? []);
   assert.ok(
     titleBarStyles.includes(mainWindow.titleBarStyle),
@@ -80,7 +82,7 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   const windowsConf = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.windows.conf.json'), 'utf8'));
   assert.equal(windowsConf.app.windows.length, 1);
   const windowsWindow = windowsConf.app.windows[0];
-  for (const key of ['label', 'title', 'width', 'height', 'minWidth', 'minHeight', 'resizable', 'fullscreen']) {
+  for (const key of ['label', 'title', 'width', 'height', 'minWidth', 'minHeight', 'resizable', 'fullscreen', 'dragDropEnabled']) {
     assert.equal(windowsWindow[key], mainWindow[key], `Windows window must retain ${key}`);
   }
   assert.equal(windowsWindow.decorations, false);
@@ -118,7 +120,10 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
     'allow-backend-url',
     'allow-git-bootstrap',
     'allow-open-external-url',
+    'allow-desktop-notification',
     'core:app:allow-version',
+    'core:event:allow-listen',
+    'core:event:allow-unlisten',
     'core:resources:allow-close',
     'autostart:default',
     'updater:default',
@@ -154,6 +159,21 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
     openExternalPermission,
     /commands\.allow\s*=\s*\["open_external_url"\]/,
   );
+
+  const notificationPermission = readFileSync(
+    join(root, 'src-tauri', 'permissions', 'allow-desktop-notification.toml'),
+    'utf8',
+  );
+  assert.match(notificationPermission, /identifier\s*=\s*"allow-desktop-notification"/);
+  for (const command of [
+    'send_desktop_notification',
+    'desktop_notification_permission_status',
+    'request_desktop_notification_permission',
+    'open_desktop_notification_settings',
+    'take_pending_notification_click',
+  ]) {
+    assert.match(notificationPermission, new RegExp(`"${command}"`));
+  }
 
   const macosWindowCap = JSON.parse(
     readFileSync(join(root, 'src-tauri', 'capabilities', 'macos-window.json'), 'utf8'),
@@ -275,14 +295,14 @@ test('desktop icon assets are reproducibly derived from assets/icon-dots.svg wit
   const masterPng = readPngInfo(join(iconsDir, 'icon.png'));
   assert.deepEqual(sampleRgbaPngPixel(masterPng, 0, 0), [0, 0, 0, 0]);
   assert.deepEqual(sampleRgbaPngPixel(masterPng, 256, 256), [255, 255, 255, 255]);
-  // Top node top-edge stroke: 512-space (256, 92) -> 1024-space (512, 312.125) -> 512-space (256, 156)
-  const topStrokePixel = sampleRgbaPngPixel(masterPng, 256, 156);
+  // Top node top-edge stroke: 512-space (256, 62) -> 1024-space (512, 275.56) -> 512-space (256, 138)
+  const topStrokePixel = sampleRgbaPngPixel(masterPng, 256, 138);
   assert.equal(topStrokePixel[3], 255);
   assert.ok(topStrokePixel[0] >= 65 && topStrokePixel[0] <= 85, `expected gray stroke (~#4a4a4a), got ${topStrokePixel}`);
   assert.equal(topStrokePixel[0], topStrokePixel[1]);
   assert.equal(topStrokePixel[1], topStrokePixel[2]);
-  // Left node left-edge stroke: 512-space (62, 256) -> 1024-space (275.56, 512) -> 512-space (138, 256)
-  const leftStrokePixel = sampleRgbaPngPixel(masterPng, 138, 256);
+  // Left node left-edge stroke: 512-space (92, 256) -> 1024-space (312.125, 512) -> 512-space (156, 256)
+  const leftStrokePixel = sampleRgbaPngPixel(masterPng, 156, 256);
   assert.equal(leftStrokePixel[3], 255);
   assert.ok(leftStrokePixel[0] >= 65 && leftStrokePixel[0] <= 85, `expected gray stroke (~#4a4a4a), got ${leftStrokePixel}`);
   assert.equal(leftStrokePixel[0], leftStrokePixel[1]);

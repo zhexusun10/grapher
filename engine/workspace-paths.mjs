@@ -30,7 +30,8 @@ function parseDeniedPaths(raw) {
     const read = list(parsed?.read);
     const write = list(parsed?.write);
     const allowed = list(parsed?.allowed);
-    return read.length || write.length ? { read, write, allowed } : undefined;
+    const readAllowed = list(parsed?.readAllowed);
+    return read.length || write.length ? { read, write, allowed, readAllowed } : undefined;
   } catch {
     return undefined;
   }
@@ -550,6 +551,7 @@ export function createWorkspacePaths(
     if (!permission && !missing) return text;
     // An error about an allowed path is genuine, never a sandbox denial.
     if (denied.allowed.some(exception => mentions(text, exception))) return text;
+    if (!permission && denied.readAllowed?.some(exception => mentions(text, exception))) return text;
     const roots = permission ? denied.write : denied.read;
     if (!roots.some(deniedRoot => mentions(text, deniedRoot))) return text;
     return text

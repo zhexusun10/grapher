@@ -7,7 +7,7 @@ let server, browser, origin;
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-performance-acceptance",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false },
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null },
     plugins: [{ name: "performance-acceptance-fixtures",
       configureServer(vite) {
         vite.middlewares.use(async (req, res, next) => {
@@ -21,7 +21,7 @@ before(async () => {
   await server.listen(); origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function fixture(query, handler) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
@@ -131,6 +131,27 @@ test("frame batching preserves all 100 updates, drains before terminal/reset act
     await page.waitForFunction(() => window.performanceAudit.text === "");
     await page.waitForTimeout(80);
     assert.equal(await page.locator("[data-frame-text]").innerText(), "", "a cancelled frame cannot restore the previous conversation");
+
+    // While hidden, queued presentation updates fold without committing until visible again.
+    await page.evaluate(() => {
+      window.performanceAudit.hidden = true;
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => window.performanceAudit.hidden });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const commitsBeforeHiddenBurst = await page.evaluate(() => window.performanceAudit.commits);
+    await page.evaluate(() => window.performanceAudit.queueBurst());
+    await page.waitForTimeout(120);
+    assert.equal(await page.evaluate(() => window.performanceAudit.commits), commitsBeforeHiddenBurst,
+      "hidden document must not commit queued presentation bursts");
+    assert.equal(await page.locator("[data-frame-text]").innerText(), "");
+    await page.evaluate(() => {
+      window.performanceAudit.hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForFunction(text => window.performanceAudit.text === text, expected);
+    assert.equal(await page.evaluate(() => window.performanceAudit.commits) - commitsBeforeHiddenBurst, 1,
+      "becoming visible commits all folded hidden updates once");
+
     const stable = await page.evaluate(() => { window.performanceAudit.originalCallback = window.performanceAudit.callback; window.performanceAudit.setFactor(7); return true; });
     assert.ok(stable);
     await page.waitForFunction(() => window.performanceAudit.callback() === 7);

@@ -321,3 +321,12 @@ test('cancelling a Planner stream preserves the cancellation reason without quer
     assert.deepEqual(calls, ['snapshot', 'plan_goal_stream']);
   } finally { globalThis.fetch = original; resetApiBaseForTest(); }
 });
+
+test('ApiRequestError stringifies with standard Error prefix so UI error localization still matches', () => {
+  const err = new ApiRequestError(
+    { code: 'INTERNAL_ERROR', message: 'Catalog refresh unavailable', retryable: false, requestId: 'req-1' },
+    500,
+  );
+  assert.equal(err.name, 'ApiRequestError');
+  assert.equal(String(err), 'Error: Catalog refresh unavailable');
+});

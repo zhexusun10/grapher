@@ -1,7 +1,8 @@
+import { formatManagedAttachmentDisplayLabel } from "../../utils/attachmentPath";
 import { t } from "../../i18n";
 import React, { useState } from "react";
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
-import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
+import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2, Inbox, RotateCcw, Search } from "lucide-react";
 import type { ProjectItem } from "../../types";
 import type { RunIndicator } from "../../hooks/useRunIndicators";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
@@ -17,6 +18,33 @@ const CARD_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
 // cards below, so it uses a gentler curve that spreads the same distance over
 // more frames instead of clearing most of it in the first few.
 const CARD_COLLAPSE_EASE: [number, number, number, number] = [0.25, 0.46, 0.45, 0.94];
+const LIST_VIEW_EXIT_EASE: [number, number, number, number] = [0.4, 0, 1, 1];
+
+// Directional fade+slide when toggling between active and archived lists.
+// Pure horizontal transform inside overflow-x: hidden never alters vertical
+// scrollHeight, avoiding transient scrollbar flashes.
+const LIST_VIEW_VARIANTS = {
+  enter: (direction: number) => ({
+    opacity: 0,
+    x: direction * 10,
+  }),
+  center: {
+    opacity: 1,
+    x: 0,
+    transition: {
+      duration: 0.18,
+      ease: CARD_EASE,
+    },
+  },
+  exit: (direction: number) => ({
+    opacity: 0,
+    x: direction * -10,
+    transition: {
+      duration: 0.12,
+      ease: LIST_VIEW_EXIT_EASE,
+    },
+  }),
+};
 
 // `.projects-list` separates its cards with a flex `gap`; `.runs-list` spaces
 // them with a card margin instead.
@@ -58,7 +86,7 @@ function cardExit(listGap: number) {
 const PROJECT_CARD_EXIT = cardExit(PROJECT_LIST_GAP);
 const RUN_CARD_EXIT = cardExit(0);
 
-type CardEntranceMode = "none" | "expand" | "placeholder" | "fade" | "stagger";
+type CardEntranceMode = "none" | "expand" | "placeholder" | "fade" | "fade-delayed" | "stagger";
 
 // Matches the CSS overlay breakpoint below which the sidebar would otherwise
 // take a large share of the width from the single-pane workbench.
@@ -123,11 +151,12 @@ function useCardEntrance(
         },
       );
       animations.push(anim);
-    } else if (entrance === "fade") {
+    } else if (entrance === "fade" || entrance === "fade-delayed") {
       const anim = el.animate(
         [{ opacity: 0 }, { opacity: 1 }],
         {
-          duration: 180,
+          duration: entrance === "fade-delayed" ? 160 : 180,
+          delay: entrance === "fade-delayed" ? 35 : 0,
           easing: "cubic-bezier(0.16, 1, 0.3, 1)",
           fill: "backwards",
         },
@@ -319,14 +348,21 @@ interface SidebarProps {
   onSelectProject: (proj: ProjectItem) => void;
   onOpenProject: () => void;
   onRemoveProject: (project: ProjectItem) => void;
+  onArchiveProject: (project: ProjectItem) => void;
+  onUnarchiveProject: (project: ProjectItem) => void;
+  openedProjectSeq?: number;
   runs: string[];
+  archivedRunIds?: ReadonlySet<string>;
   currentRunId: string;
   runIndicators: Record<string, RunIndicator>;
   onLoadRun: (runId: string) => void;
   onCopyRunPrompt: (runId: string, provisionalPrompt?: string) => void;
   onCancelPendingPromptCopy: () => void;
+  onArchiveRun: (runId: string) => void;
+  onUnarchiveRun: (runId: string) => void;
   onDeleteRun: (runId: string) => void;
   onNewConversation: () => void;
+  onOpenSearch?: () => void;
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
   hasUpdateAvailable?: boolean;
@@ -345,14 +381,21 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onSelectProject,
   onOpenProject,
   onRemoveProject,
+  onArchiveProject,
+  onUnarchiveProject,
+  openedProjectSeq = 0,
   runs,
+  archivedRunIds,
   currentRunId,
   runIndicators,
   onLoadRun,
   onCopyRunPrompt,
   onCancelPendingPromptCopy,
+  onArchiveRun,
+  onUnarchiveRun,
   onDeleteRun,
   onNewConversation,
+  onOpenSearch,
   onOpenSettings,
   isSettingsOpen,
   hasUpdateAvailable = false,
@@ -367,6 +410,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   // Wide launches start expanded; narrow windows start with the rail so the
   // composer keeps its room. Collapsing remains session-local.
   const [isCollapsed, setIsCollapsed] = useState(startsCollapsed);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  const [showArchivedRuns, setShowArchivedRuns] = useState(false);
   // Only undo a collapse we caused by resizing; a user's manual choice wins.
   const autoCollapsedRef = React.useRef(isCollapsed);
   const toggleCollapsed = () => {
@@ -380,55 +425,227 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [runContextMenu, setRunContextMenu] = useState<(ContextMenuAnchor & { runId: string; provisionalPrompt?: string }) | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
   const [projectExitActive, setProjectExitActive] = useState(false);
+  const projectsListRef = React.useRef<HTMLDivElement | null>(null);
+  const runsListRef = React.useRef<HTMLDivElement | null>(null);
   const projectsPlaceholderRef = React.useRef<HTMLDivElement | null>(null);
   const projectsPlaceholderHeightRef = React.useRef<number>(34);
-  const previousProjectKeysRef = React.useRef(new Set(projects.map(project => workspaceKey(project.path))));
   const activeRepoKey = workspaceKey(activeRepo);
+
+  const visibleProjects = React.useMemo(
+    () => projects.filter((project) => Boolean(project.archived) === showArchivedProjects),
+    [projects, showArchivedProjects],
+  );
+  const visibleRuns = React.useMemo(
+    () => runs.filter((id) => Boolean(archivedRunIds?.has(id)) === showArchivedRuns),
+    [runs, archivedRunIds, showArchivedRuns],
+  );
+
+  const previousProjectsStateRef = React.useRef({
+    showArchived: showArchivedProjects,
+    keys: new Set(visibleProjects.map(project => workspaceKey(project.path))),
+  });
   const previousRunsStateRef = React.useRef({
     activeRepo: activeRepoKey,
+    showArchived: showArchivedRuns,
     wasReady: isReady,
-    keys: new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []),
+    keys: new Set(isReady ? visibleRuns.map(id => runCardKeys[id] ?? id) : []),
+    order: isReady ? visibleRuns.map(id => runCardKeys[id] ?? id) : [],
   });
+  const previousRunTopsRef = React.useRef<Map<string, number>>(new Map());
+  const runReorderAnimationsRef = React.useRef<Animation[]>([]);
   // The caller may remember current cache IDs solely for motion. Cards still
   // render only from the authoritative runs prop after bootstrap.
   const restoredKeysRef = React.useRef<{ projects: Set<string>; runs: Set<string> } | null>(null);
   if (restoredKeysRef.current === null) {
     restoredKeysRef.current = {
-      projects: new Set(projects.map(proj => workspaceKey(proj.path))),
-      runs: new Set([...initialRunIds, ...(isReady ? runs : [])].map(id => runCardKeys[id] ?? id)),
+      projects: new Set(visibleProjects.map(proj => workspaceKey(proj.path))),
+      runs: new Set([...initialRunIds, ...(isReady ? visibleRuns : [])].map(id => runCardKeys[id] ?? id)),
     };
   }
   const restoredProjectKeys = restoredKeysRef.current.projects;
   const restoredRunKeys = restoredKeysRef.current.runs;
 
-  React.useLayoutEffect(() => {
-    const nextKeys = new Set(projects.map(project => workspaceKey(project.path)));
-    const removed = [...previousProjectKeysRef.current].some(key => !nextKeys.has(key));
-    if (!reduceMotion && removed) setProjectExitActive(true);
-    for (const key of previousProjectKeysRef.current) {
-      if (!nextKeys.has(key)) restoredProjectKeys.delete(key);
+  const lastOpenedProjectSeqRef = React.useRef(openedProjectSeq);
+  React.useEffect(() => {
+    if (openedProjectSeq === lastOpenedProjectSeqRef.current) return;
+    lastOpenedProjectSeqRef.current = openedProjectSeq;
+    setShowArchivedProjects(false);
+    setProjectContextMenu(null);
+  }, [openedProjectSeq]);
+
+  const lastActiveRepoRef = React.useRef(activeRepoKey);
+  React.useEffect(() => {
+    if (activeRepoKey === lastActiveRepoRef.current) return;
+    lastActiveRepoRef.current = activeRepoKey;
+    setShowArchivedRuns(false);
+    setRunContextMenu(null);
+  }, [activeRepoKey]);
+
+  const previousPendingRunsRef = React.useRef(new Set(runs.filter(id => id.startsWith("pending-"))));
+  React.useEffect(() => {
+    const nextPending = new Set(runs.filter(id => id.startsWith("pending-")));
+    const addedPending = [...nextPending].some(id => !previousPendingRunsRef.current.has(id));
+    previousPendingRunsRef.current = nextPending;
+    if (addedPending) {
+      setShowArchivedRuns(false);
+      setRunContextMenu(null);
+      if (runsListRef.current) runsListRef.current.scrollTop = 0;
     }
-    if (projects.length === 0 && projectsPlaceholderRef.current) {
+  }, [runs]);
+
+  const toggleArchivedProjects = () => {
+    setProjectContextMenu(null);
+    setRunContextMenu(null);
+    setShowArchivedProjects((prev) => !prev);
+    if (projectsListRef.current) projectsListRef.current.scrollTop = 0;
+  };
+
+  const toggleArchivedRuns = () => {
+    setProjectContextMenu(null);
+    setRunContextMenu(null);
+    setShowArchivedRuns((prev) => !prev);
+    if (runsListRef.current) runsListRef.current.scrollTop = 0;
+  };
+
+  const handleNewConversationClick = () => {
+    setRunContextMenu(null);
+    setShowArchivedRuns(false);
+    onNewConversation();
+  };
+
+  React.useLayoutEffect(() => {
+    const nextKeys = new Set(visibleProjects.map(project => workspaceKey(project.path)));
+    const prev = previousProjectsStateRef.current;
+    if (prev.showArchived === showArchivedProjects) {
+      const removed = [...prev.keys].some(key => !nextKeys.has(key));
+      if (!reduceMotion && removed) setProjectExitActive(true);
+      for (const key of prev.keys) {
+        if (!nextKeys.has(key)) restoredProjectKeys.delete(key);
+      }
+    } else {
+      setProjectExitActive(false);
+    }
+    if (visibleProjects.length === 0 && projectsPlaceholderRef.current) {
       const measured = projectsPlaceholderRef.current.getBoundingClientRect().height;
       if (measured > 0) projectsPlaceholderHeightRef.current = measured;
     }
-    previousProjectKeysRef.current = nextKeys;
-  }, [projects, reduceMotion, restoredProjectKeys]);
+    previousProjectsStateRef.current = {
+      showArchived: showArchivedProjects,
+      keys: nextKeys,
+    };
+  }, [visibleProjects, showArchivedProjects, reduceMotion, restoredProjectKeys]);
 
   React.useLayoutEffect(() => {
-    const nextKeys = new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []);
+    const nextOrder = isReady ? visibleRuns.map(id => runCardKeys[id] ?? id) : [];
+    const nextKeys = new Set(nextOrder);
     const prev = previousRunsStateRef.current;
-    if (isReady && prev.wasReady && prev.activeRepo === activeRepoKey) {
+    const sameList = isReady && prev.wasReady && prev.activeRepo === activeRepoKey && prev.showArchived === showArchivedRuns;
+
+    const measureCardTops = () => {
+      const list = runsListRef.current;
+      const tops = new Map<string, number>();
+      if (!list) return tops;
+      const view = list.querySelector<HTMLElement>(".runs-list-view") ?? list;
+      const cards = view.querySelectorAll<HTMLButtonElement>(".run-item[data-run-id]");
+      for (const card of cards) {
+        const id = card.dataset.runId;
+        if (!id) continue;
+        const cardKey = runCardKeys[id] ?? id;
+        const top = card.offsetParent === view ? card.offsetTop : card.offsetTop - view.offsetTop;
+        tops.set(cardKey, top);
+      }
+      return tops;
+    };
+
+    if (sameList) {
       for (const key of prev.keys) {
         if (!nextKeys.has(key)) restoredRunKeys.delete(key);
       }
     }
+
+    const isPureReorder = sameList &&
+      prev.order.length === nextOrder.length &&
+      nextOrder.length > 1 &&
+      prev.keys.size === nextKeys.size &&
+      nextOrder.every((key) => prev.keys.has(key)) &&
+      nextOrder.some((key, index) => key !== prev.order[index]);
+
+    const isPureInsertion = sameList &&
+      prev.order.length > 0 &&
+      nextOrder.length > prev.order.length &&
+      prev.order.every((key) => nextKeys.has(key));
+
+    if (isPureReorder || isPureInsertion) {
+      for (const anim of runReorderAnimationsRef.current) anim.cancel();
+      runReorderAnimationsRef.current = [];
+      const list = runsListRef.current;
+      const prevScrollTop = list ? list.scrollTop : 0;
+      const firstChanged = nextOrder[0] !== prev.order[0];
+      if (firstChanged && list && list.scrollTop !== 0) {
+        list.scrollTop = 0;
+      }
+      const nextScrollTop = list ? list.scrollTop : 0;
+      const nextTops = measureCardTops();
+
+      if (!reduceMotion && list) {
+        const listHeight = list.clientHeight;
+        const view = list.querySelector<HTMLElement>(".runs-list-view") ?? list;
+        const promotedKey = isPureReorder && firstChanged ? nextOrder[0] : null;
+        const scrolledToTopForInsert = isPureInsertion && prevScrollTop !== nextScrollTop;
+        const animations: Animation[] = [];
+        for (const card of view.querySelectorAll<HTMLButtonElement>(".run-item[data-run-id]")) {
+          const id = card.dataset.runId;
+          if (!id || typeof card.animate !== "function") continue;
+          const cardKey = runCardKeys[id] ?? id;
+          const oldTop = previousRunTopsRef.current.get(cardKey);
+          const newTop = nextTops.get(cardKey);
+          if (oldTop === undefined || newTop === undefined) continue;
+          const oldVisualY = oldTop - prevScrollTop;
+          const newVisualY = newTop - nextScrollTop;
+          const cardHeight = card.offsetHeight || 40;
+          if (listHeight > 0 &&
+            (scrolledToTopForInsert
+              ? (newVisualY + cardHeight < 0 || newVisualY > listHeight)
+              : ((oldVisualY + cardHeight < 0 || oldVisualY > listHeight) &&
+                (newVisualY + cardHeight < 0 || newVisualY > listHeight)))) {
+            continue;
+          }
+          let deltaY = scrolledToTopForInsert ? oldTop - newTop : oldVisualY - newVisualY;
+          if (Math.abs(deltaY) < 0.5) continue;
+          if (listHeight > 0) deltaY = Math.max(-listHeight, Math.min(listHeight, deltaY));
+          const isPromoted = cardKey === promotedKey;
+          const anim = card.animate(
+            [
+              isPromoted ? { transform: `translateY(${deltaY}px)`, zIndex: 1 } : { transform: `translateY(${deltaY}px)` },
+              isPromoted ? { transform: "translateY(0px)", zIndex: 1 } : { transform: "translateY(0px)" },
+            ],
+            {
+              duration: 220,
+              easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+            },
+          );
+          animations.push(anim);
+        }
+        runReorderAnimationsRef.current = animations;
+      }
+      previousRunTopsRef.current = nextTops;
+    } else {
+      previousRunTopsRef.current = isReady ? measureCardTops() : new Map();
+    }
+
     previousRunsStateRef.current = {
       activeRepo: activeRepoKey,
+      showArchived: showArchivedRuns,
       wasReady: isReady,
       keys: nextKeys,
+      order: nextOrder,
     };
-  }, [activeRepoKey, isReady, runs, runCardKeys, restoredRunKeys]);
+  }, [activeRepoKey, showArchivedRuns, isReady, visibleRuns, runCardKeys, runIndicators, runLabels, restoredRunKeys, reduceMotion]);
+
+  React.useEffect(() => () => {
+    for (const anim of runReorderAnimationsRef.current) anim.cancel();
+    runReorderAnimationsRef.current = [];
+  }, []);
 
   React.useEffect(() => {
     const query = window.matchMedia(NARROW_SIDEBAR_QUERY);
@@ -449,16 +666,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     return () => query.removeEventListener("change", handleChange);
   }, []);
 
-  const prevProjectKeys = previousProjectKeysRef.current;
-  const projectCards = projects.map((proj, index) => {
+  const prevProjectsState = previousProjectsStateRef.current;
+  const isProjectViewSwitch = prevProjectsState.showArchived !== showArchivedProjects;
+  const projectCards = visibleProjects.map((proj, index) => {
     const key = workspaceKey(proj.path);
     const isActive = activeRepoKey === key;
     const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === key : false;
-    const isNewProject = !restoredProjectKeys.has(key) && !prevProjectKeys.has(key);
+    const isNewProject = !isProjectViewSwitch && !restoredProjectKeys.has(key) && !prevProjectsState.keys.has(key);
     let entranceMode: CardEntranceMode = "none";
     if (!reduceMotion && isNewProject) {
-      if (prevProjectKeys.size > 0) entranceMode = "expand";
-      else if (projects.length === 1) entranceMode = "placeholder";
+      if (prevProjectsState.keys.size > 0) entranceMode = "expand";
+      else if (visibleProjects.length === 1) entranceMode = "placeholder";
       else entranceMode = "stagger";
     }
     const openMenu = (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => {
@@ -478,7 +696,10 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         isActive={isActive}
         isSwitching={isSwitching}
         menuOpen={projectContextMenu?.project.path === proj.path}
-        onClick={() => onSelectProject(proj)}
+        onClick={() => {
+          if (key !== activeRepoKey) setShowArchivedRuns(false);
+          onSelectProject(proj);
+        }}
         onContextMenu={openMenu}
       >
         <span className="proj-details">
@@ -492,16 +713,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   });
 
   const prevRunsState = previousRunsStateRef.current;
-  const runCards = runs.map((id, index) => {
+  const isRunViewSwitch = prevRunsState.showArchived !== showArchivedRuns;
+  const runCards = visibleRuns.map((id, index) => {
     const cardKey = runCardKeys[id] ?? id;
     const isRestored = restoredRunKeys.has(cardKey);
-    const isNewRun = isReady && !isRestored &&
+    const isNewRun = isReady && !isRunViewSwitch && !isRestored &&
       (prevRunsState.activeRepo !== activeRepoKey || !prevRunsState.wasReady || !prevRunsState.keys.has(cardKey));
     let entranceMode: CardEntranceMode = "none";
     if (!reduceMotion && isNewRun) {
       if (prevRunsState.wasReady && prevRunsState.activeRepo === activeRepoKey) {
-        if (prevRunsState.keys.size > 0) entranceMode = "expand";
-        else if (runs.length === 1) entranceMode = "fade";
+        if (prevRunsState.keys.size > 0) entranceMode = "fade-delayed";
+        else if (visibleRuns.length === 1) entranceMode = "fade";
         else entranceMode = "stagger";
       } else {
         entranceMode = "stagger";
@@ -509,15 +731,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     }
     const indicator = runIndicators[id];
     const isThisRunActive = Boolean(indicator?.working);
-    const isUnread = Boolean(indicator?.unread && currentRunId !== id);
-    const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
     const isChosen = (loadingRunId ?? currentRunId) === id;
     const isLoadingThisRun = loadingRunId === id && currentRunId !== id;
     let displayLabel = `Graph ${id.slice(0, 8)}`;
     const labelText = runLabels[id];
     const isResolvingLabel = labelText === undefined;
     if (labelText) {
-      displayLabel = labelText;
+      displayLabel = formatManagedAttachmentDisplayLabel(labelText);
     }
     return (
       <RunItem
@@ -548,17 +768,50 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <span
             className="run-dot running-pulse"
           />
-        ) : isUnread ? (
-          <span
-            className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
-          />
         ) : null}
-        <span className={`run-title-text ${isResolvingLabel ? "is-resolving" : ""}`}>
-          {displayLabel}
+        <span className="run-title-slot">
+          <span
+            key={isThisRunActive ? "active" : "idle"}
+            className={`run-title-text ${isResolvingLabel ? "is-resolving" : ""}`}
+          >
+            {displayLabel}
+          </span>
         </span>
       </RunItem>
     );
   });
+
+  const projectsViewDirection = showArchivedProjects ? 1 : -1;
+  const runsViewDirection = showArchivedRuns ? 1 : -1;
+  const projectsViewKey = showArchivedProjects ? "archived" : "active";
+  const runsViewKey = showArchivedRuns ? "archived" : "active";
+
+  const projectsListContent = (
+    <>
+      {reduceMotion ? projectCards : <AnimatePresence onExitComplete={() => setProjectExitActive(false)}>{projectCards}</AnimatePresence>}
+      {visibleProjects.length === 0 && (
+        <div ref={projectsPlaceholderRef} className="projects-placeholder">
+          <span>{showArchivedProjects ? t("暂无已归档工作区") : t("暂无工作区")}</span>
+        </div>
+      )}
+    </>
+  );
+
+  const runsListContent = (
+    <>
+      {reduceMotion
+        ? runCards
+        : <AnimatePresence key={activeRepoKey}>{runCards}</AnimatePresence>}
+      {visibleRuns.length === 0 && (
+        <div className="run-placeholder">
+          <span>{showArchivedRuns ? t("暂无已归档对话") : t("暂无对话记录")}</span>
+        </div>
+      )}
+    </>
+  );
+
+  const isMenuProjectArchived = Boolean(projectContextMenu?.project.archived);
+  const isMenuRunArchived = Boolean(runContextMenu && archivedRunIds?.has(runContextMenu.runId));
 
   return (
     <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label={t("侧边栏")}>
@@ -582,6 +835,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         <div className="section-actions">
           <button
             type="button"
+            className={`sidebar-archive-btn${showArchivedProjects ? " is-active" : ""}`}
+            aria-label={showArchivedProjects ? t("返回工作区列表") : t("查看已归档工作区")}
+            aria-pressed={showArchivedProjects}
+            aria-hidden={isCollapsed || undefined}
+            tabIndex={isCollapsed ? -1 : undefined}
+            onClick={toggleArchivedProjects}
+          >
+            <Inbox size={16} strokeWidth={1.75} />
+          </button>
+          <button
+            type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
@@ -593,30 +857,64 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className={`projects-list${projectExitActive ? " is-removing" : ""}`} inert={isCollapsed}>
-        {reduceMotion ? projectCards : <AnimatePresence onExitComplete={() => setProjectExitActive(false)}>{projectCards}</AnimatePresence>}
-        {projects.length === 0 && (
-          <div ref={projectsPlaceholderRef} className="projects-placeholder">
-            <span>{t("暂无工作区")}</span>
-          </div>
+      <div ref={projectsListRef} className={`projects-list${projectExitActive ? " is-removing" : ""}`} inert={isCollapsed}>
+        {reduceMotion ? (
+          <div className="projects-list-view">{projectsListContent}</div>
+        ) : (
+          <AnimatePresence mode="wait" initial={false} custom={projectsViewDirection}>
+            <motion.div
+              key={projectsViewKey}
+              className="projects-list-view"
+              custom={projectsViewDirection}
+              variants={LIST_VIEW_VARIANTS}
+              initial="enter"
+              animate="center"
+              exit="exit"
+            >
+              {projectsListContent}
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
 
       <div className="nav-section runs-label">
         <span>Conversation</span>
         <div className="section-actions">
+          {onOpenSearch && (
+            <button
+              type="button"
+              className="sidebar-archive-btn"
+              aria-label={t("搜索当前工作区对话 (⌘G / Ctrl+G)")}
+              aria-hidden={isCollapsed || undefined}
+              tabIndex={isCollapsed ? -1 : undefined}
+              onClick={onOpenSearch}
+            >
+              <Search size={15} strokeWidth={1.85} />
+            </button>
+          )}
+          <button
+            type="button"
+            className={`sidebar-archive-btn${showArchivedRuns ? " is-active" : ""}`}
+            aria-label={showArchivedRuns ? t("返回对话列表") : t("查看已归档对话")}
+            aria-pressed={showArchivedRuns}
+            aria-hidden={isCollapsed || undefined}
+            tabIndex={isCollapsed ? -1 : undefined}
+            onClick={toggleArchivedRuns}
+          >
+            <Inbox size={16} strokeWidth={1.75} />
+          </button>
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("新建对话")}
-            onClick={onNewConversation}
+            onClick={handleNewConversationClick}
           >
             <Plus size={18} />
           </button>
         </div>
       </div>
 
-      <div className="runs-list" inert={isCollapsed}>
+      <div ref={runsListRef} className="runs-list" inert={isCollapsed}>
         {!isReady ? (
           <div className="sidebar-skeleton-wrap" aria-hidden="true">
             <div className="sidebar-skeleton-item">
@@ -641,17 +939,22 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               </div>
             </div>
           </div>
+        ) : reduceMotion ? (
+          <div className="runs-list-view">{runsListContent}</div>
         ) : (
-          <>
-            {reduceMotion
-              ? runCards
-              : <AnimatePresence key={workspaceKey(activeRepo)}>{runCards}</AnimatePresence>}
-            {runs.length === 0 && (
-              <div className="run-placeholder">
-                <span>{t("暂无对话记录")}</span>
-              </div>
-            )}
-          </>
+          <AnimatePresence mode="wait" initial={false} custom={runsViewDirection}>
+            <motion.div
+              key={runsViewKey}
+              className="runs-list-view"
+              custom={runsViewDirection}
+              variants={LIST_VIEW_VARIANTS}
+              initial="enter"
+              animate="center"
+              exit="exit"
+            >
+              {runsListContent}
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
 
@@ -690,6 +993,24 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <Copy size={14} />
             <span>{t("复制仓库路径")}</span>
           </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="context-menu-item"
+            onClick={() => {
+              const project = projectContextMenu.project;
+              setProjectContextMenu(null);
+              if (isMenuProjectArchived) onUnarchiveProject(project);
+              else {
+                if (workspaceKey(project.path) === activeRepoKey) setShowArchivedRuns(false);
+                onArchiveProject(project);
+              }
+            }}
+          >
+            {isMenuProjectArchived ? <RotateCcw size={14} strokeWidth={1.85} /> : <Inbox size={14} strokeWidth={1.85} />}
+            <span>{isMenuProjectArchived ? t("取消归档工作区") : t("归档工作区")}</span>
+          </button>
           <div className="context-menu-divider" />
           <button
             type="button"
@@ -711,7 +1032,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       {runContextMenu && (
         <ContextMenu
           anchor={runContextMenu}
-          label={runLabels[runContextMenu.runId] || `Graph ${runContextMenu.runId.slice(0, 8)}`}
+          label={runLabels[runContextMenu.runId]
+            ? formatManagedAttachmentDisplayLabel(runLabels[runContextMenu.runId])
+            : `Graph ${runContextMenu.runId.slice(0, 8)}`}
           onClose={() => setRunContextMenu(null)}
         >
           <button
@@ -741,6 +1064,22 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           >
             <Copy size={14} />
             <span>{t("复制提示词")}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="context-menu-item"
+            disabled={runContextMenu.runId.startsWith("pending-")}
+            onClick={() => {
+              const runId = runContextMenu.runId;
+              setRunContextMenu(null);
+              if (isMenuRunArchived) onUnarchiveRun(runId);
+              else onArchiveRun(runId);
+            }}
+          >
+            {isMenuRunArchived ? <RotateCcw size={14} strokeWidth={1.85} /> : <Inbox size={14} strokeWidth={1.85} />}
+            <span>{isMenuRunArchived ? t("取消归档对话") : t("归档对话")}</span>
           </button>
           <div className="context-menu-divider" />
           <button

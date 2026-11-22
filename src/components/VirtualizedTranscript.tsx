@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { rowOffsets, rowAt, visibleRows, visibleTranscriptRows } from "../services/transcriptLayout";
-import { type ChatMessage, type ImageAttachment, TranscriptItem } from "../types";
+import { type ChatMessage, type FileAttachment, type ImageAttachment, TranscriptItem } from "../types";
 import { plannerUserTurnKey } from "../services/plannerUserTurns";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { closeThinkingItems } from "../services/thinkingTranscript";
@@ -13,8 +13,18 @@ import { Terminal } from "lucide-react";
 import { shareJson } from "../services/structuralSharing";
 import { VirtualizedList } from "./VirtualizedList";
 import { TranscriptRow } from "./TranscriptRow";
+import type { CardsTransitionPhase } from "./ActivitySummaryRow";
 import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
-import type { LiveSteerMarker } from "../lib/pendingSteers";
+import { observeElementResize } from "../services/sharedResizeObserver";
+import type { InlineSteerAttachment, LiveSteerMarker } from "../lib/pendingSteers";
+import {
+  applyHydratedCardPatches,
+  collectHydrationRanges,
+  EAGER_SUMMARY_HYDRATION_MAX_BYTES,
+  itemHydrationRanges,
+  totalHydrationRangeBytes,
+  type HydratedCardPatch,
+} from "../services/cardHydration";
 
 const hot = (import.meta as ImportMeta & { hot?: { dispose(callback: () => void): void } }).hot;
 hot?.dispose(() => invalidateTranscriptParseCache());
@@ -35,9 +45,12 @@ interface VirtualizedTranscriptProps {
   compact?: boolean;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
+  skipLeadingUserTurn?: boolean;
   /** When set, only these normalized user texts render as transcript rows.
    * Execution transcripts use it for steers without duplicating owned turns. */
   userTurnTexts?: readonly string[];
+  /** Authoritative request IDs for steers rendered inline even if rewritten. */
+  userTurnRequestIds?: readonly string[];
   /** The source execution is terminal: unterminated live markers display as interrupted, not running. */
   settled?: boolean;
   /** In a composed Planning transcript only this revision is still live. Older
@@ -64,9 +77,36 @@ interface VirtualizedTranscriptProps {
   /** Reports the user turns actually present in the transcript, and whether the
    * loaded window starts at the transcript's first byte. Steer bubbles outside
    * the transcript stay visible until their inline copy is parsed. */
-  onInlineUserTurnsChange?: (texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => void;
+  onInlineUserTurnsChange?: (
+    texts: string[],
+    complete: boolean,
+    turns: { text: string; offset?: number; requestId?: string }[],
+    end?: number,
+    start?: number,
+    steerOffsets?: Readonly<Record<string, number>>,
+    steerOffsetsAuthoritative?: boolean,
+  ) => void;
   outputEndOffset?: number;
+  steerOffsets?: Readonly<Record<string, number>>;
+  steerOffsetsAuthoritative?: boolean;
   liveSteers?: readonly LiveSteerMarker[];
+  inlineSteerAttachments?: readonly InlineSteerAttachment[];
+  /** Collapse thinking/tool/error cards into inline Codex-style summary rows. */
+  cardsCollapsed?: boolean;
+  cardsTransition?: CardsTransitionPhase;
+  /** Called when a user expands an individual summary row so compact mode can
+   * upgrade on demand to load full tool results and thinking bodies when the
+   * backend does not provide per-record raw byte ranges. */
+  onExpandSummary?: () => void;
+  /** Hydrated card payloads keyed by `hydrationKeyForItem(item)`. */
+  hydratedCards?: ReadonlyMap<string, HydratedCardPatch>;
+  /** Keys currently awaiting targeted range hydration. */
+  hydratingKeys?: ReadonlySet<string>;
+  /** Targeted on-demand hydration for one or more omitted cards. */
+  onHydrateItems?: (items: readonly TranscriptItem[]) => void;
+  /** Skip entrance animations for already-running cards in the initial loaded
+   * window when entering an ongoing execution; later live chunks still animate. */
+  suppressInitialAppear?: boolean;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -75,9 +115,7 @@ function MeasuredRow({ id, measure, children }: { id: string; measure: (id: stri
     const element = ref.current!;
     const update = () => measure(id, element.getBoundingClientRect().height);
     update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
+    return observeElementResize(element, update);
   }, [id, measure]);
   return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root" }}>{children}</div>;
 }
@@ -176,12 +214,13 @@ function annotateSegmentItems(
   items: TranscriptItem[], previousItems: TranscriptItem[],
   mode: "live" | "prepend" | "fresh", settled: boolean, inline: boolean,
   liveThinkingIds: Set<string>, liveThinkingKeys: Set<string>,
+  suppressInitialAppear = false,
 ): TranscriptItem[] {
   const previousIds = mode === "live" ? new Set(previousItems.map(item => item.id)) : null;
   return items.map(item => {
     const isNewInLiveChunk = previousIds !== null && !previousIds.has(item.id);
     if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
-      const shouldAnimate = !settled && (inline ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
+      const shouldAnimate = !settled && (inline || suppressInitialAppear ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
       item = { ...item, animateAppear: shouldAnimate };
     }
     if (item.role === "user" && item.animateAppear === undefined) {
@@ -226,7 +265,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   compact = false,
   showUserTurns = false,
   skipFirstUser = false,
+  skipLeadingUserTurn = false,
   userTurnTexts,
+  userTurnRequestIds,
   settled = false,
   liveSource,
   sourceOrder,
@@ -240,12 +281,24 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   onCompactingChange,
   onInlineUserTurnsChange,
   outputEndOffset,
+  steerOffsets,
+  steerOffsetsAuthoritative,
   liveSteers,
+  inlineSteerAttachments,
+  cardsCollapsed = false,
+  cardsTransition = "idle",
+  onExpandSummary,
+  hydratedCards,
+  hydratingKeys,
+  onHydrateItems,
+  suppressInitialAppear = false,
 }) => {
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
+  const expandedSummaryMetaRef = useRef(new Map<string, { toolCallIds: string[]; ordinalFromEnd: number }>());
+  const itemsSnapshotRef = useRef<TranscriptItem[]>([]);
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoFollowRef = useRef(false);
   const resumeAutoFollowFrameRef = useRef<number | null>(null);
@@ -260,10 +313,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const leadingFragmentRef = useRef(startOffset > 0);
   const inputStartRef = useRef(startOffset);
   const userTurnTextsKey = JSON.stringify(userTurnTexts ?? null);
+  const userTurnRequestIdsKey = JSON.stringify(userTurnRequestIds ?? null);
   // Divider placement is part of the parse identity: a newly known review turn
   // must rebuild the composed rows even when every loaded segment is unchanged.
   const dividerKey = dividerSources?.size ? `:${[...dividerSources].sort().join("\u0000")}` : "";
-  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`);
+  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${skipLeadingUserTurn}:${userTurnTextsKey}:${userTurnRequestIdsKey}${dividerKey}`);
   const settledRef = useRef(settled);
   const liveSourceRef = useRef(liveSource);
   const sharedViewport = inline || compact;
@@ -345,7 +399,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return false;
     }
 
-    const parseOptions = `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`;
+    const parseOptions = `${showUserTurns}:${skipFirstUser}:${skipLeadingUserTurn}:${userTurnTextsKey}:${userTurnRequestIdsKey}${dividerKey}`;
     // Steady-state renders hand back the identical string; skip all scanning.
     // A changed live revision still rebuilds the composed rows from cached
     // segment states so older turns can settle without re-reading their JSONL.
@@ -397,7 +451,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           Object.assign(state, cached.state);
           state.parsedChars = cached.parsedChars;
           state.items = annotateSegmentItems(cached.items, [], "fresh", settled, inline,
-            liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+            liveThinkingIdsRef.current, liveThinkingKeysRef.current, suppressInitialAppear);
           state.pendingTools = new Map(state.items.filter(item => item.type === "tool_call" && item.status === "running" && item.toolCallId)
             .map(item => [item.toolCallId!, item]));
           changed = true;
@@ -410,7 +464,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           state.byteOffset = parsed.endByteOffset;
           state.parsedChars = lastNewline + 1;
           state.items = annotateSegmentItems(parsed.currentItems, [], "fresh", settled, inline,
-            liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+            liveThinkingIdsRef.current, liveThinkingKeysRef.current, suppressInitialAppear);
         }
         changed = true;
         return state;
@@ -477,7 +531,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           const parsed = parseTranscriptChunkLines(lines, prependedItems, state.pendingTools, prependState, segmentOptions, tailItems);
           const closedPrependedItems = closeThinkingItems(parsed.currentItems);
           const merged = annotateSegmentItems([...closedPrependedItems, ...tailItems], previousItems,
-            "prepend", settled, inline, liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+            "prepend", settled, inline, liveThinkingIdsRef.current, liveThinkingKeysRef.current, suppressInitialAppear);
           state.byteOffset = parsed.endByteOffset;
           state.assistantStartIndex += closedPrependedItems.length;
           state.items = shareJson(previousItems, merged);
@@ -500,7 +554,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             state.byteOffset = parsed.endByteOffset;
             state.parsedChars += chunk.length;
             state.items = annotateSegmentItems(parsed.currentItems, previousItems, "live", settled, inline,
-              liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+              liveThinkingIdsRef.current, liveThinkingKeysRef.current, suppressInitialAppear);
             if ((state.source === liveSource || state.source === previousLiveSource) &&
                 hasNewAssistantText(previousItems, state.items)) liveTextVersionRef.current += 1;
             changed = true;
@@ -575,7 +629,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         prependedItems,
         pendingToolsRef.current,
         prependState,
-        { showUserTurns, skipFirstUser: skipFirstUser && startOffset === 0, userTurnTexts },
+        { showUserTurns, skipFirstUser: skipFirstUser && startOffset === 0, skipLeadingUserTurn: skipLeadingUserTurn && startOffset === 0, userTurnTexts, userTurnRequestIds },
         currentTailItems,
       );
 
@@ -631,7 +685,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       byteOffsetRef.current = startOffset;
       sourceRef.current = "output";
       leadingFragmentRef.current = startOffset > 0;
-      const cached = readTranscriptParse(parseCacheKey, "output", rawOutput, startOffset, { showUserTurns, skipFirstUser, userTurnTexts });
+      const cached = readTranscriptParse(parseCacheKey, "output", rawOutput, startOffset, { showUserTurns, skipFirstUser, skipLeadingUserTurn, userTurnTexts, userTurnRequestIds });
       if (cached) {
         const state = cached.state;
         lastProcessedPosRef.current = cached.parsedChars;
@@ -647,7 +701,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         userMessageStartsRef.current = state.userMessageStarts;
         compactingRef.current = state.compacting;
         itemsRef.current = annotateSegmentItems(cached.items, [], "fresh", settled, inline,
-          liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+          liveThinkingIdsRef.current, liveThinkingKeysRef.current, suppressInitialAppear);
         for (const item of itemsRef.current) if (item.type === "thinking" && item.status === "running") {
           liveThinkingIdsRef.current.add(item.id);
           if (item.content?.trim()) liveThinkingKeysRef.current.add(`${item.thinkingContentIndex ?? 0}_${item.content.trim()}`);
@@ -696,7 +750,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       currentItems,
       pendingTools,
       forwardState,
-      { showUserTurns, skipFirstUser, userTurnTexts },
+      { showUserTurns, skipFirstUser, skipLeadingUserTurn: skipLeadingUserTurn && startOffset === 0, userTurnTexts, userTurnRequestIds },
     );
 
     sourceRef.current = result.endSource;
@@ -711,11 +765,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     compactingRef.current = forwardState.compacting;
 
     currentItems = result.currentItems;
-    const previousIds = new Set(previousItems.map(item => item.id));
-    currentItems = currentItems.map(item => {
-      const isNewInLiveChunk = isIncrementalLive && !previousIds.has(item.id);
+    const previousIds = isIncrementalLive ? new Set(previousItems.map(item => item.id)) : null;
+    currentItems = currentItems.map((item, index) => {
+      // Unchanged historical rows keep their exact object identity in O(1),
+      // avoiding per-chunk metadata scans and deep structural-sharing walks.
+      if (isIncrementalLive && previousItems[index] === item) return item;
+      const isNewInLiveChunk = isIncrementalLive && !previousIds!.has(item.id);
       if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
-        const shouldAnimate = !settled && (inline ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
+        const shouldAnimate = !settled && (inline || suppressInitialAppear ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
         item = { ...item, animateAppear: shouldAnimate };
       }
       if (item.role === "user" && item.animateAppear === undefined) {
@@ -739,10 +796,22 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     });
 
     if (isIncrementalLive && hasNewAssistantText(previousItems, currentItems)) liveTextVersionRef.current += 1;
-    itemsRef.current = shareJson(previousItems, currentItems);
+    if (isIncrementalLive) {
+      let changed = currentItems.length !== previousItems.length;
+      const shared = currentItems.map((item, index) => {
+        const prev = previousItems[index];
+        if (prev === item) return prev;
+        const next = prev ? shareJson(prev, item) : item;
+        if (next !== prev) changed = true;
+        return next;
+      });
+      itemsRef.current = changed ? shared : previousItems;
+    } else {
+      itemsRef.current = shareJson(previousItems, currentItems);
+    }
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, userTurnTextsKey, dividerKey, startOffset, settled, liveSource, inline, parseCacheKey]);
+  }, [showUserTurns, skipFirstUser, skipLeadingUserTurn, userTurnTextsKey, userTurnRequestIdsKey, dividerKey, startOffset, settled, liveSource, inline, suppressInitialAppear, parseCacheKey]);
 
   const computeCompacting = (): boolean => {
     if (segmentedRef.current) {
@@ -787,7 +856,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   useLayoutEffect(() => {
     saveParseRef.current = () => {
       if (!parseCacheKey || lastRawOutputRef.current !== output || inputStartRef.current !== startOffset ||
-        parseOptionsRef.current !== `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`) return;
+        parseOptionsRef.current !== `${showUserTurns}:${skipFirstUser}:${skipLeadingUserTurn}:${userTurnTextsKey}:${userTurnRequestIdsKey}${dividerKey}`) return;
       if (segmentedRef.current) {
         const first = segmentStartsRef.current.keys().next().value;
         // Chronological writes keep the newest revisions most recent in LRU.
@@ -807,7 +876,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             finalResponseSuppressed: finalResponseSuppressedRef.current, seenFirstUser: seenFirstUserRef.current,
             pendingUserStart: pendingUserStartRef.current, assistantStartIndex: assistantStartIndexRef.current,
             userMessageStarts: userMessageStartsRef.current, compacting: compactingRef.current,
-          } }, { showUserTurns, skipFirstUser, userTurnTexts });
+          } }, { showUserTurns, skipFirstUser, skipLeadingUserTurn, userTurnTexts, userTurnRequestIds });
       }
     };
   });
@@ -858,8 +927,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       rows = [...rows];
       for (const insertion of insertions.reverse()) rows.splice(insertion.index, 0, ...insertion.rows);
     }
-    return visibleTranscriptRows(rows, starts);
-  }, [parsedItems, settled, sourceUserFallbacks, output]);
+    rows = applyHydratedCardPatches(rows, hydratedCards, hydratingKeys);
+    return visibleTranscriptRows(rows, starts, { collapseCards: cardsCollapsed });
+  }, [parsedItems, settled, sourceUserFallbacks, output, cardsCollapsed, hydratedCards, hydratingKeys]);
+  const hasRangeSupportRef = useRef(false);
+  hasRangeSupportRef.current = parsedItems.some(
+    item => Boolean(item.rawRange || item.rawArgsRange || item.rawResultRange),
+  );
   const items = projected.rows;
   // Missing revisions keep a boundary before the next loaded revision, even
   // when their rows have not loaded or have been virtualized out of the DOM.
@@ -872,34 +946,74 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     }
     sourceStarts.reverse();
   }
-  const liveSteerRows = useMemo(() => {
-    const rows = new Map<string, LiveSteerMarker>();
+  const steerRowAttachments = useMemo(() => {
+    const rows = new Map<string, { text?: string; images?: ImageAttachment[]; files?: FileAttachment[] }>();
+    const hasLive = Boolean(liveSteers?.length);
+    const hasInline = Boolean(inlineSteerAttachments?.length);
+    if (!hasLive && !hasInline) return rows;
+    const byRequestId = new Map<string, { text?: string; images?: ImageAttachment[]; files?: FileAttachment[] }>();
+    for (const steer of inlineSteerAttachments ?? []) {
+      if (steer.requestId) byRequestId.set(steer.requestId, steer);
+    }
     for (const steer of liveSteers ?? []) {
-      const matches = items.filter(item => item.role === "user" && item.content === steer.text &&
-        item.userTurnOffset !== undefined && item.userTurnOffset >= steer.afterOffset);
-      const item = matches[steer.occurrence - 1];
-      if (item) rows.set(item.id, steer);
+      if (steer.requestId) byRequestId.set(steer.requestId, { ...byRequestId.get(steer.requestId), ...steer });
+    }
+    const matchedRequestIds = new Set<string>();
+    const unmarkedUserItems: TranscriptItem[] = [];
+    for (const item of items) {
+      if (item.role !== "user") continue;
+      if (item.steerRequestId) {
+        matchedRequestIds.add(item.steerRequestId);
+        const meta = byRequestId.get(item.steerRequestId);
+        if (meta) rows.set(item.id, meta);
+      } else {
+        unmarkedUserItems.push(item);
+      }
+    }
+    if (unmarkedUserItems.length > 0) {
+      for (const steer of liveSteers ?? []) {
+        if (steer.requestId && matchedRequestIds.has(steer.requestId)) continue;
+        const matches = unmarkedUserItems.filter(item => item.content === steer.text &&
+          item.userTurnOffset !== undefined && item.userTurnOffset >= steer.afterOffset);
+        const item = matches[steer.occurrence - 1];
+        if (item && !rows.has(item.id)) rows.set(item.id, steer);
+      }
+      for (const steer of inlineSteerAttachments ?? []) {
+        if (!steer.images?.length && !steer.files?.length) continue;
+        if (steer.requestId && matchedRequestIds.has(steer.requestId)) continue;
+        const matches = unmarkedUserItems.filter(item => item.content === steer.text);
+        const item = startOffset === 0
+          ? matches[steer.inlineSteerOrdinal]
+          : (matches.find(candidate => !rows.has(candidate.id) && (steer.images?.length ? !!candidate.images?.length : true))
+              ?? matches.find(candidate => !rows.has(candidate.id)));
+        if (item && !rows.has(item.id)) rows.set(item.id, steer);
+      }
     }
     return rows;
-  }, [items, liveSteers]);
+  }, [items, liveSteers, inlineSteerAttachments, startOffset]);
   // Pause recovery counts text-only turns; an attachment with the same text
   // must not make a later unread text steer look consumed.
   const inlineUserTurns = useMemo(() => items
     .filter(item => {
-      const marker = liveSteerRows.get(item.id);
-      return item.role === "user" && !marker?.images?.length && !marker?.files?.length;
+      const attachment = steerRowAttachments.get(item.id);
+      return item.role === "user" && !item.images?.length && !item.files?.length &&
+        !attachment?.images?.length && !attachment?.files?.length;
     })
-    .map(item => item.content || ""), [items, liveSteerRows]);
+    .map(item => (item.steerRequestId && steerRowAttachments.get(item.id)?.text) || item.content || ""), [items, steerRowAttachments]);
   const inlineUserTurnsKey = inlineUserTurns.join("\u0000");
   // A window that starts at byte 0 is a complete view of the conversation; a
   // tail page cannot prove which repeated turns Pi already consumed.
   const inlineUserTurnsComplete = startOffset === 0;
   const inlineTurnsWithOffsets = useMemo(() => items.filter(item => item.role === "user")
-    .map(item => ({ text: item.content || "", offset: item.userTurnOffset })), [items]);
-  const inlineOffsetsKey = inlineTurnsWithOffsets.map(turn => `${turn.offset ?? ""}:${turn.text}`).join("\u0000");
+    .map(item => ({ text: item.content || "", offset: item.userTurnOffset, requestId: item.steerRequestId })), [items]);
+  const inlineOffsetsKey = inlineTurnsWithOffsets.map(turn => `${turn.offset ?? ""}:${turn.requestId ?? ""}:${turn.text}`).join("\u0000");
+  const steerOffsetsKey = steerOffsets ? JSON.stringify(steerOffsets) : "";
   useLayoutEffect(() => {
-    onInlineUserTurnsChangeRef.current?.(inlineUserTurns, inlineUserTurnsComplete, inlineTurnsWithOffsets, outputEndOffset);
-  }, [inlineUserTurnsKey, inlineOffsetsKey, showUserTurns, inlineUserTurnsComplete, outputEndOffset]);
+    onInlineUserTurnsChangeRef.current?.(
+      inlineUserTurns, inlineUserTurnsComplete, inlineTurnsWithOffsets, outputEndOffset,
+      startOffset, steerOffsets, steerOffsetsAuthoritative,
+    );
+  }, [inlineUserTurnsKey, inlineOffsetsKey, showUserTurns, inlineUserTurnsComplete, outputEndOffset, startOffset, steerOffsetsKey, steerOffsetsAuthoritative]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);
@@ -965,6 +1079,48 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   const handleExpandedChange = useCallback((id: string, expanded: boolean, card?: HTMLElement) => {
     expandedRows.current.set(id, expanded);
+    if (id.startsWith("summary_")) {
+      if (expanded) {
+        const summaries = itemsSnapshotRef.current.filter(row => row.type === "activity_summary");
+        const summaryIndex = summaries.findIndex(row => row.id === id);
+        let target: TranscriptItem | undefined;
+        if (summaryIndex >= 0) {
+          target = summaries[summaryIndex];
+          const toolCallIds = (target.summaryItems ?? [])
+            .map(child => child.toolCallId)
+            .filter((callId): callId is string => Boolean(callId));
+          expandedSummaryMetaRef.current.set(id, {
+            toolCallIds,
+            ordinalFromEnd: summaries.length - 1 - summaryIndex,
+          });
+        }
+        const children = target?.summaryItems ?? [];
+        const omittedChildren = children.filter(child => child.bodyOmitted);
+        const ranges = collectHydrationRanges(omittedChildren);
+        if (onHydrateItems && ranges.length > 0) {
+          // Eagerly hydrate reasonably-sized groups in parallel with the 260ms
+          // open animation; huge groups defer hydration to individual child clicks.
+          if (totalHydrationRangeBytes(ranges) <= EAGER_SUMMARY_HYDRATION_MAX_BYTES) {
+            onHydrateItems(omittedChildren);
+          }
+        } else if (!hasRangeSupportRef.current) {
+          // Older backend or mock summary without per-record raw ranges: fall
+          // back to upgrading the window so expanding still exposes full bodies.
+          onExpandSummary?.();
+        }
+      } else {
+        expandedSummaryMetaRef.current.delete(id);
+      }
+    } else if (expanded) {
+      const target = itemsSnapshotRef.current.find(row => row.id === id);
+      if (target?.bodyOmitted) {
+        if (onHydrateItems && itemHydrationRanges(target).length > 0) {
+          onHydrateItems([target]);
+        } else {
+          onExpandSummary?.();
+        }
+      }
+    }
     suppressAutoFollowRef.current = true;
     isUserScrolledUpRef.current = true;
     setExpansionVersion(value => value + 1);
@@ -986,7 +1142,29 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       suppressAutoFollowRef.current = false;
       syncScrollState();
     }, 260);
-  }, [onUserResize, syncScrollState]);
+  }, [onExpandSummary, onHydrateItems, onUserResize, syncScrollState]);
+
+  const handleChildExpandedChange = useCallback((child: TranscriptItem, expanded: boolean) => {
+    if (!expanded || !child.bodyOmitted) return;
+    if (onHydrateItems && itemHydrationRanges(child).length > 0) {
+      onHydrateItems([child]);
+    } else {
+      onExpandSummary?.();
+    }
+  }, [onExpandSummary, onHydrateItems]);
+
+  useEffect(() => {
+    if (cardsCollapsed) return;
+    let removed = false;
+    expandedSummaryMetaRef.current.clear();
+    for (const id of [...expandedRows.current.keys()]) {
+      if (id.startsWith("summary_")) {
+        expandedRows.current.delete(id);
+        removed = true;
+      }
+    }
+    if (removed) setExpansionVersion(value => value + 1);
+  }, [cardsCollapsed]);
 
   useEffect(() => () => {
     if (resumeAutoFollowFrameRef.current !== null) {
@@ -1110,6 +1288,32 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   }, [offsets, getTranscriptRelativeScroll]);
 
   const relativeScrollTop = sharedViewport ? 0 : getTranscriptRelativeScroll();
+  itemsSnapshotRef.current = items;
+  if (cardsCollapsed && expandedSummaryMetaRef.current.size > 0) {
+    const summaries = items.filter(row => row.type === "activity_summary");
+    const summaryIds = new Set(summaries.map(row => row.id));
+    for (const [savedId, meta] of [...expandedSummaryMetaRef.current.entries()]) {
+      if (summaryIds.has(savedId)) continue;
+      const byToolCall = meta.toolCallIds.length > 0
+        ? summaries.find(row => (row.summaryItems ?? []).some(child => child.toolCallId && meta.toolCallIds.includes(child.toolCallId)))
+        : undefined;
+      const byOrdinal = summaries[summaries.length - 1 - meta.ordinalFromEnd];
+      const matched = byToolCall ?? byOrdinal;
+      if (matched) {
+        expandedRows.current.delete(savedId);
+        expandedRows.current.set(matched.id, true);
+        expandedSummaryMetaRef.current.delete(savedId);
+        const nextIndex = summaries.indexOf(matched);
+        expandedSummaryMetaRef.current.set(matched.id, {
+          toolCallIds: (matched.summaryItems ?? [])
+            .map(child => child.toolCallId)
+            .filter((callId): callId is string => Boolean(callId)),
+          ordinalFromEnd: summaries.length - 1 - nextIndex,
+        });
+      }
+    }
+  }
+
   const maxScrollTop = Math.max(0, totalOffsetsHeight - containerHeight);
   const targetScrollTop = isUserScrolledUpRef.current
     ? Math.min(relativeScrollTop, maxScrollTop)
@@ -1123,14 +1327,15 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   const startEdit = useCallback((id: string, text: string) => { setEditingUser(id); setUserDraft(text); }, []);
   const cancelEdit = useCallback(() => setEditingUser(null), []);
-  const renderRow = useCallback((item: TranscriptItem) => <TranscriptRow item={item}
-    expanded={expandedRows.current.get(item.id)} onExpandedChange={handleExpandedChange}
+  const renderRow = useCallback((item: TranscriptItem, _index?: number, allowTransition = true) => <TranscriptRow item={item}
+    expanded={expandedRows.current.get(item.id)} cardsTransition={allowTransition ? cardsTransition : "idle"} onExpandedChange={handleExpandedChange} onChildResize={onUserResize}
+    onChildExpandedChange={handleChildExpandedChange}
     editing={editingUser === item.id} draft={editingUser === item.id ? userDraft : ""}
     onDraftChange={setUserDraft} onStartEdit={startEdit} onCancelEdit={cancelEdit} onEditUser={onEditUser}
-    steerAttachments={liveSteerRows.get(item.id)} />,
-    [handleExpandedChange, editingUser, userDraft, startEdit, cancelEdit, onEditUser, liveSteerRows]);
+    steerAttachments={steerRowAttachments.get(item.id)} />,
+    [cardsTransition, handleExpandedChange, handleChildExpandedChange, onUserResize, editingUser, userDraft, startEdit, cancelEdit, onEditUser, steerRowAttachments]);
 
-  const isEmptyTranscript = settled && output.length > 0 && items.length === 0;
+  const isEmptyTranscript = settled && items.length === 0;
 
   return (
     <div
@@ -1143,7 +1348,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={10} sourceStarts={sourceStarts} rowHeights={rowHeights}
+        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={10} overscan={cardsCollapsed ? 36 : 16} transitionPhase={cardsTransition} sourceStarts={sourceStarts} rowHeights={rowHeights}
           restoreAnchor={restoreAnchor} onRestoreScroll={onRestoreScroll} /> :
           <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
             {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}

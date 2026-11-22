@@ -33,13 +33,13 @@ boundary.
 
 ### macOS
 
-Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbox-exec`. Source-native Planner turns use host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy and the original Grapher installation (the source checkout or packaged app) are protected from writes, so an execution cannot modify Grapher's own code or the cache it loads from.
+Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbox-exec`. Source-native Planner turns use host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session, read-only access to the Run's external `attachment-inputs/` directories, and required host resources. The shared engine copy and the original Grapher installation (the source checkout or packaged app) are protected from writes, so an execution cannot modify Grapher's own code or the cache it loads from.
 
 ### Linux
 
 Private Graph executions, Planner turns and Mergers use bubblewrap. Source-native Planner execution does not use these private-workspace mounts. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Private Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
 
-The mount layout exposes the current private repository/session, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. A masked directory is made unreadable rather than left empty, so listing or traversing it fails with a permission error instead of a silent empty listing. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
+The mount layout exposes the current private repository/session, bind-mounts the Run's external `attachment-inputs/` directories read-only, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. A masked directory is made unreadable rather than left empty, so listing or traversing it fails with a permission error instead of a silent empty listing. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
 
 An outer Docker/Harbor container is **not** a substitute for these per-execution boundaries. See [Harbor requirements](../benchmarks/harbor.md#linux-task-environment).
 

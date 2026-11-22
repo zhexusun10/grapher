@@ -830,6 +830,64 @@ fn production_continue_fails_closed_when_an_active_session_is_missing() {
     assert!(error.contains("Cannot resume node session"), "{error}");
 }
 
+#[test]
+fn pause_before_session_persisted_recovers_initial_task_despite_startup_output() {
+    let routes: &[&str] = if cfg!(feature = "fixture") {
+        &["graph", "serial"]
+    } else {
+        &["serial"]
+    };
+    for &route in routes {
+        for run_wide in [false, true] {
+            let (_temp, _source, mut runtime) = setup(true, single());
+            runtime.set_route(route).unwrap();
+            runtime.approve().unwrap();
+            let first = runtime.jobs().unwrap().remove(0);
+            // Pi emits grapher_process_started immediately on spawn, before it
+            // finishes booting or flushes a .jsonl session file to disk.
+            runtime
+                .emit_outputs(vec![EventKind::Output {
+                    execution_id: first.execution.id.clone(),
+                    text: concat!(
+                        "{\"type\":\"grapher_process_started\",\"pid\":4321}\n",
+                        "[stderr] Warning: No project session found with id 'x'; creating a new session with that id.\n",
+                        "{\"type\":\"grapher_process_exited\",\"code\":null}\n"
+                    )
+                    .into(),
+                }])
+                .unwrap();
+            if run_wide {
+                runtime.pause(true).unwrap();
+            }
+            runtime
+                .request_execution_stop(if run_wide { None } else { Some("task") })
+                .unwrap();
+            runtime
+                .finish(&first.execution, Err("Execution stopped by user".into()))
+                .unwrap();
+            let root = runtime.root.clone();
+            drop(runtime);
+            runtime = Runtime::open(&root).unwrap();
+            assert_eq!(runtime.state.executions[0].pid, Some(4321));
+            assert!(runtime.state.executions[0].output_bytes > 0);
+            if run_wide {
+                runtime.pause(false).unwrap();
+            } else {
+                runtime.resume_node("task").unwrap();
+            }
+            let next = runtime.jobs().unwrap().remove(0);
+            assert!(
+                next.initial_recovery,
+                "{route} (run_wide={run_wide}): startup-only output without a session file must recover the initial task"
+            );
+            assert!(!next.continuation);
+            assert_eq!(next.task, "self-contained task");
+            assert_eq!(next.execution.attempt, 1);
+            assert_eq!(next.execution.session_id, first.execution.session_id);
+        }
+    }
+}
+
 #[cfg(feature = "fixture")]
 #[test]
 fn unmanaged_composition_failure_can_retry_without_forking_a_missing_session() {

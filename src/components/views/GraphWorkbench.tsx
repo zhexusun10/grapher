@@ -7,7 +7,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
   Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
-  AlertCircle, ChevronLeft, Plus
+  ChevronsDownUp, ChevronsUpDown, AlertCircle, ChevronLeft, Plus
 } from "lucide-react";
 import { motion, AnimatePresence, useAnimationControls, useIsPresent, useReducedMotion } from "motion/react";
 import {
@@ -33,8 +33,10 @@ import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollD
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ComposerDrafts, type RecalledMessage } from "../../services/composerDrafts";
-import { projectLiveSteerWithdrawals, projectWithdrawnSteers, inlineSteerKey, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../../lib/pendingSteers";
+import { projectLiveSteerWithdrawals, projectWithdrawnSteers, inlineSteerKey, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineSteerAttachment, type InlineUserTurnWindow, type LiveSteerMarker } from "../../lib/pendingSteers";
 import { ThinkingCard } from "../ThinkingCard";
+import { ActivitySummaryRow, beginCardsTransitionAnchor, cancelCardsTransitionAnchor, finishCardsTransitionAnchor, CARDS_TRANSITION_DURATION_MS, type CardsTransitionPhase } from "../ActivitySummaryRow";
+import { useCollapseCards, setCollapseCards } from "../../services/displayPreferences";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
 import { SessionTokenUsage } from "../SessionTokenUsage";
@@ -45,7 +47,7 @@ import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds, reviewPlanningIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINAL_OUTPUT_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture, notifyTranscriptContentGrowth } from "../../services/transcriptScroll";
-import { shouldDeferOlderExecutions } from "../../services/transcriptPaging";
+import { shouldDeferOlderExecutions, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../../services/transcriptPaging";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { plannerSteerRows, planningOutputSteerIds, type PlannerSteerRow } from "../../services/plannerSteers";
@@ -60,7 +62,7 @@ import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig } from "../../modelConfig";
 import { AnimatedUserTurn } from "../AnimatedUserTurn";
 import { useWorkspaceChanges } from "../../hooks/useWorkspaceChanges";
-import { WorkspaceChangesPanel, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
+import { WorkspaceChangesPane, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
 import { AnimatedDisclosure, getConversationViewport } from "../AnimatedDisclosure";
 import { useExecutionOverview } from "../../services/displayPreferences";
 
@@ -181,12 +183,6 @@ interface GraphWorkbenchProps {
   failedPlanning?: PlanningSummary | null;
 }
 
-/** Inline transcript rows currently carry text only; attached files/images stay
- * in the surrounding chat bubble so they cannot disappear while paging. */
-function canInlineSteerMessage(message: ChatMessage): boolean {
-  return !message.images?.length && !message.files?.length;
-}
-
 /** Repeated steers share an instruction. Give each durable Steered event its
  * chronological occurrence so an older event cannot claim the newer optimistic
  * copy the user just sent for the same execution. */
@@ -221,18 +217,19 @@ function matchesRecordedTurn(message: ChatMessage, event: GraphEvent, ordinal: n
 
 /** Replay a short entrance on the node itself whenever `token` changes.
  *
- * The topology footer unmounts when the pane collapses while `GraphWorkbench`
- * stays mounted, so a parent-owned effect never runs again on reopen and the
- * nodes would stay frozen at their invisible first frame. Keying them instead
- * would remount them, and a replaced keyed child in the footer row can stay on
- * screen beside its replacement, stacking two status labels. Owning the
- * controls here animates both the first mount and every later label change.
+ * Opening a Conversation paints the topology chrome immediately, and reopening
+ * a collapsed graph pane already fades the footer in as one unit. Only a later
+ * token transition while mounted replays this local reveal, avoiding duplicate
+ * entrances or remounting keyed children side by side.
  */
 function useFooterReveal(token: string, disabled: boolean | null, keyframes: Record<string, number[]>, duration: number) {
   const controls = useAnimationControls();
+  const previousTokenRef = useRef(token);
   useEffect(() => {
+    if (previousTokenRef.current === token) return;
+    previousTokenRef.current = token;
     if (disabled) return;
-    // `keyframes` is a literal at every call site; only the token replays it.
+    // `keyframes` is a literal at every call site; only a token change replays it.
     void controls.start(keyframes, { duration, ease: [0.22, 1, 0.36, 1] });
   }, [token, disabled, controls]);
   return controls;
@@ -244,11 +241,41 @@ function GraphPanePresence({ children }: { children: React.ReactNode }) {
   return <div className="graph-pane-presence" inert={!present} aria-hidden={!present || undefined}>{children}</div>;
 }
 
+/** GPU-composited slide/fade layer for Changes over the Topology Graph so
+ * toggling back and forth never unmounts/remounts React Flow. */
+function ChangesOverlayPresence({
+  reduceMotion,
+  onEntered,
+  children,
+}: {
+  reduceMotion: boolean | null;
+  onEntered: () => void;
+  children: React.ReactNode;
+}) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      className="changes-pane-overlay"
+      inert={!present || undefined}
+      aria-hidden={!present || undefined}
+      initial={reduceMotion ? false : { opacity: 0, x: 20 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 20 }}
+      transition={{ duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
+      onAnimationComplete={() => {
+        if (present) onEntered();
+      }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
 function FooterStatusLabel({ token, disabled, title, children }: {
   token: string; disabled: boolean | null; title?: string; children: React.ReactNode;
 }) {
   const controls = useFooterReveal(token, disabled, { opacity: [0, 1], y: [4, 0] }, 0.24);
-  return <motion.span initial={disabled ? false : { opacity: 0, y: 4 }} animate={controls} title={title}>{children}</motion.span>;
+  return <motion.span initial={false} animate={controls} title={title}>{children}</motion.span>;
 }
 
 function FooterControlsGroup({ token, disabled, children }: {
@@ -259,14 +286,14 @@ function FooterControlsGroup({ token, disabled, children }: {
   // Pause/Continue already enters with the pane and footer. A second reveal
   // makes this persistent control blink, especially when reopening a paused run.
   if (persistent) return <div>{children}</div>;
-  return <motion.div initial={disabled ? false : { opacity: 0, x: 6 }} animate={controls}>{children}</motion.div>;
+  return <motion.div initial={false} animate={controls}>{children}</motion.div>;
 }
 
 function FooterProgressLabel({ token, disabled, children }: {
   token: string; disabled: boolean | null; children: React.ReactNode;
 }) {
   const controls = useFooterReveal(token, disabled, { opacity: [0, 1] }, 0.32);
-  return <motion.span initial={disabled ? false : { opacity: 0 }} animate={controls}>{children}</motion.span>;
+  return <motion.span initial={false} animate={controls}>{children}</motion.span>;
 }
 
 /** Node failures can carry multi-line backend/stderr detail; keep it readable
@@ -365,7 +392,6 @@ interface WorkspaceDetailsPanelProps {
   /** Defaults to the node wording; Planner turns may use different workspaces. */
   label?: string;
   summaryAction?: React.ReactNode;
-  additionalDetails?: React.ReactNode;
   children: React.ReactNode;
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   onBeforeToggle?: () => void;
@@ -380,7 +406,6 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   workingLabel,
   label,
   summaryAction,
-  additionalDetails,
   children,
   scrollContainerRef,
   onBeforeToggle,
@@ -438,8 +463,6 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
         </button>
         {summaryAction}
       </div>
-
-      {additionalDetails}
 
       <AnimatedDisclosure
         open={open}
@@ -559,6 +582,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // could clear the previous view, so clearing it here would discard that first
   // report until the transcript happened to change again.
   const inlineTurnsView = `${state.runId}\u0000${selected}`;
+  const inlineTurnsViewRef = useRef(inlineTurnsView);
+  inlineTurnsViewRef.current = inlineTurnsView;
   const [inlineUserTurnWindows, setInlineUserTurnWindows] = useState<{
     view: string;
     windows: Record<string, InlineUserTurnWindow>;
@@ -572,17 +597,33 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // Bumped when a paused steer's text is returned to the composer. It remounts
   // the uncontrolled PromptBox so its defaultValue picks up the restored draft.
   const [composerEpoch, setComposerEpoch] = useState(0);
-  const handleInlineUserTurns = useCallback((execId: string, texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => {
-    const view = inlineTurnsView;
+  const handleInlineUserTurns = useCallback((
+    execId: string,
+    texts: string[],
+    complete: boolean,
+    turns: { text: string; offset?: number; requestId?: string }[],
+    end?: number,
+    start?: number,
+    steerOffsets?: Readonly<Record<string, number>>,
+    steerOffsetsAuthoritative?: boolean,
+  ) => {
+    const view = inlineTurnsViewRef.current;
     setInlineUserTurnWindows(prev => {
       const windows = prev.view === view ? prev.windows : {};
       const previous = windows[execId];
-      return previous && previous.complete === complete && previous.end === end && previous.texts.length === texts.length &&
-        previous.texts.every((text, index) => text === texts[index]) && previous.turns?.length === turns.length &&
-        previous.turns.every((turn, index) => turn.text === turns[index].text && turn.offset === turns[index].offset)
-        ? prev : { view, windows: { ...windows, [execId]: { texts, complete, turns, end } } };
+      const sameOffsets = previous?.steerOffsets === steerOffsets || (
+        !!previous?.steerOffsets && !!steerOffsets &&
+        Object.keys(previous.steerOffsets).length === Object.keys(steerOffsets).length &&
+        Object.entries(steerOffsets).every(([key, value]) => previous.steerOffsets?.[key] === value)
+      );
+      return previous && previous.complete === complete && previous.start === start && previous.end === end &&
+        previous.steerOffsetsAuthoritative === steerOffsetsAuthoritative && sameOffsets &&
+        previous.texts.length === texts.length && previous.texts.every((text, index) => text === texts[index]) &&
+        previous.turns?.length === turns.length &&
+        previous.turns.every((turn, index) => turn.text === turns[index].text && turn.offset === turns[index].offset && turn.requestId === turns[index].requestId)
+        ? prev : { view, windows: { ...windows, [execId]: { texts, complete, turns, start, end, steerOffsets, steerOffsetsAuthoritative } } };
     });
-  }, [inlineTurnsView]);
+  }, []);
   const [plannerHistoryCompacting, setPlannerHistoryCompacting] = useState(false);
   const handleAttemptCompacting = useCallback((execId: string, compacting: boolean) => {
     setCompactingAttempts((prev) => (!!prev[execId] === compacting ? prev : { ...prev, [execId]: compacting }));
@@ -642,17 +683,48 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     ? selectedPublicationMerger
     : (isNodeMergerSelected ? selectedNodeMerger : undefined);
   const selectedMergerRunning = selectedMerger?.status === "running";
-  const editInlineSteer = (execution: ConversationExecution) => onEditMessageSubmit && !locked && !execution.historyReadOnly
-    ? (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => userTurnOffset === undefined ? false :
-      onEditMessageSubmit({ id: `execution-user-${execution.id}-${userTurnOffset}`, role: "user", text, images,
-        node: execution.node, runId: state.runId, executionId: execution.id, userTurnOffset }, replacement)
-    : undefined;
+  const onEditMessageSubmitRef = useRef(onEditMessageSubmit);
+  onEditMessageSubmitRef.current = onEditMessageSubmit;
+  const currentRunIdRef = useRef(state.runId);
+  currentRunIdRef.current = state.runId;
+  const handleEditInlineSteer = useCallback((
+    executionId: string,
+    node: string,
+    text: string,
+    replacement: string,
+    userTurnOffset?: number,
+    images?: ImageAttachment[],
+  ) => {
+    const submit = onEditMessageSubmitRef.current;
+    if (!submit || userTurnOffset === undefined) return false;
+    return submit({
+      id: `execution-user-${executionId}-${userTurnOffset}`,
+      role: "user",
+      text,
+      images,
+      node,
+      runId: currentRunIdRef.current,
+      executionId,
+      userTurnOffset,
+    }, replacement);
+  }, []);
+  const canEditInlineSteer = Boolean(onEditMessageSubmit) && !locked;
+  const steeredEventsByExecution = useMemo(() => {
+    const map = new Map<string, GraphEvent[]>();
+    for (const event of state.events) {
+      if (event.type !== "steered" || !event.execution_id) continue;
+      const list = map.get(event.execution_id);
+      if (list) list.push(event);
+      else map.set(event.execution_id, [event]);
+    }
+    return map;
+  }, [state.events]);
   const executionSteers = (execution: ConversationExecution, messages: ChatMessage[]): ChatMessage[] =>
     execution.historyEndOffset === undefined ? messages.filter(message => message.executionId === execution.id) :
-      state.events.filter(event => event.type === "steered" && event.execution_id === execution.id).map(event => ({
+      numberSteers((steeredEventsByExecution.get(execution.id) ?? []).map(event => ({
         id: `event-${event.sequence}`, role: "user", text: event.instruction ?? "", node: execution.node,
         executionId: execution.id, images: event.images, delivery: "steered", steerRequestId: event.request_id,
-      }));
+      })));
   const renderSteerBubble = (steer: ChatMessage) => (
     <div key={steer.id} className="chat-message-row user planner-follow-up queued-steer-message">
       <EditableUserBubble
@@ -895,7 +967,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     !latestNodeTurn.userMessage?.delivery && !latestNodeTurn.userMessage?.executionId && (isSelectedNodeWorking || pendingRequest);
   // Apply the continuation layout with the optimistic message, rather than
   // waiting for the backend to insert a new execution and its record header.
-  const deferOlderNodeAttempts = useMemo(() => shouldDeferOlderExecutions(attempts), [attempts]);
+  const cardsCollapsed = useCollapseCards();
+  const deferOlderNodeAttempts = useMemo(() => shouldDeferOlderExecutions(attempts, cardsCollapsed), [attempts, cardsCollapsed]);
   const showExecutionRecords = attempts.length > 1 || (waitingForNodeExecution && attempts.length > 0);
   const provisionalRunIdRef = useRef<string | null>(null);
   if (state.runId.startsWith("pending-")) {
@@ -1053,6 +1126,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const reviewPlannerIds = useMemo(() => reviewPlanningIds(state.events), [state.events]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
+  const [readySavedPlannerViewKey, setReadySavedPlannerViewKey] = useState("");
   const [savedPlannerRecord, setSavedPlannerRecord] = useState({ key: "", text: "" });
   const savedPlannerOutput = savedPlannerRecord.key === savedPlannerKey ? savedPlannerRecord.text
     : cachedPlanningOutput(transcriptRunId, savedPlannerIds);
@@ -1185,6 +1259,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     plannerStream.stage === "planning" || plannerStream.plannerThinkingActive ||
     Boolean(plannerStream.compacting);
   const [graphPane, setGraphPane] = useState({ collapsed: false, generation: 0 });
+  // Scoped to the active conversation key so switching conversations resets
+  // immediately without a stale render frame.
+  const [changesPaneRunKey, setChangesPaneRunKey] = useState<string | null>(null);
+  const [rightPaneClosingRunKey, setRightPaneClosingRunKey] = useState<string | null>(null);
+  const [changesOverlaySettled, setChangesOverlaySettled] = useState(false);
+  const hasGraphPaneRef = useRef(false);
+  const currentRunKeyRef = useRef(currentRunKey);
+  currentRunKeyRef.current = currentRunKey;
   // Narrow workspaces show one pane at a time without unmounting either view.
   const [narrowGraphVisible, setNarrowGraphVisible] = useState(false);
   const conversationSwitchRef = useRef<HTMLButtonElement>(null);
@@ -1197,6 +1279,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // the minimum; the shrinking aperture clips it rather than refitting it.
     const pane = graphPaneRef.current;
     if (pane) pane.style.setProperty("--graph-exit-width", `${pane.getBoundingClientRect().width}px`);
+    if (!hasGraphPaneRef.current) {
+      setRightPaneClosingRunKey(currentRunKeyRef.current);
+      setChangesOverlaySettled(false);
+      setChangesPaneRunKey(null);
+      setNarrowGraphVisible(false);
+      return;
+    }
     graphPaneNeedsFocus.current = true;
     setGraphPane(current => ({ ...current, collapsed: true }));
   }, []);
@@ -1237,6 +1326,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const suppressAutoScrollRef = useRef(false);
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const revealChatFrameRef = useRef<number | null>(null);
+  const revealingGenerationRef = useRef(-1);
   const contentGrowthFrameRef = useRef<number | null>(null);
   const [readyConversationKey, setReadyConversationKey] = useState("");
   const isConversationReady = readyConversationKey === conversationViewKey;
@@ -1253,7 +1343,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // without a duplicate inner opacity layer.
   const conversationRevealStyle: React.CSSProperties = {
     opacity: isConversationReady ? 1 : 0,
-    transition: isConversationReady && !reduceMotion ? "opacity 0.22s cubic-bezier(0.22, 1, 0.36, 1)" : "none",
+    transition: isConversationReady && !reduceMotion ? "opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1)" : "none",
   };
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
@@ -1379,6 +1469,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     previousNodeViewRef.current = Boolean(selected);
     activeConversationViewRef.current = conversationViewKey;
     conversationGenerationRef.current += 1;
+    if (revealChatFrameRef.current !== null) {
+      cancelAnimationFrame(revealChatFrameRef.current);
+      revealChatFrameRef.current = null;
+    }
+    revealingGenerationRef.current = -1;
     expandedCardObserverRef.current?.disconnect();
     expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) {
@@ -1853,7 +1948,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         // while its grid row is still clipped. Use that target height so a card
         // that will end up taller than the viewport never scrolls partway while
         // it briefly looks short enough.
-        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body");
+        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body, .activity-summary-cards");
         const targetHeight = body
           ? Math.max(cardBounds.height, headerBounds.height + body.offsetHeight + (card.offsetHeight - card.clientHeight))
           : cardBounds.height;
@@ -2059,10 +2154,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     stopLatestScroll();
     if (resetChatScrollFrameRef.current !== null) {
       cancelAnimationFrame(resetChatScrollFrameRef.current);
+      resetChatScrollFrameRef.current = null;
     }
     if (revealChatFrameRef.current !== null) {
       cancelAnimationFrame(revealChatFrameRef.current);
+      revealChatFrameRef.current = null;
     }
+    revealingGenerationRef.current = -1;
   }, []);
 
   const handleWorkspaceDetailsBeforeToggle = useCallback(() => {
@@ -2202,7 +2300,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [serialNode?.id, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
-  const deferOlderSerialExecutions = useMemo(() => shouldDeferOlderExecutions(serialExecutions), [serialExecutions]);
+  const deferOlderSerialExecutions = useMemo(() => shouldDeferOlderExecutions(serialExecutions, cardsCollapsed), [serialExecutions, cardsCollapsed]);
   const serialSession = useMemo(() => executionSessionTiming(allExecutions, serialExecution), [allExecutions, serialExecution]);
   const serialUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, serialExecution),
     [allExecutions, serialExecution]);
@@ -2241,12 +2339,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: ConversationExecution[];
     };
 
+    const routedSerialImages = state.events.find(
+      (event) => event.type === "routed" && event.plan_type === "serial" && event.images?.length
+    )?.images;
     let messages: ChatMessage[] = effectiveMessages.length > 0 ? [...effectiveMessages] : (
       state.graph.originalGoal ? [{
         id: "msg-initial-goal",
         parentId: null,
         role: "user" as const,
         text: state.graph.originalGoal,
+        images: routedSerialImages,
       }] : []
     );
     // Serial is selected before the backend creates its node. Render the
@@ -2295,14 +2397,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // A fresh browser session may have only a recorded follow-up, not the
     // original prompt in local state. Keep the initial task paired with its execution.
     if ((messages.length === 0 || messages[0]?.node === serialNode.id) && state.graph.originalGoal) {
-      messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal });
+      messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal, images: routedSerialImages });
     }
     if (messages.length === 0) return [];
     const initialEdit = [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === serialNode.id && event.first_turn);
     if (initialEdit && !messages[0].versions) {
       const versions = versionsForEdit(state, initialEdit);
-      messages[0] = { ...messages[0], versions, currentVersionIndex: versionIndexForEdit(state, initialEdit, versions) };
+      messages[0] = {
+        ...messages[0],
+        images: messages[0].images ?? initialEdit.images ?? routedSerialImages,
+        versions,
+        currentVersionIndex: versionIndexForEdit(state, initialEdit, versions),
+      };
+    } else if (!initialEdit && !messages[0].images?.length && routedSerialImages?.length) {
+      messages[0] = { ...messages[0], images: routedSerialImages };
     }
     messages.splice(1, 0, ...recorded);
 
@@ -2474,12 +2583,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (plannerStream.items || []).some(hasAcceptedGraphTool) ||
     (plannerStream.tools || []).some(hasAcceptedGraphTool);
   const hasGraphPane = routeType === "graph" && (state.graph.nodes.length > 0 || hasGraphToolCalled);
-  const showGraphPane = hasGraphPane && !graphPaneCollapsed;
+  hasGraphPaneRef.current = hasGraphPane;
+  const changesPaneOpen = changesPaneRunKey === currentRunKey;
+  const hasRightPane = hasGraphPane || changesPaneOpen;
+  const showRightPane = hasRightPane && !graphPaneCollapsed;
+  const rightPaneClosing = rightPaneClosingRunKey === currentRunKey && !showRightPane;
+  const showingChangesPane = showRightPane && changesPaneOpen;
   // On a quick reversal AnimatePresence reuses the exiting separator, so its
   // ref does not mount again to transfer focus back from the expand button.
   useLayoutEffect(() => {
-    if (showGraphPane) focusGraphPaneToggle(graphResizerRef.current);
-  }, [showGraphPane, focusGraphPaneToggle]);
+    if (showRightPane) focusGraphPaneToggle(graphResizerRef.current);
+  }, [showRightPane, focusGraphPaneToggle]);
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
   const graphViewportKey = `${currentRunKey}:${graphPane.generation}`;
@@ -2538,7 +2652,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       state.executions.some(execution => execution.status === "running") ||
       (state.mergers ?? []).some(execution => execution.status === "running");
 
-  const { summary: workspaceChangesSummary, isLoaded: workspaceChangesLoaded } = useWorkspaceChanges({
+  const {
+    summary: workspaceChangesSummary,
+    isLoaded: workspaceChangesLoaded,
+    isRefreshing: workspaceChangesRefreshing,
+    refreshVersion: workspaceChangesRefreshVersion,
+    refresh: refreshWorkspaceChanges,
+  } = useWorkspaceChanges({
     state,
     // Scope by snapshot attempts rather than incrementally loaded transcript turns.
     scopedExecutions: inNodeScope ? attempts : null,
@@ -2551,23 +2671,32 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const generation = conversationGenerationRef.current;
     if (activeConversationViewRef.current !== key) return;
     syncViewScroll(key);
+    if (revealChatFrameRef.current !== null && revealingGenerationRef.current === generation) return;
     if (revealChatFrameRef.current !== null) cancelAnimationFrame(revealChatFrameRef.current);
-    // Let the transcript parse and measure its rows before the first visible frame.
-    revealChatFrameRef.current = requestAnimationFrame(() => {
+    revealingGenerationRef.current = generation;
+    const commitReveal = () => {
+      revealChatFrameRef.current = null;
+      revealingGenerationRef.current = -1;
       if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
       syncViewScroll(key);
-      revealChatFrameRef.current = requestAnimationFrame(() => {
+      isPreparingConversationRef.current = false;
+      suppressAutoScrollRef.current = false;
+      setScrollBottomVisible(false);
+      setReadyConversationKey(key);
+    };
+    // Let the transcript parse and measure its rows before the first visible frame.
+    revealChatFrameRef.current = requestAnimationFrame(() => {
+      if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) {
         revealChatFrameRef.current = null;
-        if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
-        syncViewScroll(key);
-        isPreparingConversationRef.current = false;
-        suppressAutoScrollRef.current = false;
-        setScrollBottomVisible(false);
-        setReadyConversationKey(key);
-      });
+        revealingGenerationRef.current = -1;
+        return;
+      }
+      syncViewScroll(key);
+      revealChatFrameRef.current = requestAnimationFrame(commitReveal);
     });
   }, [conversationViewKey, syncViewScroll, setScrollBottomVisible]);
 
+  const savedPlannerViewKey = JSON.stringify([conversationViewKey, conversationGenerationRef.current, savedPlannerKey]);
   const foregroundExecution = routeType === "serial" ? serialExecutions.at(-1) : attempts.at(-1);
   const foregroundExecutionId = foregroundExecution?.id;
   // Re-entering the same view must not reuse readiness if an intervening read stalled.
@@ -2581,7 +2710,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useEffect(() => {
     if (!needsForegroundExecution || foregroundExecutionReady) return;
     const key = foregroundExecutionKey;
-    const timer = setTimeout(() => setExecutionRevealFallbackKey(key), 180);
+    const timer = setTimeout(() => setExecutionRevealFallbackKey(key), TRANSCRIPT_REVEAL_FALLBACK_MS);
     return () => clearTimeout(timer);
   }, [needsForegroundExecution, foregroundExecutionReady, foregroundExecutionKey]);
   const handleExecutionOutputReady = useCallback((execId: string) => {
@@ -2634,8 +2763,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // and footer ("工作区与会话信息" / "文件变更") fade in together as one
     // layer instead of flashing the footer above a loading spinner first.
     const needsPlanner = !selectedNode && routeType !== "serial" && savedPlannerIds.length > 0 && useSavedPlanner;
+    const plannerReadyForView = readySavedPlannerViewKey === savedPlannerViewKey || extendsReadyPlannerHistory;
     const executionReady = !needsForegroundExecution || foregroundExecutionReady || executionRevealFallbackKey === foregroundExecutionKey;
-    const outputReady = (!needsPlanner || readySavedPlannerKey === savedPlannerKey) && executionReady;
+    const outputReady = (!needsPlanner || plannerReadyForView) && executionReady;
     if (readyConversationKey !== conversationViewKey && outputReady) revealConversation();
   }, [
     conversationViewKey,
@@ -2645,7 +2775,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     routeType,
     savedPlannerIds.length,
     savedPlannerKey,
-    readySavedPlannerKey,
+    savedPlannerViewKey,
+    readySavedPlannerViewKey,
+    extendsReadyPlannerHistory,
     useSavedPlanner,
     needsForegroundExecution,
     foregroundExecutionReady,
@@ -2693,44 +2825,144 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   });
 
   const changesPanelId = React.useId();
-  // Session details and file changes sit beside each other in the same footer
-  // row, so only one of them is expanded per conversation view; opening either
-  // collapses the other instead of stacking two disclosures.
-  const [openFooterPanel, setOpenFooterPanel] = useState<{ view: string; panel: "details" | "changes" } | null>(null);
-  const footerPanel = openFooterPanel?.view === conversationViewKey ? openFooterPanel.panel : null;
-  const changesPanelOpen = footerPanel === "changes";
-  const detailsPanelOpen = footerPanel === "details";
-  const toggleFooterPanel = useCallback((panel: "details" | "changes") => {
-    setOpenFooterPanel(current => current?.view === conversationViewKey && current.panel === panel
-      ? null
-      : { view: conversationViewKey, panel });
+  const [openDetailsView, setOpenDetailsView] = useState<string | null>(null);
+  const detailsPanelOpen = openDetailsView === conversationViewKey;
+  const toggleDetailsPanel = useCallback(() => {
+    setOpenDetailsView(current => current === conversationViewKey ? null : conversationViewKey);
   }, [conversationViewKey]);
   useEffect(() => {
-    setOpenFooterPanel(null);
+    setOpenDetailsView(null);
   }, [conversationViewKey]);
+
+  const closeChangesPane = useCallback(() => {
+    setChangesOverlaySettled(false);
+    if (!hasGraphPaneRef.current) {
+      const pane = graphPaneRef.current;
+      if (pane) pane.style.setProperty("--graph-exit-width", `${pane.getBoundingClientRect().width}px`);
+      if (!reduceMotion) setRightPaneClosingRunKey(currentRunKeyRef.current);
+      setNarrowGraphVisible(false);
+    }
+    setChangesPaneRunKey(null);
+  }, [reduceMotion]);
+
+  const handleChangesOverlayEntered = useCallback(() => {
+    setChangesOverlaySettled(true);
+  }, []);
+
+  const toggleChangesPane = useCallback(() => {
+    if (changesPaneOpen && !graphPaneCollapsed) {
+      closeChangesPane();
+      return;
+    }
+    setRightPaneClosingRunKey(null);
+    setChangesOverlaySettled(Boolean(reduceMotion));
+    setChangesPaneRunKey(currentRunKey);
+    if (graphPaneCollapsed) {
+      setGraphPane(current => ({ ...current, collapsed: false }));
+    }
+    const stageWidth = workbenchRef.current?.clientWidth ?? window.innerWidth;
+    if (stageWidth <= 720) {
+      setNarrowGraphVisible(true);
+    }
+  }, [changesPaneOpen, graphPaneCollapsed, closeChangesPane, currentRunKey, reduceMotion, workbenchRef]);
+
+  const [cardsTransition, setCardsTransition] = useState<CardsTransitionPhase>("idle");
+  const cardsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearCardsTransition = useCallback(() => {
+    if (cardsTransitionTimerRef.current !== null) {
+      clearTimeout(cardsTransitionTimerRef.current);
+      cardsTransitionTimerRef.current = null;
+    }
+    cancelCardsTransitionAnchor();
+    setCardsTransition("idle");
+  }, []);
+  useEffect(() => {
+    clearCardsTransition();
+    return () => {
+      if (cardsTransitionTimerRef.current !== null) {
+        clearTimeout(cardsTransitionTimerRef.current);
+        cardsTransitionTimerRef.current = null;
+      }
+      cancelCardsTransitionAnchor();
+    };
+  }, [conversationViewKey, clearCardsTransition]);
+  useLayoutEffect(() => {
+    if (cardsTransition === "idle") {
+      finishCardsTransitionAnchor();
+    }
+  }, [cardsTransition]);
+  const effectiveCardsCollapsed = cardsCollapsed || cardsTransition === "expanding";
+  const toggleCardsCollapsed = useCallback((event?: React.MouseEvent<HTMLButtonElement>) => {
+    const el = chatScrollRef.current;
+    const triggerEl = event?.currentTarget ?? el?.querySelector<HTMLElement>('[data-testid="collapse-cards-trigger"]') ?? null;
+    const distanceFromBottom = el ? el.scrollHeight - el.scrollTop - el.clientHeight : 0;
+    const pinToBottom = distanceFromBottom <= 4;
+    if (el) {
+      if (pinToBottom) {
+        setUserScrolledUp(false);
+      } else {
+        userScrolledAwayRef.current = true;
+        setUserScrolledUp(true);
+      }
+    }
+    const nextCollapsed = !cardsCollapsed;
+    if (cardsTransitionTimerRef.current !== null) {
+      clearTimeout(cardsTransitionTimerRef.current);
+      cardsTransitionTimerRef.current = null;
+    }
+    if (!reduceMotion) {
+      beginCardsTransitionAnchor(el, triggerEl, pinToBottom);
+      setCardsTransition(nextCollapsed ? "collapsing" : "expanding");
+      cardsTransitionTimerRef.current = setTimeout(() => {
+        cardsTransitionTimerRef.current = null;
+        setCardsTransition("idle");
+      }, CARDS_TRANSITION_DURATION_MS + 20);
+    } else {
+      cancelCardsTransitionAnchor();
+      setCardsTransition("idle");
+    }
+    setCollapseCards(nextCollapsed);
+  }, [cardsCollapsed, reduceMotion, setUserScrolledUp]);
+
+  const scopedAttemptIdsKey = useMemo(
+    () => (inNodeScope ? attempts.map(execution => execution.id).join("\0") : ""),
+    [inNodeScope, attempts],
+  );
+  const scopedChangeExecutionIds = useMemo(
+    () => (inNodeScope && scopedAttemptIdsKey ? scopedAttemptIdsKey.split("\0") : undefined),
+    [inNodeScope, scopedAttemptIdsKey],
+  );
+  const handleOpenChangedFile = useCallback((item: import("../../types").FileChangeItem) => {
+    onOpenFile({
+      runId: state.runId,
+      path: item.path,
+      ...(scopedChangeExecutionIds?.length ? { executionIds: scopedChangeExecutionIds } : {}),
+      ...(item.nodes?.length ? { nodes: item.nodes } : {}),
+    });
+  }, [onOpenFile, state.runId, scopedChangeExecutionIds]);
 
   const changesTrigger = <WorkspaceChangesTrigger
     summary={workspaceChangesSummary}
     isLoaded={workspaceChangesLoaded}
     panelId={changesPanelId}
-    isOpen={workspaceChangesLoaded && changesPanelOpen}
-    onToggle={() => toggleFooterPanel("changes")}
+    isOpen={workspaceChangesLoaded && showingChangesPane}
+    onToggle={toggleChangesPane}
   />;
-  const changesPanel = <WorkspaceChangesPanel
-    key={conversationViewKey}
-    id={changesPanelId}
-    summary={workspaceChangesSummary}
-    open={workspaceChangesLoaded && changesPanelOpen}
-    scrollContainerRef={chatScrollRef}
-    onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
-    onAfterToggle={handleWorkspaceDetailsAfterToggle}
-    onOpenFile={(item) => onOpenFile({
-      runId: state.runId,
-      path: item.path,
-      ...(inNodeScope ? { executionIds: attempts.map(execution => execution.id) } : {}),
-      ...(item.nodes?.length ? { nodes: item.nodes } : {}),
-    })}
-  />;
+  const collapseCardsTrigger = (
+    <button
+      type="button"
+      className="workspace-details-trigger workspace-cards-toggle-trigger"
+      data-testid="collapse-cards-trigger"
+      aria-pressed={cardsCollapsed}
+      onClick={toggleCardsCollapsed}
+    >
+      <span>{cardsCollapsed ? t("展开卡片") : t("收起卡片")}</span>
+      {cardsCollapsed
+        ? <ChevronsUpDown size={12} className="workspace-details-chevron" aria-hidden="true" />
+        : <ChevronsDownUp size={12} className="workspace-details-chevron" aria-hidden="true" />}
+    </button>
+  );
+  const footerSummaryActions = <>{changesTrigger}{collapseCardsTrigger}</>;
 
   const totalGraphNodes = state.graph.nodes.length;
   const summaryBatchCount = Math.max(summaryBatches.length, state.plan?.executionBatches.length ?? 0, totalGraphNodes > 0 ? 1 : 0);
@@ -2819,27 +3051,35 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     <section
       // Keep exit animations and split-width transitions within one Conversation.
       key={currentRunKey}
-      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${narrowGraphVisible && showGraphPane ? "narrow-graph-visible" : ""} ${isPlanning ? "planning-active" : "historical-settled"} ${wasLivePlanning ? "was-live-planning" : ""}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showRightPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${rightPaneClosing ? "right-pane-closing" : ""} ${narrowGraphVisible && showRightPane ? "narrow-graph-visible" : ""} ${isPlanning ? "planning-active" : "historical-settled"} ${wasLivePlanning ? "was-live-planning" : ""}`}
       ref={workbenchRef}
       style={{
         "--workbench-split-ratio": splitRatio,
         "--workbench-left-width": `${splitRatio * 100}%`,
       } as React.CSSProperties}
     >
-      {hasGraphPane && (
+      {hasRightPane && (
         <div className="workbench-view-switcher" role="group" aria-label={t("工作台视图")}>
           <button type="button" ref={conversationSwitchRef} aria-pressed={!narrowGraphVisible || graphPaneCollapsed}
             onClick={() => setNarrowGraphVisible(false)}>{t("对话视图")}</button>
-          <button type="button" aria-pressed={narrowGraphVisible && !graphPaneCollapsed}
-            onClick={() => { setNarrowGraphVisible(true); if (graphPaneCollapsed) expandGraphPane(); }}>
-            {t("执行拓扑图")}
-          </button>
+          {hasGraphPane && (
+            <button type="button" aria-pressed={narrowGraphVisible && !graphPaneCollapsed && !changesPaneOpen}
+              onClick={() => { setChangesPaneRunKey(null); setNarrowGraphVisible(true); if (graphPaneCollapsed) expandGraphPane(); }}>
+              {t("执行拓扑图")}
+            </button>
+          )}
+          {changesPaneOpen && (
+            <button type="button" aria-pressed={narrowGraphVisible && !graphPaneCollapsed && changesPaneOpen}
+              onClick={() => { setNarrowGraphVisible(true); if (graphPaneCollapsed) expandGraphPane(); }}>
+              {t("文件变更")}
+            </button>
+          )}
         </div>
       )}
       {/* Keep the grey surface outside all content reveal animations. */}
       <div
-        className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
-        style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
+        className={`conversation-pane ${showRightPane ? "split" : "full-width"}`}
+        style={showRightPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
         {creatingNode && routeType === "graph" ? (
           <CreateNodeForm key={state.runId} state={state} feedbackEnabled={state.config ? (state.config.feedbackEnabled ?? false) : (config.feedbackEnabled ?? false)} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
@@ -2979,20 +3219,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         const executionLiveSteers = liveSteers.filter(item => item.executionId === exec.id &&
                           ownedSteers.some(steer => inlineSteerKey(steer) === item.key));
                         const inlineSteerTexts = ownedSteers
-                          .filter(message => exec.historyEndOffset !== undefined || canInlineSteerMessage(message) || executionLiveSteers.some(item => item.key === inlineSteerKey(message)))
                           .map(steer => nodeInstructionText(steer.text))
                           .filter(Boolean);
+                        const inlineSteerRequestIds = ownedSteers
+                          .map(steer => steer.steerRequestId)
+                          .filter((id): id is string => !!id);
+                        const inlineSteerAttachments: InlineSteerAttachment[] = ownedSteers
+                          .filter(steer => steer.steerRequestId || steer.images?.length || steer.files?.length)
+                          .map(steer => ({
+                            requestId: steer.steerRequestId,
+                            text: nodeInstructionText(steer.text),
+                            inlineSteerOrdinal: steer.inlineSteerOrdinal ?? 0,
+                            images: steer.images,
+                            files: steer.files,
+                          }))
+                          .filter(steer => Boolean(steer.requestId || steer.text));
+                        const awaitInitialSettledWindow = exec.status !== "running" && isExpanded &&
+                          loadingExecutionIds.has(exec.id) && !inlineUserTurns[exec.id];
                         const fallbackSteers = exec.historyEndOffset !== undefined ? [] : ownedSteers.map(steer => ({
-                          steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", isExpanded,
+                          steer, position: awaitInitialSettledWindow ? null : steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", isExpanded,
                             executionLiveSteers.find(item => item.key === inlineSteerKey(steer))),
                         }));
                         return (
                           <React.Fragment key={exec.id}>
-                            <motion.div
+                            <div
                               className={`serial-execution-panel${showExecutionRecords ? " execution-record-panel" : ""}`}
-                              initial={false}
-                              animate={{ opacity: 1, y: 0 }}
-                              transition={{ duration: 0.3 }}
                             >
                               {showExecutionRecords && (
                                 <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
@@ -3014,16 +3265,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     foregroundReady={isConversationReady && foregroundExecutionReady}
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
-                                    onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
-                                    onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                    onLoadingChange={handleExecutionLoadingChange}
+                                    onCompactingChange={handleAttemptCompacting}
                                     inlineUserTurnTexts={inlineSteerTexts}
+                                    inlineUserTurnRequestIds={inlineSteerRequestIds}
                                     liveSteers={executionLiveSteers}
-                                    onEditUser={editInlineSteer(exec)}
-                                    onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
+                                    inlineSteerAttachments={inlineSteerAttachments}
+                                    cardsCollapsed={effectiveCardsCollapsed}
+                                    cardsTransition={cardsTransition}
+                                    onEditUser={canEditInlineSteer && !exec.historyReadOnly ? handleEditInlineSteer : undefined}
+                                    onInlineUserTurnsChange={handleInlineUserTurns}
                                   />
                                 </div>
                               )}
-                            </motion.div>
+                            </div>
                             {fallbackSteers.filter(item => item.position === "after").map(item => renderSteerBubble(item.steer))}
                           </React.Fragment>
                         );
@@ -3046,14 +3301,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 })}
 
                 <WorkspaceDetailsPanel
-                  key={`${state.runId}:${selectedNode.id}`}
+                  key={`${currentRunKey}:${selectedNode.id}`}
                   open={detailsPanelOpen}
-                  onToggle={() => toggleFooterPanel("details")}
+                  onToggle={toggleDetailsPanel}
                   showWorking={isSelectedNodeWorking}
                   compacting={isSelectedNodeCompacting}
                   workingLabel={nodeCompletionStatusText(activity, selectedNode.id) ?? publicationWorkingLabel}
-                  summaryAction={changesTrigger}
-                  additionalDetails={changesPanel}
+                  summaryAction={footerSummaryActions}
                   scrollContainerRef={chatScrollRef}
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -3211,11 +3465,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             const executionLiveSteers = liveSteers.filter(item => item.executionId === exec.id &&
                               ownedSteers.some(steer => inlineSteerKey(steer) === item.key));
                             const inlineSteerTexts = ownedSteers
-                              .filter(message => exec.historyEndOffset !== undefined || canInlineSteerMessage(message) || executionLiveSteers.some(item => item.key === inlineSteerKey(message)))
                               .map(steer => nodeInstructionText(steer.text))
                               .filter(Boolean);
+                            const inlineSteerRequestIds = ownedSteers
+                              .map(steer => steer.steerRequestId)
+                              .filter((id): id is string => !!id);
+                            const inlineSteerAttachments: InlineSteerAttachment[] = ownedSteers
+                              .filter(steer => steer.steerRequestId || steer.images?.length || steer.files?.length)
+                              .map(steer => ({
+                                requestId: steer.steerRequestId,
+                                text: nodeInstructionText(steer.text),
+                                inlineSteerOrdinal: steer.inlineSteerOrdinal ?? 0,
+                                images: steer.images,
+                                files: steer.files,
+                              }))
+                              .filter(steer => Boolean(steer.requestId || steer.text));
+                            const awaitInitialSettledWindow = exec.status !== "running" &&
+                              loadingExecutionIds.has(exec.id) && !inlineUserTurns[exec.id];
                             const fallbackSteers = exec.historyEndOffset !== undefined ? [] : ownedSteers.map(steer => ({
-                              steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", true,
+                              steer, position: awaitInitialSettledWindow ? null : steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", true,
                                 executionLiveSteers.find(item => item.key === inlineSteerKey(steer))),
                             }));
                             return (
@@ -3224,12 +3492,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     same 40px/20px rhythm as follow-up turns, whether they are
                                     waiting above or below the transcript they steer. */}
                                 {fallbackSteers.filter(item => item.position === "before").map(item => renderSteerBubble(item.steer))}
-                                <motion.div
-                                  className="serial-execution-panel"
-                                  initial={false}
-                                  animate={{ opacity: 1 }}
-                                  transition={{ duration: 0.15 }}
-                                >
+                                <div className="serial-execution-panel">
                                   <div className="serial-execution-body">
                                     <ExecutionTranscript
                                       key={exec.id}
@@ -3240,15 +3503,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                       foregroundReady={isConversationReady && foregroundExecutionReady}
                                       onUserResize={handleExpandableContentChange}
                                       onInitialOutputReady={handleExecutionOutputReady}
-                                      onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
-                                      onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                      onLoadingChange={handleExecutionLoadingChange}
+                                      onCompactingChange={handleAttemptCompacting}
                                       inlineUserTurnTexts={inlineSteerTexts}
+                                      inlineUserTurnRequestIds={inlineSteerRequestIds}
                                       liveSteers={executionLiveSteers}
-                                      onEditUser={editInlineSteer(exec)}
-                                      onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
+                                      inlineSteerAttachments={inlineSteerAttachments}
+                                      cardsCollapsed={effectiveCardsCollapsed}
+                                      cardsTransition={cardsTransition}
+                                      onEditUser={canEditInlineSteer && !exec.historyReadOnly ? handleEditInlineSteer : undefined}
+                                      onInlineUserTurnsChange={handleInlineUserTurns}
                                     />
                                   </div>
-                                </motion.div>
+                                </div>
                                 {fallbackSteers.filter(item => item.position === "after").map(item => renderSteerBubble(item.steer))}
                               </React.Fragment>
                             );
@@ -3265,14 +3532,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     })}
 
                     <WorkspaceDetailsPanel
-                      key={`${state.runId}:serial`}
+                      key={`${currentRunKey}:serial`}
                       open={detailsPanelOpen}
-                      onToggle={() => toggleFooterPanel("details")}
+                      onToggle={toggleDetailsPanel}
                       showWorking={isMainViewWorking}
                       compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
                       workingLabel={nodeCompletionStatusText(activity, serialNode?.id) ?? publicationWorkingLabel}
-                      summaryAction={changesTrigger}
-                      additionalDetails={changesPanel}
+                      summaryAction={footerSummaryActions}
                       scrollContainerRef={chatScrollRef}
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -3304,12 +3570,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 ) : (
                   <>
                     {plannerMessages.length > 0 && (
-                      <motion.div
+                      <div
                         key={plannerMessages[0].id}
                         className={`chat-message-row ${plannerMessages[0].role}`}
-                        initial={false}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
                       >
                         {plannerMessages[0].role === "user" ? (
                           <EditableUserBubble
@@ -3332,7 +3595,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             <MarkdownRenderer content={plannerMessages[0].text} />
                           </div>
                         )}
-                      </motion.div>
+                      </div>
                     )}
 
                     {/* 任务路线决策结果或评估中加载状态 */}
@@ -3380,11 +3643,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           onLoadingChange={setPlannerHistoryLoading}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
-                            if (!isConversationReady) revealConversation();
+                            setReadySavedPlannerViewKey(savedPlannerViewKey);
                           }}
                           onOutputChange={(text) => setSavedPlannerRecord(previous =>
                             previous.key === savedPlannerKey && previous.text === text ? previous : { key: savedPlannerKey, text })}
                           onUserResize={handleExpandableContentChange}
+                          cardsCollapsed={effectiveCardsCollapsed}
+                          cardsTransition={cardsTransition}
                           edits={plannerEdits}
                           onEditUser={onEditMessageSubmit ? (text, replacement) =>
                             onEditMessageSubmit({
@@ -3437,6 +3702,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
                     {renderLivePlanner && livePlannerItems.length > 0 ? (
                       <PlannerTranscript items={displayedLivePlannerItems} isPlanning={isPlanning} locked={locked}
+                        cardsCollapsed={effectiveCardsCollapsed}
+                        cardsTransition={cardsTransition}
                         editingMessage={editingMessage} draft={editPrefillText ?? ""}
                         onDraftChange={onEditPrefillTextChange ?? (() => { })} onEditMessage={onEditMessage}
                         onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}
@@ -3445,26 +3712,43 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       renderLivePlanner && (plannerStream.plannerThinking || plannerStream.plannerText) && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           {plannerStream.plannerThinking && (
-                            <ThinkingCard
-                              content={plannerStream.plannerThinking}
-                              isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                              title="Chain of Thought"
-                              defaultExpanded={true}
-                              autoExpandWhileStreaming={true}
-                              animateAppear={false}
-                              onExpandedChange={handleExpandableContentChange}
-                            />
+                            effectiveCardsCollapsed ? (
+                              <ActivitySummaryRow
+                                item={{
+                                  id: "summary_live_planner_thinking",
+                                  type: "activity_summary",
+                                  role: "assistant",
+                                  status: isPlanning && plannerStream.plannerThinkingActive ? "running" : "success",
+                                  summaryItems: [{
+                                    id: "live_planner_thinking",
+                                    type: "thinking",
+                                    role: "assistant",
+                                    content: plannerStream.plannerThinking,
+                                    status: isPlanning && plannerStream.plannerThinkingActive ? "running" : "success",
+                                  }],
+                                }}
+                                transitionPhase={cardsTransition}
+                                onExpandedChange={handleExpandableContentChange}
+                                onChildResize={handleExpandableContentChange}
+                              />
+                            ) : (
+                              <ThinkingCard
+                                content={plannerStream.plannerThinking}
+                                isStreaming={isPlanning && plannerStream.plannerThinkingActive}
+                                title="Chain of Thought"
+                                defaultExpanded={true}
+                                autoExpandWhileStreaming={true}
+                                animateAppear={false}
+                                onExpandedChange={handleExpandableContentChange}
+                              />
+                            )
                           )}
                           {plannerStream.plannerText && (
-                            <motion.div
-                              className="chat-message-row assistant"
-                              initial={false}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                            >
+                            <div className="chat-message-row assistant">
                               <div className="chat-bubble-assistant chat-message-assistant">
                                 <StreamingAssistantBubble content={plannerStream.plannerText} isStreaming={isPlanning} />
                               </div>
-                            </motion.div>
+                            </div>
                           )}
                         </div>
                       )
@@ -3486,15 +3770,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
                 {showPlannerDetails && (
                   <WorkspaceDetailsPanel
-                    key={`${state.runId}:planner`}
+                    key={`${currentRunKey}:planner`}
                     open={detailsPanelOpen}
-                    onToggle={() => toggleFooterPanel("details")}
+                    onToggle={toggleDetailsPanel}
                     label={t("规划会话信息")}
                     showWorking={isMainViewWorking}
                     compacting={isMainViewCompacting}
                     workingLabel={publicationWorkingLabel}
-                    summaryAction={changesTrigger}
-                    additionalDetails={changesPanel}
+                    summaryAction={footerSummaryActions}
                     scrollContainerRef={chatScrollRef}
                     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -3629,9 +3912,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       {/* A newly opened Conversation paints both panes immediately. Only later
           graph expansion/collapse animates the pane; history fades separately. */}
       <AnimatePresence mode="wait" initial={false} onExitComplete={() => {
+        setRightPaneClosingRunKey(null);
         setGraphPane(current => current.collapsed ? { ...current, generation: current.generation + 1 } : current);
       }}>
-        {showGraphPane && (
+        {showRightPane && (
           <GraphPanePresence key={graphViewportKey}>
             <motion.div
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
@@ -3643,7 +3927,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               role="separator"
               tabIndex={0}
               aria-orientation="vertical"
-              aria-label={t("调整执行拓扑图宽度")}
+              aria-label={showingChangesPane && !hasGraphPane ? t("调整文件变更面板宽度") : t("调整执行拓扑图宽度")}
               aria-description={t("左右拖动调整宽度，继续向右拖动可收起；双击恢复默认，Enter 收起")}
               aria-valuenow={Math.round((1 - splitRatio) * 100)}
               onPointerDown={handleStartResize}
@@ -3662,145 +3946,194 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               exit={{ opacity: 0 }}
               transition={{ duration: reduceMotion ? 0 : 0.45, ease: [0.22, 1, 0.36, 1] }}
             >
-              <div className="graph-toolbar">
-                <div className="toolbar-left">
-                  <strong>{t("执行拓扑图")}</strong>
-                </div>
-                <div className="toolbar-right">
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("编辑 Graph IR")}
-                    title={t("编辑 Graph IR")}
-                    onClick={onOpenEditor}
+              {hasGraphPane ? (
+                <>
+                  <div
+                    className={`graph-view-layer ${showingChangesPane && (reduceMotion || changesOverlaySettled) ? "is-obscured" : ""}`}
+                    inert={showingChangesPane || undefined}
+                    aria-hidden={showingChangesPane || undefined}
                   >
-                    <Code2 size={16} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="graph-canvas" ref={graphCanvasRef}>
-                <GraphCanvas runKey={graphViewportKey} ready={isGraphReadyForRun}
-                  nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
-                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onFitStart={manualGraphFit} onPaneContextMenu={openGraphMenu} />
-
-                {state.graph.nodes.length > 0 && graphFeedbackEnabled(state, config.feedbackEnabled ?? false) && (
-                  <motion.div
-                    className="graph-note"
-                    initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] }}
-                  >
-                    <span className="note-line" />{t("依赖前进")}<span className="note-line feedback" />{t("执行反馈")}</motion.div>
-                )}
-              </div>
-
-              {state.graph.nodes.length > 0 && (
-                // Fade the footer itself in when the first node opens the pane.
-                // Opacity only: a transform here would move the pinned geometry
-                // the resize and short-window tests measure against the workbench.
-                <motion.div
-                  className="graph-bottom"
-                  initial={reduceMotion ? false : { opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] }}
-                >
-                  <div className="progress-label">
-                    <FooterProgressLabel token={String(completed)} disabled={reduceMotion}>
-                      {completed} / {state.graph.nodes.length}{t(" 节点完成")}
-                    </FooterProgressLabel>
-                  </div>
-                  <div className="progress-track" role="progressbar"
-                    aria-label={t("节点完成进度")}
-                    aria-valuemin={0} aria-valuemax={state.graph.nodes.length} aria-valuenow={completed}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }}
-                      transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.22, 1, 0.36, 1] }}
-                    />
-                  </div>
-
-                  <div className="approval-row">
-                    <FooterStatusLabel
-                      token={footerStatusKey}
-                      disabled={reduceMotion}
-                      title={publicationTarget ? `${t("目标目录：")}${publicationTarget}` : undefined}
-                    >
-                      {activityStatus ? (
-                        <><span className="progress-dot" />{activityStatus}</>
-                      ) : publicationFailedNow ? (
-                        <><AlertCircle size={12} aria-hidden="true" />{t("回写失败，需要处理")}</>
-                      ) : publicationWorking ? (
-                        <><Loader2 size={12} className="spin" aria-hidden="true" />{graphPhase === "merging" || publicationStatus === "merging" ? t("merger 正在修复冲突") : t("正在写回工作文件夹")}</>
-                      ) : graphPhase === "planning" ? t("规划中")
-                        : graphPhase === "running" ? t("确定性运行时正在推进")
-                          : graphPhase === "followup" ? t("源目录直改中（无快照）")
-                            : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
-                              : graphPhase === "pausing" ? t("正在停止运行中的节点…")
-                                : graphPhase === "paused" ? (resumingPausedWork
-                                  ? (hasOtherFailures ? t("继续将先恢复暂停的任务；其他失败节点可稍后重试。") : t("执行已暂停，点击继续可恢复"))
-                                  : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
-                                  : graphPhase === "completed" ? t("运行已完成 - 本次消耗 Token:{0} Cached:{1}",
-                                    // Task tokens exclude cache reads but include
-                                    // one-time cache writes; reasoning is inside
-                                    // output. The percentage is the prompt cache-hit rate.
-                                    formatTokenCount(consumedTokenCount(state.runMetrics?.totalUsage)),
-                                    formatCacheHitRate(state.runMetrics?.totalUsage))
-                                    : phaseText[graphPhase] ?? (state.approved ? graphPhase : "")}
-                    </FooterStatusLabel>
-                    <FooterControlsGroup token={footerControlKey} disabled={reduceMotion}>
-                      {publicationFailedNow ? (
-                        <button key="retry-publication-btn" type="button" className="primary" disabled={locked || controlPending !== null} onClick={retryPublication}>
-                          {t("重试回写")}
-                        </button>
-                      ) : graphPhase === "awaiting_approval" ? (
-                        <>
-                          <button key="reject-btn" type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
-                            {t("拒绝")}
-                          </button>
-                          <button key="approve-btn" type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
-                            <Play size={13} fill="currentColor" aria-hidden="true" />{t("批准")}
-                          </button>
-                        </>
-                      ) : state.approved && !publicationWorking ? (
+                    <div className="graph-toolbar">
+                      <div className="toolbar-left">
+                        <strong>{t("执行拓扑图")}</strong>
+                      </div>
+                      <div className="toolbar-right">
                         <button
-                          key="execution-control-btn"
                           type="button"
-                          className="primary graph-execution-control"
-                          // A settled run with nothing running or paused has no
-                          // pause/resume semantics: pausing is a no-op and the
-                          // following 继续 would just un-pause it without
-                          // continuing any node. The backend recovery hint
-                          // identifies failed attempts that Continue can retry.
-                          // Planner turns use their composer's Stop, not this control.
-                          disabled={isPlanning || locked || controlPending !== null || publishing || publicationFailed || (state.phase === "completed" && !canContinue) || graphPhase === "pausing"
-                            || (graphPhase === "needs_attention" && !canContinue)}
-                          title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
-                          onClick={() => {
-                            const action = canContinue ? "resume" : "pause";
-                            if (action === "pause") restoreUncommittedSteerDrafts();
-                            setControlPending(action);
-                            onControl(action);
-                          }}
+                          className="icon-button"
+                          aria-label={t("编辑 Graph IR")}
+                          title={t("编辑 Graph IR")}
+                          onClick={onOpenEditor}
                         >
-                          {controlPending ? <Loader2 size={13} className="spin" /> : canContinue ? <Play size={13} /> : <Pause size={13} />}
-                          {controlPending === "pause" || graphPhase === "pausing" ? t("正在暂停")
-                            : controlPending === "resume" ? t("正在继续")
-                              : canContinue ? t("继续") : t("暂停")}
+                          <Code2 size={16} />
                         </button>
-                      ) : null}
-                    </FooterControlsGroup>
+                      </div>
+                    </div>
+
+                    <div className="graph-canvas" ref={graphCanvasRef}>
+                      <GraphCanvas runKey={graphViewportKey} ready={isGraphReadyForRun}
+                        nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
+                        onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onFitStart={manualGraphFit} onPaneContextMenu={openGraphMenu} />
+
+                      {state.graph.nodes.length > 0 && graphFeedbackEnabled(state, config.feedbackEnabled ?? false) && (
+                        <motion.div
+                          className="graph-note"
+                          initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] }}
+                        >
+                          <span className="note-line" />{t("依赖前进")}<span className="note-line feedback" />{t("执行反馈")}</motion.div>
+                      )}
+                    </div>
+
+                    {state.graph.nodes.length > 0 && (
+                      // Fade the footer itself in when the first node opens the pane.
+                      // Opacity only: a transform here would move the pinned geometry
+                      // the resize and short-window tests measure against the workbench.
+                      <motion.div
+                        className="graph-bottom"
+                        initial={reduceMotion ? false : { opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] }}
+                      >
+                        <div className="progress-label">
+                          <FooterProgressLabel token={String(completed)} disabled={reduceMotion}>
+                            {completed} / {state.graph.nodes.length}{t(" 节点完成")}
+                          </FooterProgressLabel>
+                        </div>
+                        <div className="progress-track" role="progressbar"
+                          aria-label={t("节点完成进度")}
+                          aria-valuemin={0} aria-valuemax={state.graph.nodes.length} aria-valuenow={completed}>
+                          <motion.div
+                            initial={false}
+                            animate={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }}
+                            transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.22, 1, 0.36, 1] }}
+                          />
+                        </div>
+
+                        <div className="approval-row">
+                          <FooterStatusLabel
+                            token={footerStatusKey}
+                            disabled={reduceMotion}
+                            title={publicationTarget ? `${t("目标目录：")}${publicationTarget}` : undefined}
+                          >
+                            {activityStatus ? (
+                              <><span className="progress-dot" />{activityStatus}</>
+                            ) : publicationFailedNow ? (
+                              <><AlertCircle size={12} aria-hidden="true" />{t("回写失败，需要处理")}</>
+                            ) : publicationWorking ? (
+                              <><Loader2 size={12} className="spin" aria-hidden="true" />{graphPhase === "merging" || publicationStatus === "merging" ? t("merger 正在修复冲突") : t("正在写回工作文件夹")}</>
+                            ) : graphPhase === "planning" ? t("规划中")
+                              : graphPhase === "running" ? t("确定性运行时正在推进")
+                                : graphPhase === "followup" ? t("源目录直改中（无快照）")
+                                  : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
+                                    : graphPhase === "pausing" ? t("正在停止运行中的节点…")
+                                      : graphPhase === "paused" ? (resumingPausedWork
+                                        ? (hasOtherFailures ? t("继续将先恢复暂停的任务；其他失败节点可稍后重试。") : t("执行已暂停，点击继续可恢复"))
+                                        : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
+                                        : graphPhase === "completed" ? t("运行已完成 - 本次消耗 Token:{0} Cached:{1}",
+                                          // Task tokens exclude cache reads but include
+                                          // one-time cache writes; reasoning is inside
+                                          // output. The percentage is the prompt cache-hit rate.
+                                          formatTokenCount(consumedTokenCount(state.runMetrics?.totalUsage)),
+                                          formatCacheHitRate(state.runMetrics?.totalUsage))
+                                          : phaseText[graphPhase] ?? (state.approved ? graphPhase : "")}
+                          </FooterStatusLabel>
+                          <FooterControlsGroup token={footerControlKey} disabled={reduceMotion}>
+                            {publicationFailedNow ? (
+                              <button key="retry-publication-btn" type="button" className="primary" disabled={locked || controlPending !== null} onClick={retryPublication}>
+                                {t("重试回写")}
+                              </button>
+                            ) : graphPhase === "awaiting_approval" ? (
+                              <>
+                                <button key="reject-btn" type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
+                                  {t("拒绝")}
+                                </button>
+                                <button key="approve-btn" type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
+                                  <Play size={13} fill="currentColor" aria-hidden="true" />{t("批准")}
+                                </button>
+                              </>
+                            ) : state.approved && !publicationWorking ? (
+                              <button
+                                key="execution-control-btn"
+                                type="button"
+                                className="primary graph-execution-control"
+                                // A settled run with nothing running or paused has no
+                                // pause/resume semantics: pausing is a no-op and the
+                                // following 继续 would just un-pause it without
+                                // continuing any node. The backend recovery hint
+                                // identifies failed attempts that Continue can retry.
+                                // Planner turns use their composer's Stop, not this control.
+                                disabled={isPlanning || locked || controlPending !== null || publishing || publicationFailed || (state.phase === "completed" && !canContinue) || graphPhase === "pausing"
+                                  || (graphPhase === "needs_attention" && !canContinue)}
+                                title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
+                                onClick={() => {
+                                  const action = canContinue ? "resume" : "pause";
+                                  if (action === "pause") restoreUncommittedSteerDrafts();
+                                  setControlPending(action);
+                                  onControl(action);
+                                }}
+                              >
+                                {controlPending ? <Loader2 size={13} className="spin" /> : canContinue ? <Play size={13} /> : <Pause size={13} />}
+                                {controlPending === "pause" || graphPhase === "pausing" ? t("正在暂停")
+                                  : controlPending === "resume" ? t("正在继续")
+                                    : canContinue ? t("继续") : t("暂停")}
+                              </button>
+                            ) : null}
+                          </FooterControlsGroup>
+                        </div>
+                        {publicationErrorText && (
+                          <motion.p
+                            className="publication-failure"
+                            role="alert"
+                            initial={reduceMotion ? false : { opacity: 0, y: -4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={footerMotion}
+                          >{localizeError(publicationErrorText)}</motion.p>
+                        )}
+                      </motion.div>
+                    )}
                   </div>
-                  {publicationErrorText && (
-                    <motion.p
-                      className="publication-failure"
-                      role="alert"
-                      initial={reduceMotion ? false : { opacity: 0, y: -4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={footerMotion}
-                    >{localizeError(publicationErrorText)}</motion.p>
-                  )}
-                </motion.div>
+                  <AnimatePresence initial={false}>
+                    {showingChangesPane && (
+                      <ChangesOverlayPresence
+                        key="changes-overlay"
+                        reduceMotion={reduceMotion}
+                        onEntered={handleChangesOverlayEntered}
+                      >
+                        <WorkspaceChangesPane
+                          id={changesPanelId}
+                          runId={state.runId}
+                          scopedExecutionIds={scopedChangeExecutionIds}
+                          summary={workspaceChangesSummary}
+                          isLoaded={workspaceChangesLoaded}
+                          isRefreshing={workspaceChangesRefreshing}
+                          refreshVersion={workspaceChangesRefreshVersion}
+                          onRefresh={refreshWorkspaceChanges}
+                          hasGraphPane={hasGraphPane}
+                          onSelectGraph={closeChangesPane}
+                          onClose={closeChangesPane}
+                          onOpenFile={handleOpenChangedFile}
+                        />
+                      </ChangesOverlayPresence>
+                    )}
+                  </AnimatePresence>
+                </>
+              ) : (
+                <WorkspaceChangesPane
+                  id={changesPanelId}
+                  runId={state.runId}
+                  scopedExecutionIds={scopedChangeExecutionIds}
+                  summary={workspaceChangesSummary}
+                  isLoaded={workspaceChangesLoaded}
+                  isRefreshing={workspaceChangesRefreshing}
+                  refreshVersion={workspaceChangesRefreshVersion}
+                  onRefresh={refreshWorkspaceChanges}
+                  hasGraphPane={false}
+                  onSelectGraph={closeChangesPane}
+                  onClose={closeChangesPane}
+                  onOpenFile={handleOpenChangedFile}
+                />
               )}
             </motion.div>
             </div>

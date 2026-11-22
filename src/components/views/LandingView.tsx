@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { motion, useIsPresent, useReducedMotion } from "motion/react";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import { DotPattern } from "../ui/dot-pattern";
+import type { ComposerDrafts } from "../../services/composerDrafts";
 import type { LandingBackground } from "../../services/displayPreferences";
 import type { PlanMode } from "../../types";
 
@@ -16,6 +17,8 @@ interface LandingViewProps {
   onInterrupt?: () => void;
   repository?: string;
   background?: LandingBackground;
+  draftStore?: ComposerDrafts;
+  draftKey?: string;
 }
 
 const TITLE_EXIT_DURATION = 0.2;
@@ -31,20 +34,16 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
   onInterrupt,
   repository,
   background = "paths",
+  draftStore,
+  draftKey,
 }) => {
   const reduceMotion = useReducedMotion();
   const isPresent = useIsPresent();
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   return (
-    <motion.div
+    <div
       className="landing-screen"
       inert={!isPresent}
-      // Fading this ancestor also fades the shared composer after its handoff.
-      // Keep it opaque and animate only the welcome copy below.
-      initial={false}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0 }}
     >
       <div className="landing-center-content">
         <div className="landing-title-space">
@@ -67,11 +66,6 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
                 opacity: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
                 y: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
                 visibility: { duration: 0, delay: !reduceMotion && isComposerExpanded ? TITLE_EXIT_DURATION : 0 },
-              }}
-              exit={{
-                opacity: 0,
-                y: reduceMotion ? 0 : -14,
-                transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
               }}
             >
               <motion.p
@@ -107,6 +101,8 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             expandDelay={TITLE_EXIT_DURATION}
             onExpandedChange={setIsComposerExpanded}
             repository={repository}
+            draftStore={draftStore}
+            draftKey={draftKey}
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             onSubmit={(val, options) => onPlanGoal(val, options)}
@@ -119,7 +115,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
           />
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 });
 

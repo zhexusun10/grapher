@@ -90,6 +90,18 @@ pub struct ExecutionOutputPage {
     pub total_bytes: usize,
     pub complete: bool,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Record<string, number>")]
+    pub steer_offsets: Option<BTreeMap<String, usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub steer_offsets_authoritative: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub projection: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -106,6 +118,48 @@ pub struct PlanningOutputPage {
     pub total_bytes: u64,
     pub complete: bool,
     pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub projection: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSearchMatch {
+    pub run_id: String,
+    pub conversation_title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plan_type: Option<String>,
+    pub role: String,
+    pub source_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution_id: Option<String>,
+    pub snippet_before: String,
+    pub snippet_match: String,
+    pub snippet_after: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSearchResponse {
+    pub query: String,
+    pub matches: Vec<ConversationSearchMatch>,
+    #[ts(type = "number")]
+    pub total_matches: usize,
+    #[ts(type = "number")]
+    pub matched_conversations: usize,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -177,7 +231,9 @@ pub const READ_COMMANDS: &[&str] = &[
     "get_planning_snapshot",
     "get_execution_output",
     "get_planning_output",
+    "search_conversations",
     "get_file_changes",
+    "get_file_diff",
     "get_workspace_image",
     "get_merger_prompt",
     "list_skills",
@@ -211,6 +267,8 @@ pub fn typescript() -> String {
         SnapshotPollResponse::decl(),
         ExecutionOutputPage::decl(),
         PlanningOutputPage::decl(),
+        ConversationSearchMatch::decl(),
+        ConversationSearchResponse::decl(),
         OperationResponse::decl(),
         OperationState::decl(),
         OperationStatus::decl(),

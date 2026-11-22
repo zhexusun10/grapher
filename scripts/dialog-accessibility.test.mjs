@@ -7,7 +7,7 @@ let server, browser, origin;
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-dialog-accessibility",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null },
     plugins: [{ name: "dialog-accessibility-fixture", configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         if (req.url !== "/__dialogs") return next();
@@ -23,7 +23,7 @@ before(async () => {
     headless: true,
   });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function fixture(t, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce", ...options });

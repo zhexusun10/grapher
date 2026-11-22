@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultConfig, emptySnapshot, type Snapshot } from "../src/types.ts";
-import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "../src/services/workspaceConversations.ts";
+import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspaceRuns, promoteRunInWorkspace, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "../src/services/workspaceConversations.ts";
 
 const snapshot = (runId: string, repository: string): Snapshot => ({
   ...emptySnapshot, runId, config: { ...defaultConfig, repository },
@@ -112,4 +112,21 @@ test("opening a card validates snapshot ownership independently of the selected 
   assert.equal(snapshotBelongsToWorkspace(snapshot("a", "C:\\Projects\\A"), "\\\\?\\c:\\projects\\a\\"), true);
   assert.equal(snapshotBelongsToWorkspace(snapshot("a", "/a"), "/b"), false);
   assert.equal(snapshotBelongsToWorkspace(emptySnapshot, ""), false);
+});
+
+test("promoting a conversation moves it to the first position and enforces exclusive ownership", () => {
+  const original = { "c:/projects/app": ["newest", "middle", "older"], "/other": ["older", "foreign"] };
+  const promoted = promoteRunInWorkspace(original, "older", "\\\\?\\C:\\Projects\\App\\");
+  assert.deepEqual(promoted, {
+    "c:/projects/app": ["older", "newest", "middle"],
+    "/other": ["foreign"],
+  });
+  assert.deepEqual(original, { "c:/projects/app": ["newest", "middle", "older"], "/other": ["older", "foreign"] }, "must not mutate React state");
+  assert.equal(promoteRunInWorkspace(promoted, "older", "c:/projects/app"), promoted, "already-first unique card is stable");
+  assert.deepEqual(promoteRunInWorkspace(promoted, "fresh", "c:/projects/app"), {
+    "c:/projects/app": ["fresh", "older", "newest", "middle"],
+    "/other": ["foreign"],
+  });
+  assert.equal(promoteRunInWorkspace(promoted, "", "c:/projects/app"), promoted);
+  assert.equal(promoteRunInWorkspace(promoted, "older", ""), promoted);
 });

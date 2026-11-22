@@ -4884,29 +4884,6 @@ fn planning_prompts_separate_user_query_from_system() {
 }
 
 #[test]
-fn planning_attachment_ignores_client_filename() {
-    let image = ImageAttachment {
-        r#type: "image".into(),
-        mime_type: "image/png".into(),
-        data: String::new(),
-        name: Some("../../config.json".into()),
-    };
-    let dir = PathBuf::from("planning").join("attachments");
-    assert_eq!(
-        planning_attachment_path(&dir, 2, &image),
-        dir.join("image_2.png")
-    );
-    let image = ImageAttachment {
-        name: Some("/tmp/other".into()),
-        ..image
-    };
-    assert_eq!(
-        planning_attachment_path(&dir, 2, &image),
-        dir.join("image_2.png")
-    );
-}
-
-#[test]
 fn local_http_boundary_rejects_other_ports_and_malformed_origins() {
     assert!(is_trusted_host("127.0.0.1:1421", 1421));
     assert!(is_trusted_host("localhost:1421", 1421));
@@ -5088,7 +5065,7 @@ fn workspace_attachment_dispatch_preserves_originals() {
     fs::create_dir_all(&repo).unwrap();
 
     fs::write(repo.join("hello.txt"), "original unsaved work").unwrap();
-    // Upload returns a managed path and never replaces the original basename.
+    // Upload stores externally under runtime root and never touches the project directory.
     let write_res = dispatch(
         &service,
         "write_workspace_attachment",
@@ -5100,17 +5077,17 @@ fn workspace_attachment_dispatch_preserves_originals() {
     )
     .unwrap();
     assert_eq!(write_res["name"], "hello.txt");
+    assert_eq!(write_res["external"], true);
     let uploaded = write_res["path"].as_str().unwrap();
-    assert_eq!(
-        fs::read_to_string(repo.join(uploaded)).unwrap(),
-        "hello world"
-    );
+    assert!(uploaded.contains("/attachment-inputs/"));
+    assert_eq!(fs::read_to_string(uploaded).unwrap(), "hello world");
+    assert!(!repo.join("grapher-attachments").exists());
     assert_eq!(
         fs::read_to_string(repo.join("hello.txt")).unwrap(),
         "original unsaved work"
     );
 
-    // A cross-platform basename is isolated below a new attachment ID.
+    // A cross-platform basename is isolated below a new attachment ID outside the project.
     let traversal_res = dispatch(
         &service,
         "write_workspace_attachment",
@@ -5122,10 +5099,12 @@ fn workspace_attachment_dispatch_preserves_originals() {
     )
     .unwrap();
     assert_eq!(traversal_res["name"], "evil.py");
-    assert!(repo.join(traversal_res["path"].as_str().unwrap()).is_file());
+    let traversal_path = traversal_res["path"].as_str().unwrap();
+    assert!(std::path::Path::new(traversal_path).is_file());
+    assert!(!repo.join("evil.py").exists());
     assert!(!temp.path().join("evil.py").exists());
 
-    // Deletion accepts only the returned path, not arbitrary project files.
+    // Deletion accepts only the returned managed path, not arbitrary project files.
     assert!(dispatch(
         &service,
         "delete_workspace_attachment",
@@ -5144,14 +5123,14 @@ fn workspace_attachment_dispatch_preserves_originals() {
     )
     .unwrap();
     assert_eq!(del_res["success"], true);
-    assert!(!repo.join(uploaded).exists());
+    assert!(!std::path::Path::new(uploaded).exists());
     assert_eq!(
         fs::read_to_string(repo.join("hello.txt")).unwrap(),
         "original unsaved work"
     );
 
-    // A private node workspace is never edited at upload time: the file is
-    // staged for that Run/node scope and delivered when an agent owns it.
+    // Run-scoped uploads live under <data_root>/attachment-inputs/<run_id>/...
+    // and never touch either the source repo or the private worktree.
     let node_worktree = temp.path().join("worktrees/run-1/node-a");
     fs::create_dir_all(&node_worktree).unwrap();
     let run_id = Uuid::new_v4().to_string();
@@ -5205,26 +5184,15 @@ fn workspace_attachment_dispatch_preserves_originals() {
         }),
     )
     .unwrap();
-    assert_eq!(node_write_res["staged"], true);
+    assert_eq!(node_write_res["external"], true);
     let node_path = node_write_res["path"].as_str().unwrap();
-    assert!(!node_worktree.join(node_path).exists());
-    assert!(!repo.join(node_path).exists());
+    assert!(node_path.contains(&format!("/attachment-inputs/{run_id}/")));
+    assert_eq!(fs::read_to_string(node_path).unwrap(), "1,2,3");
+    assert!(!node_worktree.join("grapher-attachments").exists());
+    assert!(!repo.join("grapher-attachments").exists());
     assert!(!repo.join("node_data.csv").exists());
-    let runtime_root = service.runtime.lock().unwrap().root.clone();
-    crate::attachment_inputs::deliver(
-        &runtime_root,
-        &run_id,
-        "node-a",
-        &format!("Read @{node_path}"),
-        &node_worktree,
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read_to_string(node_worktree.join(node_path)).unwrap(),
-        "1,2,3"
-    );
 
-    // 5. 定向删除测试
+    // Scoped deletion removes only the managed external file.
     let node_del_res = dispatch(
         &service,
         "delete_workspace_attachment",
@@ -5237,6 +5205,7 @@ fn workspace_attachment_dispatch_preserves_originals() {
     )
     .unwrap();
     assert_eq!(node_del_res["success"], true);
+    assert!(!std::path::Path::new(node_path).exists());
     assert!(!repo.join("node_data.csv").exists());
 }
 

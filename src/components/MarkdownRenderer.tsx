@@ -1,7 +1,25 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { StreamingMarkdownCache } from "../services/streamingMarkdown";
+import { observeElementResize } from "../services/sharedResizeObserver";
 import { t } from "../i18n";
 import { useWorkspaceImages } from "./WorkspaceImages";
+
+function syncCodeBlockOverflow(container: HTMLElement): void {
+  const wrappers = container.querySelectorAll<HTMLElement>(".code-block-wrapper");
+  if (!wrappers.length) return;
+  const updates: Array<[HTMLElement, boolean]> = [];
+  for (const wrapper of wrappers) {
+    const pre = wrapper.querySelector<HTMLElement>("pre");
+    if (!pre) continue;
+    const overflows = pre.clientWidth > 0 && pre.scrollWidth > pre.clientWidth + 1;
+    const had = wrapper.getAttribute("data-overflow-x") === "true";
+    if (overflows !== had) updates.push([wrapper, overflows]);
+  }
+  for (const [wrapper, overflows] of updates) {
+    if (overflows) wrapper.setAttribute("data-overflow-x", "true");
+    else wrapper.removeAttribute("data-overflow-x");
+  }
+}
 
 function syncMarkdownDom(container: HTMLElement, html: string, prevKeys: string[]): string[] {
   const template = document.createElement("template");
@@ -78,6 +96,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
     }, [content, isStreaming, streamingCursor, copyLabel]);
 
     const imageScopeKey = useWorkspaceImages(root, sanitizedHtml);
+    const hasCodeBlocks = sanitizedHtml.includes("code-block-wrapper");
     const prevNodeKeysRef = useRef<string[]>([]);
     const lastContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -89,7 +108,15 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
         prevNodeKeysRef.current = [];
       }
       prevNodeKeysRef.current = syncMarkdownDom(container, sanitizedHtml, prevNodeKeysRef.current);
-    }, [sanitizedHtml, imageScopeKey]);
+      if (hasCodeBlocks) syncCodeBlockOverflow(container);
+    }, [sanitizedHtml, imageScopeKey, hasCodeBlocks]);
+
+    useEffect(() => {
+      if (!hasCodeBlocks) return;
+      const container = root.current;
+      if (!container) return;
+      return observeElementResize(container, () => syncCodeBlockOverflow(container));
+    }, [hasCodeBlocks, imageScopeKey]);
 
     const handleCopy = async (event: React.MouseEvent) => {
       const target = event.target;

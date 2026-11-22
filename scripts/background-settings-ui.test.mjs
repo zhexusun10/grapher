@@ -15,12 +15,12 @@ const catalog = { providers: [{ id: "test", name: "Test", methods: [], configure
   models: [{ provider: "test", id: "model", name: "Model", api: "mock", available: true, contextWindow: 1000, thinkingLevels: ["off"], thinkingLevelFallbacks: {} }] };
 
 before(async () => {
-  server = await createServer({ cacheDir: "node_modules/.vite-background-settings", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+  server = await createServer({ cacheDir: "node_modules/.vite-background-settings", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   await server.listen();
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function openSettings(page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -186,7 +186,7 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
       "Isolate parallel node workspaces", "Mount Planner write and edit tools", "Enable Feedback",
     ], "planning, approval, workspace and Planner file-tool options share one card");
     assert.deepEqual(await uiCard.getByRole("checkbox").evaluateAll(inputs => inputs.map(input => input.getAttribute("aria-label"))), [
-      "Hide Auto mode", "Auto-expand chain of thought while running", "Show execution graph overview",
+      "Hide Auto mode", "Auto-expand chain of thought while running", "Show execution graph overview", "Completion notifications", "Notification sound",
     ], "Hide Auto mode lives inside UI settings");
     assert.equal(await planningCard.locator(".role-model-settings").count(), 0, "execution settings remain separate from model settings");
     assert.equal(await planningCard.getByRole("checkbox", { name: "Isolate parallel node workspaces", exact: true })
@@ -475,6 +475,359 @@ test("execution graph overview defaults off, sits between UI sections, and commi
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     await page.locator(".plan-summary-card").waitFor({ state: "detached" });
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_execution_overview_v1")), "0");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("completion notifications default to on, notify with agent final output when unfocused, and can be disabled in UI settings", { timeout: 90_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  const errors = [];
+  let runPhase = "running";
+  let snapshotVersion = "v1";
+  let execStatus = "running";
+  const makeLiveSnapshot = () => ({
+    ...empty,
+    runId: "notify-run",
+    title: "Refactor parser",
+    planType: "serial",
+    approved: true,
+    config,
+    phase: runPhase,
+    graph: { originalGoal: "Refactor parser", nodes: [{ id: "task", task: "Refactor parser" }], edges: [] },
+    nodes: { task: { status: execStatus, revision: 1, head: null, instruction: "Refactor parser", error: null } },
+    executions: [{
+      id: "exec-notify-1",
+      node: "task",
+      revision: 1,
+      attempt: 1,
+      sessionId: "sess-notify",
+      worktree: repository,
+      before: "a",
+      after: execStatus === "completed" ? "b" : null,
+      workspaceLineage: [],
+      input: null,
+      result: null,
+      status: execStatus,
+      startedAt: 1000,
+      completedAt: execStatus === "completed" ? 2000 : null,
+      output: "",
+      outputBytes: 120,
+      pid: null,
+      metrics: null,
+    }],
+    events: [{ sequence: execStatus === "completed" ? 2 : 1, timestamp: 2000, type: "status" }],
+  });
+  const finalAssistantJsonl = JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Parser refactor is complete. Would you like me to run benchmarks next?" }],
+    },
+  }) + "\n";
+
+  await context.addInitScript(({ repository }) => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Notify", lastOpened: 1 }]));
+    localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [repository]: ["notify-run"] }));
+    localStorage.setItem("grapher_run_labels", JSON.stringify({ "notify-run": "Refactor parser" }));
+    window.__sentNotifications = [];
+    window.__notificationInstances = [];
+    window.__unfocused = false;
+    document.hasFocus = () => !window.__unfocused;
+    class MockNotification {
+      static permission = "granted";
+      static async requestPermission() { return "granted"; }
+      constructor(title, options) {
+        window.__sentNotifications.push({
+          title,
+          body: options?.body ?? "",
+          silent: Boolean(options?.silent),
+        });
+        window.__notificationInstances.push(this);
+      }
+      close() {}
+    }
+    window.Notification = MockNotification;
+  }, { repository });
+
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "save_config") {
+      return route.fulfill({ json: { result: { ...bootstrap, config: body.config, runs: ["notify-run"], conversations: fixtureSummaries([makeLiveSnapshot()]) } } });
+    }
+    if (command === "bootstrap") {
+      return route.fulfill({ json: { result: { ...bootstrap, snapshot: empty, runs: ["notify-run"], conversations: fixtureSummaries([makeLiveSnapshot()]) } } });
+    }
+    if (command === "snapshot_if_changed") {
+      const snap = body.runId === "notify-run" ? makeLiveSnapshot() : null;
+      return route.fulfill({ json: { result: { version: snapshotVersion, snapshot: snap, activity: [] } } });
+    }
+    if (command === "get_execution_output") {
+      return route.fulfill({
+        json: {
+          result: {
+            runId: "notify-run",
+            executionId: "exec-notify-1",
+            content: finalAssistantJsonl,
+            startOffset: 0,
+            nextOffset: finalAssistantJsonl.length,
+            totalBytes: finalAssistantJsonl.length,
+            complete: true,
+            status: "completed",
+          },
+        },
+      });
+    }
+    const defaults = {
+      history: makeLiveSnapshot(),
+      snapshot: makeLiveSnapshot(),
+      load_run: makeLiveSnapshot(),
+      get_file_changes: fixtureFileChanges(body),
+      extension_command: { instance: "standalone", commands: [] },
+      repository_status: { repository, valid: true, error: null },
+      list_plannings: [],
+      list_files: { files: [] },
+      list_skills: { skills: [] },
+      provider_auth: catalog,
+      pi_extensions: { globalDirectory: "mock", extensions: [] },
+      environment_capabilities: { platform: "macos", arch: "arm64", nativeWorkspace: true },
+    };
+    if (!(command in defaults)) errors.push(`Unexpected API: ${command}`);
+    return route.fulfill({ json: { result: defaults[command] ?? null } });
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(12_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    // Wait until the sidebar card shows the active working dot.
+    await page.locator('[data-run-id="notify-run"] .run-dot.running-pulse').waitFor();
+
+    // Mark window unfocused and complete the conversation card in the background.
+    await page.evaluate(() => { window.__unfocused = true; });
+    runPhase = "completed";
+    execStatus = "completed";
+    snapshotVersion = "v2";
+
+    await page.waitForFunction(() => window.__sentNotifications.length === 1);
+    const first = await page.evaluate(() => window.__sentNotifications[0]);
+    assert.deepEqual(first, {
+      title: "Refactor parser",
+      body: "Parser refactor is complete. Would you like me to run benchmarks next?",
+      silent: false,
+    });
+
+    // Clicking the notification opens the conversation that posted it.
+    await page.evaluate(() => {
+      window.__unfocused = false;
+      window.__notificationInstances[0]?.onclick?.();
+    });
+    await page.locator('[data-run-id="notify-run"][aria-current="true"]').waitFor();
+
+    // Open UI settings: verify Notification sound defaults to enabled, disable sound only, and verify silent notification.
+    await openSettings(page);
+    const uiCard = page.getByRole("region", { name: "UI settings", exact: true });
+    const notifyToggle = uiCard.getByRole("checkbox", { name: "Completion notifications", exact: true });
+    const soundToggle = uiCard.getByRole("checkbox", { name: "Notification sound", exact: true });
+    assert.equal(await notifyToggle.isChecked(), true, "completion notifications default to enabled");
+    assert.equal(await soundToggle.isChecked(), true, "notification sound defaults to enabled");
+    await soundToggle.uncheck();
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_completion_notification_sound_v1")), "0");
+
+    // Complete another running turn while unfocused: notification should now be silent.
+    runPhase = "running";
+    execStatus = "running";
+    snapshotVersion = "v2b";
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-run-id="notify-run"] .run-dot.running-pulse').waitFor();
+    await page.evaluate(() => { window.__unfocused = true; });
+    runPhase = "completed";
+    execStatus = "completed";
+    snapshotVersion = "v2c";
+    await page.waitForFunction(() => window.__sentNotifications.length === 1);
+    const silentNotif = await page.evaluate(() => window.__sentNotifications[0]);
+    assert.equal(silentNotif.silent, true, "disabling notification sound sends silent notifications");
+
+    // Now disable completion notifications altogether and verify sound toggle disables with it.
+    await page.evaluate(() => { window.__unfocused = false; });
+    await openSettings(page);
+    assert.equal(await soundToggle.isChecked(), false, "disabled sound preference persists across reload");
+    await notifyToggle.uncheck();
+    assert.equal(await soundToggle.isDisabled(), true, "sound toggle disables when notifications are off");
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_completion_notifications_v1")), "0");
+
+    // Reload with the disabled preference persisted, then complete another running turn while unfocused.
+    runPhase = "running";
+    execStatus = "running";
+    snapshotVersion = "v3";
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await openSettings(page);
+    assert.equal(await notifyToggle.isChecked(), false, "disabled preference persists across reload");
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+
+    await page.locator('[data-run-id="notify-run"] .run-dot.running-pulse').waitFor();
+    await page.evaluate(() => { window.__unfocused = true; });
+    runPhase = "completed";
+    execStatus = "completed";
+    snapshotVersion = "v4";
+    await page.locator('[data-run-id="notify-run"] .run-dot.running-pulse').waitFor({ state: "detached" });
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.__sentNotifications.length), 0, "no notification after reload when disabled in UI settings");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("completion notification fires for the currently viewed conversation when hidden", { timeout: 90_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  const errors = [];
+  let runPhase = "running";
+  let execStatus = "running";
+  let snapshotVersion = "v1";
+  const hiddenPollVersions = [];
+  const makeLiveSnapshot = () => ({
+    ...empty,
+    runId: "viewed-notify-run",
+    title: "Hidden active run",
+    planType: "serial",
+    approved: true,
+    config,
+    phase: runPhase,
+    graph: { originalGoal: "Hidden active run", nodes: [{ id: "task", task: "Hidden active run" }], edges: [] },
+    nodes: { task: { status: execStatus, revision: 1, head: null, instruction: "Hidden active run", error: null } },
+    executions: [{
+      id: "exec-viewed-1",
+      node: "task",
+      revision: 1,
+      attempt: 1,
+      sessionId: "sess-viewed",
+      worktree: repository,
+      before: "a",
+      after: execStatus === "completed" ? "b" : null,
+      workspaceLineage: [],
+      input: null,
+      result: null,
+      status: execStatus,
+      startedAt: 1000,
+      completedAt: execStatus === "completed" ? 2000 : null,
+      output: "",
+      outputBytes: 120,
+      pid: null,
+      metrics: null,
+    }],
+    events: [{ sequence: execStatus === "completed" ? 2 : 1, timestamp: 2000, type: "status" }],
+  });
+  const finalAssistantJsonl = JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Finished while window was hidden." }],
+    },
+  }) + "\n";
+
+  await context.addInitScript(({ repository }) => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "HiddenNotify", lastOpened: 1 }]));
+    localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [repository]: ["viewed-notify-run"] }));
+    localStorage.setItem("grapher_run_labels", JSON.stringify({ "viewed-notify-run": "Hidden active run" }));
+    window.__sentNotifications = [];
+    window.__docHidden = false;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => window.__docHidden });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (window.__docHidden ? "hidden" : "visible") });
+    document.hasFocus = () => !window.__docHidden;
+    class MockNotification {
+      static permission = "granted";
+      static async requestPermission() { return "granted"; }
+      constructor(title, options) {
+        window.__sentNotifications.push({ title, body: options?.body ?? "" });
+      }
+      close() {}
+    }
+    window.Notification = MockNotification;
+  }, { repository });
+
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "bootstrap") {
+      const snap = makeLiveSnapshot();
+      return route.fulfill({ json: { result: { ...bootstrap, snapshot: snap, runs: ["viewed-notify-run"], conversations: fixtureSummaries([snap]) } } });
+    }
+    if (command === "snapshot_if_changed") {
+      if (body.runId === "viewed-notify-run") {
+        hiddenPollVersions.push(body.version ?? null);
+        const unchanged = body.version === snapshotVersion;
+        return route.fulfill({ json: { result: { version: snapshotVersion, snapshot: unchanged ? null : makeLiveSnapshot(), activity: [] } } });
+      }
+      return route.fulfill({ json: { result: { version: "idle", snapshot: null, activity: [] } } });
+    }
+    if (command === "get_execution_output") {
+      return route.fulfill({
+        json: {
+          result: {
+            runId: "viewed-notify-run",
+            executionId: "exec-viewed-1",
+            content: finalAssistantJsonl,
+            startOffset: 0,
+            nextOffset: finalAssistantJsonl.length,
+            totalBytes: finalAssistantJsonl.length,
+            complete: true,
+            status: execStatus,
+          },
+        },
+      });
+    }
+    const defaults = {
+      history: makeLiveSnapshot(),
+      snapshot: makeLiveSnapshot(),
+      load_run: makeLiveSnapshot(),
+      get_file_changes: fixtureFileChanges(body),
+      extension_command: { instance: "standalone", commands: [] },
+      repository_status: { repository, valid: true, error: null },
+      list_plannings: [],
+      list_files: { files: [] },
+      list_skills: { skills: [] },
+      provider_auth: catalog,
+      pi_extensions: { globalDirectory: "mock", extensions: [] },
+      environment_capabilities: { platform: "macos", arch: "arm64", nativeWorkspace: true },
+    };
+    if (!(command in defaults)) errors.push(`Unexpected API: ${command}`);
+    return route.fulfill({ json: { result: defaults[command] ?? null } });
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(12_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    // Confirm the active conversation is open in the foreground and working.
+    await page.locator('[data-run-id="viewed-notify-run"] .run-dot.running-pulse').waitFor();
+
+    // Hide the window (e.g. macOS close-to-hide / minimize), then settle the run.
+    await page.evaluate(() => {
+      window.__docHidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    runPhase = "completed";
+    execStatus = "completed";
+    snapshotVersion = "v2";
+
+    await page.waitForFunction(() => window.__sentNotifications.length === 1, null, { timeout: 10_000 });
+    const received = await page.evaluate(() => window.__sentNotifications[0]);
+    assert.deepEqual(received, {
+      title: "Hidden active run",
+      body: "Finished while window was hidden.",
+    });
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

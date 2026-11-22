@@ -287,6 +287,28 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         .filter_map(|merger| merger.node.strip_prefix("merge:"))
         .collect();
     for (name, node) in &state.nodes {
+        if let Some(node_obj) = metadata["nodes"][name].as_object_mut() {
+            // Browser projections read user images from events; stripping
+            // internal recovery/queue image copies avoids duplicating large
+            // base64 payloads on every snapshot poll.
+            node_obj.remove("instructionImages");
+            if let Some(continuation) = node_obj
+                .get_mut("feedbackContinuation")
+                .and_then(Value::as_object_mut)
+            {
+                continuation.remove("images");
+            }
+            if let Some(pending) = node_obj
+                .get_mut("pendingMessages")
+                .and_then(Value::as_array_mut)
+            {
+                for message in pending {
+                    if let Some(msg_obj) = message.as_object_mut() {
+                        msg_obj.remove("images");
+                    }
+                }
+            }
+        }
         metadata["nodes"][name]["canResume"] = json!(resumable.contains(name));
         if node.is_user_paused() {
             metadata["nodes"][name]["status"] = json!("paused");

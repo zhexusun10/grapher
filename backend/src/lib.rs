@@ -3,6 +3,7 @@ mod attachment_inputs;
 pub mod cleanup;
 #[cfg(test)]
 mod cleanup_tests;
+pub mod compact_transcript;
 pub mod compiler;
 pub mod engine;
 pub mod environment;

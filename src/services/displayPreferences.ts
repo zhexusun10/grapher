@@ -5,6 +5,9 @@ export const AUTO_EXPAND_COT_KEY = "grapher_auto_expand_cot_v1";
 export const EXECUTION_OVERVIEW_KEY = "grapher_execution_overview_v1";
 export const HIDE_AUTO_MODE_KEY = "grapher_hide_auto_mode_v1";
 export const LANDING_BACKGROUND_KEY = "grapher_landing_background_v1";
+export const COLLAPSE_CARDS_KEY = "grapher_collapse_cards_v1";
+export const COMPLETION_NOTIFICATIONS_KEY = "grapher_completion_notifications_v1";
+export const COMPLETION_NOTIFICATION_SOUND_KEY = "grapher_completion_notification_sound_v1";
 export type LandingBackground = "paths" | "dots";
 
 type ReadableStorage = Pick<Storage, "getItem">;
@@ -173,4 +176,122 @@ function subscribeToBackground(listener: () => void): () => void {
 
 export function useLandingBackground(): LandingBackground {
   return useSyncExternalStore(subscribeToBackground, currentLandingBackground, currentLandingBackground);
+}
+
+/** Transcript cards are expanded by default; collapsing is remembered across all conversations. */
+export function readCollapseCards(storage?: ReadableStorage): boolean {
+  try {
+    const value = readableStorage(storage)?.getItem(COLLAPSE_CARDS_KEY);
+    return value === "1" || value === "true";
+  } catch {
+    return false;
+  }
+}
+
+let collapseCards = readCollapseCards();
+const collapseCardsListeners = new Set<() => void>();
+
+export function collapseCardsEnabled(): boolean {
+  return collapseCards;
+}
+
+export function setCollapseCards(collapsed: boolean, storage?: WritableStorage): void {
+  collapseCards = collapsed;
+  try {
+    writableStorage(storage)?.setItem(COLLAPSE_CARDS_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Keep the choice for this session even if browser storage is blocked.
+  }
+  for (const listener of collapseCardsListeners) listener();
+}
+
+function subscribeToCollapseCards(listener: () => void): () => void {
+  collapseCardsListeners.add(listener);
+  return () => { collapseCardsListeners.delete(listener); };
+}
+
+export function useCollapseCards(): boolean {
+  return useSyncExternalStore(subscribeToCollapseCards, collapseCardsEnabled, collapseCardsEnabled);
+}
+
+/** Background conversation completion notifications are enabled by default; opt-out via Settings. */
+export function readCompletionNotifications(storage?: ReadableStorage): boolean {
+  try {
+    const value = readableStorage(storage)?.getItem(COMPLETION_NOTIFICATIONS_KEY);
+    if (value === null || value === undefined) return true;
+    return value !== "0" && value !== "false";
+  } catch {
+    return true;
+  }
+}
+
+let completionNotifications = readCompletionNotifications();
+const completionNotificationsListeners = new Set<() => void>();
+
+export function completionNotificationsEnabled(): boolean {
+  return completionNotifications;
+}
+
+export function setCompletionNotifications(enabled: boolean, storage?: WritableStorage): void {
+  completionNotifications = enabled;
+  try {
+    writableStorage(storage)?.setItem(COMPLETION_NOTIFICATIONS_KEY, enabled ? "1" : "0");
+  } catch {
+    // Keep the choice for this session even if browser storage is blocked.
+  }
+  for (const listener of completionNotificationsListeners) listener();
+}
+
+function subscribeToCompletionNotifications(listener: () => void): () => void {
+  completionNotificationsListeners.add(listener);
+  return () => { completionNotificationsListeners.delete(listener); };
+}
+
+export function useCompletionNotifications(): boolean {
+  return useSyncExternalStore(
+    subscribeToCompletionNotifications,
+    completionNotificationsEnabled,
+    completionNotificationsEnabled,
+  );
+}
+
+/** Completion notification sound is enabled by default; opt-out via Settings. */
+export function readCompletionNotificationSound(storage?: ReadableStorage): boolean {
+  try {
+    const value = readableStorage(storage)?.getItem(COMPLETION_NOTIFICATION_SOUND_KEY);
+    if (value === null || value === undefined) return true;
+    return value !== "0" && value !== "false";
+  } catch {
+    return true;
+  }
+}
+
+let completionNotificationSound = readCompletionNotificationSound();
+const completionNotificationSoundListeners = new Set<() => void>();
+
+export function completionNotificationSoundEnabled(): boolean {
+  return completionNotificationSound;
+}
+
+export function setCompletionNotificationSound(enabled: boolean, storage?: WritableStorage): void {
+  completionNotificationSound = enabled;
+  try {
+    writableStorage(storage)?.setItem(COMPLETION_NOTIFICATION_SOUND_KEY, enabled ? "1" : "0");
+  } catch {
+    // Keep the choice for this session even if browser storage is blocked.
+  }
+  for (const listener of completionNotificationSoundListeners) listener();
+}
+
+function subscribeToCompletionNotificationSound(listener: () => void): () => void {
+  completionNotificationSoundListeners.add(listener);
+  return () => { completionNotificationSoundListeners.delete(listener); };
+}
+
+export function useCompletionNotificationSound(): boolean {
+  return useSyncExternalStore(
+    subscribeToCompletionNotificationSound,
+    completionNotificationSoundEnabled,
+    completionNotificationSoundEnabled,
+  );
 }

@@ -67,7 +67,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
   let releasePlanning;
   let planningRequested = false;
   const planningGate = new Promise(resolve => { releasePlanning = resolve; });
-  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -368,6 +368,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
   } finally {
     releasePlanning();
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });
@@ -392,7 +393,7 @@ test("workspace removal commits backend deletion before pruning indexes and surv
   let rejectDeletion = true;
   let releaseDeletion;
   const deletionGate = new Promise(resolve => { releaseDeletion = resolve; });
-  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-deletion-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-deletion-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -517,6 +518,7 @@ test("workspace removal commits backend deletion before pruning indexes and surv
   } finally {
     releaseDeletion();
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });
@@ -533,7 +535,7 @@ test("workspace size warning appears after background Run completion and stays d
   const info = { path: repository, name: "Alpha", branch: "main", head: "", clean: true };
   const errors = [];
   const controls = [];
-  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-size-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-size-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -593,6 +595,7 @@ test("workspace size warning appears after background Run completion and stays d
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });
@@ -613,7 +616,7 @@ test("removing active workspace returns to home landing page instead of switchin
   const empty = { ...makeSnapshot("", repositoryA, ""), config: null, phase: "draft" };
   const info = repository => ({ path: repository, name: repository.includes("Beta") ? "Beta" : "Alpha", branch: "main", head: "", clean: true });
   const errors = [];
-  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-home-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-home-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -694,6 +697,133 @@ test("removing active workspace returns to home landing page instead of switchin
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
+    await server.close();
+  }
+});
+
+test("home composer accepts dragged image attachments and preserves them across history navigation", { timeout: 60_000 }, async () => {
+  const repositoryA = "/projects/alpha";
+  const repositoryB = "/projects/beta";
+  const config = { repository: repositoryA, model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const makeSnapshot = (runId, repository, goal) => ({
+    runId, config: { ...config, repository }, planType: "graph",
+    graph: { originalGoal: goal, nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false,
+    phase: "completed", base: "", feedbackCounts: {},
+  });
+  const snapshots = {
+    "run-a": makeSnapshot("run-a", repositoryA, "Alpha history conversation"),
+    "run-b": makeSnapshot("run-b", repositoryB, "Beta history conversation"),
+  };
+  const empty = { ...makeSnapshot("", repositoryA, ""), config: null, phase: "draft" };
+  const info = repository => ({ path: repository, name: repository.includes("beta") ? "Beta" : "Alpha", branch: "main", head: "", clean: true });
+  const errors = [];
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-ui-drop", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
+  let browser;
+  try {
+    await server.listen();
+    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 768 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(({ repositoryA, repositoryB, config }) => {
+      localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_projects", JSON.stringify([
+        { id: repositoryA, path: repositoryA, name: "Alpha", branch: "main", clean: true, lastOpened: 2 },
+        { id: repositoryB, path: repositoryB, name: "Beta", branch: "main", clean: true, lastOpened: 1 },
+      ]));
+      localStorage.setItem("grapher_workspace_runs", JSON.stringify({
+        [repositoryA]: ["run-a"],
+        [repositoryB]: ["run-b"],
+      }));
+      localStorage.setItem("grapher_run_labels", JSON.stringify({
+        "run-a": "Alpha history conversation",
+        "run-b": "Beta history conversation",
+      }));
+      localStorage.setItem("grapher_run_modes", JSON.stringify({ "run-a": "graph", "run-b": "graph" }));
+      localStorage.setItem("grapher_config", JSON.stringify(config));
+    }, { repositoryA, repositoryB, config });
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": case "save_config":
+          result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+        case "snapshot_if_changed": result = { version: "mock-1", snapshot: snapshots[body.runId] || null }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "detect_repository": result = info(body.path || body.repository); break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = { providers: [{ id: "test", name: "Test", methods: [], configured: true }], models: [], warning: null }; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "environment_capabilities": result = { platform: "macos", arch: "arm64", nativeWorkspace: true }; break;
+        default:
+          errors.push(`Unexpected API: ${command}`);
+          return route.fulfill({ status: 400, json: { error: `Unexpected API: ${command}` } });
+      }
+      await route.fulfill({ json: { result } });
+    });
+
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator(".landing-screen .prompt-box-container").waitFor();
+
+    // Drag a PNG image into the home composer via HTML5 drag-and-drop.
+    await page.evaluate(() => {
+      const target = document.querySelector(".landing-screen .prompt-box-container");
+      const pngBytes = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), c => c.charCodeAt(0));
+      const file = new File([pngBytes], "dropped-shot.png", { type: "image/png" });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    const previewImg = page.locator('.landing-screen .prompt-box-preview-img[alt="dropped-shot.png"]');
+    await previewImg.waitFor();
+    assert.ok((await previewImg.getAttribute("src"))?.startsWith("data:image/png;base64,"));
+
+    // Navigate into a historical conversation (unmounts LandingView).
+    await page.locator('[data-run-id="run-a"]').click();
+    await page.locator(".chat-messages-stream", { hasText: "Alpha history conversation" }).waitFor();
+    assert.equal(await page.locator(".landing-screen").count(), 0);
+
+    // Return to home via New Conversation and verify the image attachment is still present.
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await page.locator(".landing-screen").waitFor();
+    await previewImg.waitFor();
+    assert.ok((await previewImg.getAttribute("src"))?.startsWith("data:image/png;base64,"));
+
+    // Workspace isolation: switching to Beta hides Alpha's attachment; returning to Alpha restores it.
+    await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".project-workspace-item.active", { hasText: "Beta" }).waitFor();
+    await previewImg.waitFor({ state: "detached" });
+    assert.equal(await page.locator(".landing-screen .prompt-box-preview-img").count(), 0);
+
+    await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
+    await page.locator(".project-workspace-item.active", { hasText: "Alpha" }).waitFor();
+    await previewImg.waitFor();
+
+    // Window-level file drop guard prevents default browser navigation outside the composer.
+    const dropPrevented = await page.evaluate(() => {
+      const outside = document.querySelector(".landing-title-space");
+      const dt = new DataTransfer();
+      dt.items.add(new File(["hello"], "outside.txt", { type: "text/plain" }));
+      const event = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
+      outside.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    assert.equal(dropPrevented, true);
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });

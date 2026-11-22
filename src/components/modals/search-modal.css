@@ -1,0 +1,213 @@
+.modal-backdrop.workspace-search-backdrop {
+  align-items: flex-start;
+  padding-top: max(14vh, calc(var(--desktop-titlebar-inset, 0px) + 64px));
+}
+
+.modal.workspace-search-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(480px, calc(100dvh - var(--desktop-titlebar-inset, 0px) - 120px));
+  padding: 0;
+  gap: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  box-shadow: var(--shadow-modal);
+}
+
+.workspace-search-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  background: var(--bg-canvas);
+}
+
+.workspace-search-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.workspace-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 0;
+}
+
+.workspace-search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.workspace-search-input:focus,
+.workspace-search-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.workspace-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.workspace-search-clear:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.workspace-search-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.workspace-search-results {
+  border-top: 1px solid var(--border-subtle);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 6px;
+  background: var(--bg-canvas);
+}
+
+.workspace-search-results::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-search-empty {
+  padding: 20px 14px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.workspace-search-empty.is-error {
+  color: var(--status-danger-text);
+}
+
+.workspace-search-item {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.workspace-search-item:hover,
+.workspace-search-item.is-active {
+  background: var(--bg-surface-hover);
+}
+
+.workspace-search-item-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.workspace-search-item-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: color 0.1s ease;
+}
+
+.workspace-search-item.is-active .workspace-search-item-icon,
+.workspace-search-item:hover .workspace-search-item-icon {
+  color: var(--text-secondary);
+}
+
+.workspace-search-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-primary);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-search-item-tag {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.workspace-search-item-snippet {
+  box-sizing: border-box;
+  width: 100%;
+  padding-left: 23px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  text-align: left;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.workspace-search-highlight {
+  background: var(--brand-subtle);
+  color: var(--brand-default);
+  border-radius: 3px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
+.workspace-search-spin {
+  animation: workspace-search-spin 0.8s linear infinite;
+}
+
+@keyframes workspace-search-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

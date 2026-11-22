@@ -1045,7 +1045,7 @@ pub fn execution_command(
     data: &Path,
     session: &Path,
 ) -> Result<Command, String> {
-    execution_command_scoped(role, repository, cwd, data, session, &[])
+    execution_command_scoped(role, repository, cwd, data, session, &[], &[])
 }
 
 /// Describe the private-execution deny set for model-visible diagnostics.
@@ -1057,6 +1057,7 @@ pub fn execution_command(
 /// writes on Linux). `allowed` lists the exempted paths so a genuine error
 /// inside them stays a genuine error rather than a reported denial.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
 fn denied_paths_value(
     repository: &Path,
     source: &Path,
@@ -1067,6 +1068,7 @@ fn denied_paths_value(
     engine: &Path,
     allowances: &[PathBuf],
     merger_git: &[PathBuf],
+    read_only_data: &[PathBuf],
 ) -> String {
     let mut allowed = vec![current.to_path_buf(), session.to_path_buf()];
     if let Ok(state) = crate::workspace_state::prepare(current) {
@@ -1082,6 +1084,15 @@ fn denied_paths_value(
         }
     }
     allowed.extend(merger_git.iter().cloned());
+    let mut read_allowed = Vec::new();
+    for path in read_only_data {
+        read_allowed.push(path.clone());
+        if let Ok(actual) = crate::path_identity::actual_path(path) {
+            if actual != *path {
+                read_allowed.push(actual);
+            }
+        }
+    }
     let mut read = vec![
         source.to_path_buf(),
         worktree_root.to_path_buf(),
@@ -1113,6 +1124,7 @@ fn denied_paths_value(
         "read": host(&read),
         "write": host(&write),
         "allowed": host(&allowed),
+        "readAllowed": host(&read_allowed),
     })
     .to_string()
 }
@@ -1124,6 +1136,7 @@ pub(crate) fn execution_command_scoped(
     data: &Path,
     session: &Path,
     workspaces: &[PathBuf],
+    read_only_data: &[PathBuf],
 ) -> Result<Command, String> {
     validate_workspace(role, repository, cwd)?;
     let mut allowances = Vec::new();
@@ -1192,6 +1205,7 @@ pub(crate) fn execution_command_scoped(
         &engine,
         &allowances,
         &merger_git,
+        read_only_data,
     );
     #[cfg(target_os = "macos")]
     {
@@ -1207,6 +1221,7 @@ pub(crate) fn execution_command_scoped(
             &crate::native::installation_root(),
             &allowances,
             &merger_git,
+            read_only_data,
         )?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command
@@ -1230,7 +1245,7 @@ pub(crate) fn execution_command_scoped(
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = data;
+        let _ = (data, read_only_data);
         let _ = &merger_git;
         let mut command = unsandboxed_command(&engine, &current)?;
         bind_source_case(&mut command, &source);
@@ -1251,6 +1266,7 @@ pub(crate) fn execution_command_scoped(
             &pi_dir,
             &allowances,
             &merger_git,
+            read_only_data,
         )?;
         command.env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
@@ -1264,7 +1280,15 @@ pub(crate) fn execution_command_scoped(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        let _ = (&merger_git, source, worktree_root, data, session, engine);
+        let _ = (
+            &merger_git,
+            read_only_data,
+            source,
+            worktree_root,
+            data,
+            session,
+            engine,
+        );
         Err(
             "Native Graph execution is not available without a validated host filesystem sandbox"
                 .into(),
@@ -2079,6 +2103,7 @@ export default async function () {
             &data,
             &session,
             &slots[1..2],
+            &[],
         )
         .unwrap();
         command
@@ -2136,7 +2161,8 @@ export default async function () {
             &slots[0],
             &data,
             &session,
-            &slots[1..2]
+            &slots[1..2],
+            &[],
         )
         .is_err());
     }

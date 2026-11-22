@@ -2,7 +2,7 @@ use super::{store_write_guard, Store};
 use crate::model::{append_live_output, EventKind, Snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const CHUNK_BYTES: usize = 32 * 1024;
 
@@ -338,4 +338,262 @@ impl Store {
             complete: next == total,
         })
     }
+
+    /// Return the exact UTF-8 byte offset of each `grapherRequestId`-tagged
+    /// user turn in `0..end_offset`. Only chunks mentioning the marker (or a
+    /// possible split boundary) are inspected, so multi-megabyte logs stay fast.
+    pub fn execution_steer_offsets(
+        &self,
+        run: &str,
+        id: &str,
+        end_offset: usize,
+    ) -> Result<BTreeMap<String, usize>, String> {
+        self.execution_steer_offsets_from(run, id, 0, end_offset)
+    }
+
+    /// Incremental variant that only scans chunks overlapping `from_offset..end_offset`
+    /// (plus the single boundary chunk preceding `from_offset` to stay split-proof).
+    pub fn execution_steer_offsets_from(
+        &self,
+        run: &str,
+        id: &str,
+        from_offset: usize,
+        end_offset: usize,
+    ) -> Result<BTreeMap<String, usize>, String> {
+        let mut offsets = BTreeMap::new();
+        if end_offset == 0 || from_offset >= end_offset {
+            return Ok(offsets);
+        }
+        let scan_start: usize = if from_offset == 0 {
+            0
+        } else {
+            self.connection
+                .query_row(
+                    "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
+                    params![id, run, from_offset.saturating_sub(1) as i64],
+                    |row| row.get::<_, usize>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0)
+        };
+        // Split-proof half-token filter: `"grapherRequestId"` is `"grapher"` (0..7)
+        // + `"RequestId"` (7..16), so ANY 32KB chunk boundary leaves either `"RequestId"`
+        // intact in the right chunk or `"grapher"` intact near the left chunk's tail.
+        let mut stmt = self.connection.prepare(
+            "SELECT offset, text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 AND offset<?4 \
+             AND (instr(text, 'RequestId')>0 OR instr(substr(text, -16), 'grapher')>0) \
+             ORDER BY offset",
+        ).map_err(|e| e.to_string())?;
+        let candidates: Vec<(usize, String)> = stmt
+            .query_map(params![id, run, scan_start as i64, end_offset as i64], |row| {
+                Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        if candidates.is_empty() {
+            return Ok(offsets);
+        }
+        let mut seen_line_starts = std::collections::HashSet::new();
+        for (chunk_offset, chunk_text) in candidates {
+            let valid_len = floor_boundary(&chunk_text, end_offset.saturating_sub(chunk_offset));
+            let slice = &chunk_text[..valid_len];
+            let mut search_from = 0;
+            let mut match_positions = Vec::new();
+            while let Some(pos) = slice[search_from..].find("RequestId") {
+                match_positions.push(search_from + pos);
+                search_from += pos + "RequestId".len();
+            }
+            let tail_start = floor_boundary(slice, slice.len().saturating_sub(16));
+            if slice.len() == chunk_text.len()
+                && chunk_offset + chunk_text.len() < end_offset
+                && slice[tail_start..].contains("grapher")
+            {
+                match_positions.push(slice.len());
+            }
+            for rel_pos in match_positions {
+                let Some((line_start, line_text, truncated)) = self.extract_steer_line(
+                    run,
+                    id,
+                    chunk_offset,
+                    &chunk_text,
+                    rel_pos,
+                    end_offset,
+                )?
+                else {
+                    continue;
+                };
+                if !seen_line_starts.insert(line_start) {
+                    continue;
+                }
+                let trimmed = line_text.trim();
+                if !trimmed.contains("\"grapherRequestId\"") {
+                    continue;
+                }
+                if let Some(request_id) = parse_steer_event_request_id(trimmed, truncated) {
+                    offsets.entry(request_id).or_insert(line_start);
+                }
+            }
+        }
+        Ok(offsets)
+    }
+
+    fn extract_steer_line(
+        &self,
+        run: &str,
+        id: &str,
+        chunk_offset: usize,
+        chunk_text: &str,
+        rel_pos: usize,
+        end_offset: usize,
+    ) -> Result<Option<(usize, String, bool)>, String> {
+        // Tagged user turns emitted by pi-compat place `"grapherRequestId"` at
+        // the start of the JSON line. Reject matches deep inside multi-KB tool
+        // outputs or assistant bodies without scanning megabytes of log chunks.
+        const MAX_LOOKBACK: usize = 4 * 1024;
+        const MAX_LINE_BYTES: usize = 64 * 1024;
+
+        let mut line_start = chunk_offset;
+        let mut prefix_parts: Vec<String> = Vec::new();
+        let before = &chunk_text[..rel_pos.min(chunk_text.len())];
+        if let Some(nl) = before.rfind('\n') {
+            let tail = &before[nl + 1..];
+            if tail.len() > MAX_LOOKBACK {
+                return Ok(None);
+            }
+            line_start = chunk_offset + nl + 1;
+            prefix_parts.push(tail.to_string());
+        } else {
+            let mut lookback = before.len();
+            if lookback > MAX_LOOKBACK {
+                return Ok(None);
+            }
+            prefix_parts.push(before.to_string());
+            let mut cursor = chunk_offset;
+            while cursor > 0 {
+                let prev: Option<(usize, String)> = self
+                    .connection
+                    .query_row(
+                        "SELECT offset, text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<?3 ORDER BY offset DESC LIMIT 1",
+                        params![id, run, cursor as i64],
+                        |row| Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let Some((prev_offset, prev_text)) = prev else {
+                    break;
+                };
+                if prev_offset >= cursor {
+                    break;
+                }
+                if let Some(nl) = prev_text.rfind('\n') {
+                    let tail = &prev_text[nl + 1..];
+                    if lookback.saturating_add(tail.len()) > MAX_LOOKBACK {
+                        return Ok(None);
+                    }
+                    line_start = prev_offset + nl + 1;
+                    prefix_parts.push(tail.to_string());
+                    break;
+                }
+                lookback = lookback.saturating_add(prev_text.len());
+                if lookback > MAX_LOOKBACK {
+                    return Ok(None);
+                }
+                line_start = prev_offset;
+                prefix_parts.push(prev_text);
+                cursor = prev_offset;
+            }
+        }
+        prefix_parts.reverse();
+        let mut line = prefix_parts.concat();
+
+        let mut truncated = false;
+        let valid_len = floor_boundary(chunk_text, end_offset.saturating_sub(chunk_offset));
+        let after_start = rel_pos.min(valid_len);
+        let after = &chunk_text[after_start..valid_len];
+        if let Some(nl) = after.find('\n') {
+            line.push_str(&after[..nl]);
+        } else {
+            let remaining = MAX_LINE_BYTES.saturating_sub(line.len());
+            if after.len() > remaining {
+                let take = floor_boundary(after, remaining);
+                line.push_str(&after[..take]);
+                truncated = true;
+            } else {
+                line.push_str(after);
+                let mut next_cursor = chunk_offset + chunk_text.len();
+                while next_cursor < end_offset {
+                    let next_chunk: Option<(usize, String)> = self
+                        .connection
+                        .query_row(
+                            "SELECT offset, text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 ORDER BY offset ASC LIMIT 1",
+                            params![id, run, next_cursor as i64],
+                            |row| Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    let Some((next_offset, next_text)) = next_chunk else {
+                        break;
+                    };
+                    if next_text.is_empty() {
+                        break;
+                    }
+                    let next_valid =
+                        floor_boundary(&next_text, end_offset.saturating_sub(next_offset));
+                    let next_slice = &next_text[..next_valid];
+                    if let Some(nl) = next_slice.find('\n') {
+                        line.push_str(&next_slice[..nl]);
+                        break;
+                    }
+                    let remaining = MAX_LINE_BYTES.saturating_sub(line.len());
+                    if next_slice.len() > remaining {
+                        let take = floor_boundary(next_slice, remaining);
+                        line.push_str(&next_slice[..take]);
+                        truncated = true;
+                        break;
+                    }
+                    line.push_str(next_slice);
+                    next_cursor = next_offset + next_text.len();
+                }
+            }
+        }
+        Ok(Some((line_start, line, truncated)))
+    }
+}
+
+fn parse_steer_event_request_id(trimmed: &str, truncated: bool) -> Option<String> {
+    if !truncated {
+        let event = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+        if !matches!(
+            event["type"].as_str(),
+            Some("message_start" | "message_end")
+        ) || event["message"]["role"].as_str() != Some("user")
+        {
+            return None;
+        }
+        return event["grapherRequestId"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+    }
+    // Oversized line (e.g. a multi-MB base64 image steer): parse only the
+    // leading envelope emitted by pi-compat (`{"grapherRequestId":"...",
+    // "type":"message_start"|"message_end","message":{"role":"user",...`).
+    let rest = trimmed.strip_prefix("{\"grapherRequestId\":")?;
+    let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+    let request_id = stream.next()?.ok()?;
+    if request_id.is_empty() {
+        return None;
+    }
+    let after_id = &rest[stream.byte_offset()..];
+    let after_type = after_id
+        .strip_prefix(",\"type\":\"message_start\"")
+        .or_else(|| after_id.strip_prefix(",\"type\":\"message_end\""))?;
+    let after_msg = after_type.strip_prefix(",\"message\":{")?;
+    let header_end = after_msg.find("\"content\":").unwrap_or(after_msg.len());
+    if !after_msg[..header_end].contains("\"role\":\"user\"") {
+        return None;
+    }
+    Some(request_id)
 }

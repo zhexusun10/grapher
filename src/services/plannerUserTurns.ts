@@ -1,4 +1,5 @@
 import type { ChatMessage, PlanningSummary } from "../types";
+import { stripLeadingAttachmentPrefix } from "../utils/attachmentPath";
 import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./plannerText";
 
 /** A live continuation seeds the stream with the message being edited. The
@@ -66,10 +67,10 @@ export function firstPlannerUserIsSteer(output: string): boolean {
   return false;
 }
 
-/** Prompt attachments travel as XML ahead of the user's text; editing a saved
+/** Prompt attachments travel ahead of the user's text; editing a saved
  * turn can persist them even though the header shows only the clean text. */
 function withoutAttachmentPrefix(text: string): string {
-  return text.replace(/^(?:<file name="[^"]+">[\s\S]*?<\/file>\s*)+/, "").trim();
+  return stripLeadingAttachmentPrefix(text);
 }
 
 /** Compare a local prompt with the same prompt in a planning summary or log. */

@@ -1,6 +1,8 @@
 //! Byte reads do not hold a Run's projection mutex while reading SQLite,
 //! parsing derived counters, or serializing the page.
 use super::*;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 pub(super) struct ExecutionOutputRead {
     root: PathBuf,
@@ -12,6 +14,7 @@ pub(super) struct ExecutionOutputRead {
     output_bytes: usize,
     missing_metrics: bool,
     missing_context: bool,
+    has_steers: bool,
 }
 
 pub(super) fn capture_execution_output(
@@ -43,6 +46,9 @@ pub(super) fn capture_execution_output(
         missing_context: execution.metrics.as_ref().is_some_and(|metrics| {
             metrics.context_usage.is_none() && metrics.assistant_messages > 0
         }),
+        has_steers: runtime.state.events.iter().any(|event| {
+            matches!(&event.kind, EventKind::Steered { execution_id, .. } if execution_id == &execution.id)
+        }),
     })
 }
 
@@ -52,6 +58,208 @@ pub(super) fn get_execution_output(
 ) -> Result<serde_json::Value, String> {
     let read = capture_execution_output(body, service)?;
     read_execution_output(body, service, read)
+}
+
+const MAX_HYDRATE_RANGES: usize = 64;
+const MAX_HYDRATE_RAW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STEER_CACHE_ENTRIES: usize = 256;
+
+struct SteerOffsetCacheEntry {
+    scanned_end: usize,
+    offsets: BTreeMap<String, usize>,
+}
+
+struct SteerOffsetCache {
+    entries: HashMap<(PathBuf, String, String), SteerOffsetCacheEntry>,
+    order: std::collections::VecDeque<(PathBuf, String, String)>,
+}
+
+impl SteerOffsetCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn invalidate(&mut self, run_id: Option<&str>) {
+        match run_id {
+            Some(target) => {
+                self.entries.retain(|(_, r, _), _| r != target);
+                self.order.retain(|(_, r, _)| r != target);
+            }
+            None => {
+                self.entries.clear();
+                self.order.clear();
+            }
+        }
+    }
+}
+
+fn steer_offset_cache() -> &'static Mutex<SteerOffsetCache> {
+    static CACHE: OnceLock<Mutex<SteerOffsetCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SteerOffsetCache::new()))
+}
+
+pub(crate) fn invalidate_steer_offset_cache(run_id: Option<&str>) {
+    if let Ok(mut cache) = steer_offset_cache().lock() {
+        cache.invalidate(run_id);
+    }
+}
+
+fn cached_steer_offsets(
+    store: &crate::store::Store,
+    root: &Path,
+    run_id: &str,
+    execution_id: &str,
+    end: usize,
+) -> Result<BTreeMap<String, usize>, String> {
+    let key = (
+        root.to_path_buf(),
+        run_id.to_string(),
+        execution_id.to_string(),
+    );
+    let (cached_end, mut cached_offsets) = {
+        let guard = steer_offset_cache().lock().map_err(|e| e.to_string())?;
+        if let Some(entry) = guard.entries.get(&key) {
+            if entry.scanned_end >= end {
+                let filtered = entry
+                    .offsets
+                    .iter()
+                    .filter(|(_, &offset)| offset < end)
+                    .map(|(req, &offset)| (req.clone(), offset))
+                    .collect();
+                return Ok(filtered);
+            }
+            (entry.scanned_end, entry.offsets.clone())
+        } else {
+            (0, BTreeMap::new())
+        }
+    };
+
+    let delta = store.execution_steer_offsets_from(run_id, execution_id, cached_end, end)?;
+    for (req, offset) in delta {
+        cached_offsets.entry(req).or_insert(offset);
+    }
+
+    if let Ok(mut guard) = steer_offset_cache().lock() {
+        if let Some(entry) = guard.entries.get_mut(&key) {
+            if end > entry.scanned_end {
+                entry.scanned_end = end;
+                for (req, &offset) in &cached_offsets {
+                    entry.offsets.entry(req.clone()).or_insert(offset);
+                }
+            }
+        } else {
+            while guard.entries.len() >= MAX_STEER_CACHE_ENTRIES {
+                if let Some(oldest) = guard.order.pop_front() {
+                    guard.entries.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+            guard.order.push_back(key.clone());
+            guard.entries.insert(
+                key,
+                SteerOffsetCacheEntry {
+                    scanned_end: end,
+                    offsets: cached_offsets.clone(),
+                },
+            );
+        }
+    }
+
+    Ok(cached_offsets
+        .into_iter()
+        .filter(|(_, offset)| *offset < end)
+        .collect())
+}
+
+pub(super) fn parse_hydrate_ranges(
+    body: &serde_json::Value,
+    max_end: usize,
+) -> Result<Option<Vec<(usize, usize)>>, String> {
+    let Some(raw_ranges) = body.get("ranges") else {
+        return Ok(None);
+    };
+    let Some(items) = raw_ranges.as_array() else {
+        return Err("Invalid hydrate ranges".into());
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if items.len() > MAX_HYDRATE_RANGES {
+        return Err("Too many hydrate ranges".into());
+    }
+    let mut spans = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(pair) = item.as_array() else {
+            return Err("Invalid hydrate range entry".into());
+        };
+        if pair.len() != 2 {
+            return Err("Invalid hydrate range entry".into());
+        }
+        let start = pair[0]
+            .as_u64()
+            .ok_or("Invalid hydrate range start")? as usize;
+        let end = pair[1]
+            .as_u64()
+            .ok_or("Invalid hydrate range end")? as usize;
+        let clamped_end = end.min(max_end);
+        if start >= clamped_end {
+            continue;
+        }
+        spans.push((start, clamped_end));
+    }
+    if spans.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    let mut total_bytes = 0usize;
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                let extra = end.saturating_sub(last.1);
+                if total_bytes.saturating_add(extra) > MAX_HYDRATE_RAW_BYTES {
+                    return Err("Hydrate range exceeds byte budget".into());
+                }
+                total_bytes += extra;
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        let len = end - start;
+        if total_bytes.saturating_add(len) > MAX_HYDRATE_RAW_BYTES {
+            return Err("Hydrate range exceeds byte budget".into());
+        }
+        total_bytes += len;
+        merged.push((start, end));
+    }
+    Ok(Some(merged))
+}
+
+pub(super) fn parse_requested_projection(
+    body: &serde_json::Value,
+    settled: bool,
+) -> Option<crate::compact_transcript::TranscriptProjection> {
+    if body.get("full").and_then(serde_json::Value::as_bool) == Some(true) {
+        return None;
+    }
+    if body
+        .get("summaryOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(crate::compact_transcript::TranscriptProjection::Summary);
+    }
+    match body.get("projection").and_then(serde_json::Value::as_str) {
+        Some("summary") => Some(crate::compact_transcript::TranscriptProjection::Summary),
+        Some("cards") if settled => {
+            Some(crate::compact_transcript::TranscriptProjection::CardShell)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn read_execution_output(
@@ -72,11 +280,65 @@ pub(super) fn read_execution_output(
         .get("before")
         .map(|_| argument(body, "before"))
         .transpose()?;
+    let settled = read.status != "running";
+    let projection = parse_requested_projection(body, settled);
+    let summary_only =
+        projection == Some(crate::compact_transcript::TranscriptProjection::Summary);
     let path = read.root.join("events.sqlite");
     let store = crate::store::Store::open_reader(&path)?;
     store.ensure_not_deleted(&read.run_id)?;
     let total = store.log_bytes(&read.run_id, &read.execution_id)?;
-    let limit = if read.status != "running"
+    let end = body
+        .get("endOffset")
+        .map(|_| argument::<usize>(body, "endOffset"))
+        .transpose()?
+        .unwrap_or(total)
+        .min(total);
+
+    if let Some(ranges) = parse_hydrate_ranges(body, end)? {
+        let mut content = String::new();
+        let mut min_start = end;
+        let mut max_end = 0usize;
+        for (range_start, range_end) in ranges {
+            min_start = min_start.min(range_start);
+            max_end = max_end.max(range_end);
+            let raw_page = store.execution_log_page(
+                &read.run_id,
+                &read.execution_id,
+                range_start,
+                range_end - range_start,
+            )?;
+            content.push_str(&crate::compact_transcript::hydrate_raw_slice(
+                &raw_page.content,
+                raw_page.start_offset,
+            ));
+        }
+        if min_start > max_end {
+            min_start = 0;
+        }
+        return serde_json::to_value(crate::api_contract::ExecutionOutputPage {
+            run_id: read.run_id,
+            execution_id: read.execution_id,
+            content,
+            start_offset: min_start,
+            next_offset: max_end,
+            total_bytes: end,
+            complete: true,
+            status: read.status,
+            steer_offsets: None,
+            steer_offsets_authoritative: None,
+            summary_only: None,
+            projection: Some("hydrated".into()),
+        })
+        .map_err(|e| e.to_string());
+    }
+
+    let max_limit = if projection.is_some() {
+        2 * 1024 * 1024
+    } else {
+        1024 * 1024
+    };
+    let limit = if settled
         && body.get("full").and_then(serde_json::Value::as_bool) == Some(true)
     {
         usize::MAX
@@ -85,15 +347,61 @@ pub(super) fn read_execution_output(
             .map(|_| argument::<usize>(body, "limit"))
             .transpose()?
             .unwrap_or(256 * 1024)
-            .clamp(4, 1024 * 1024)
+            .clamp(4, max_limit)
     };
-    let end = body
-        .get("endOffset")
-        .map(|_| argument::<usize>(body, "endOffset"))
-        .transpose()?
-        .unwrap_or(total)
-        .min(total);
-    let mut page = if tail {
+    let mut page = if let Some(proj) = projection {
+        if tail {
+            let target_end = before.unwrap_or(end).min(end);
+            let compact_limit = limit.clamp(4, 2 * 1024 * 1024);
+            let (content, start_offset) =
+                crate::compact_transcript::compact_tail_pages_with_options(
+                    target_end,
+                    compact_limit,
+                    proj,
+                    settled,
+                    |cursor, raw_limit| {
+                        let raw_page = store.execution_log_tail_page(
+                            &read.run_id,
+                            &read.execution_id,
+                            cursor,
+                            raw_limit,
+                        )?;
+                        Ok((raw_page.start_offset, raw_page.content))
+                    },
+                )?;
+            crate::store::LogPage {
+                content,
+                start_offset,
+                next_offset: target_end,
+                total_bytes: end,
+                complete: target_end == end,
+            }
+        } else {
+            if offset > end {
+                return Err("Invalid prefix output offset".into());
+            }
+            let raw_limit = (4 * 1024 * 1024usize).min(end - offset);
+            let raw_page =
+                store.execution_log_page(&read.run_id, &read.execution_id, offset, raw_limit)?;
+            let reached_eof = raw_page.next_offset == end;
+            let (content, consumed) =
+                crate::compact_transcript::compact_forward_chunk_with_options(
+                    &raw_page.content,
+                    raw_page.start_offset,
+                    reached_eof,
+                    proj,
+                    settled,
+                );
+            let next_offset = raw_page.start_offset + consumed;
+            crate::store::LogPage {
+                content,
+                start_offset: raw_page.start_offset,
+                next_offset,
+                total_bytes: end,
+                complete: next_offset == end,
+            }
+        }
+    } else if tail {
         store.execution_log_tail_page(
             &read.run_id,
             &read.execution_id,
@@ -113,7 +421,7 @@ pub(super) fn read_execution_output(
     };
     page.total_bytes = end;
     page.complete = page.next_offset == end;
-    let terminal_eof = end == total && read.status != "running" && page.complete;
+    let terminal_eof = projection.is_none() && end == total && settled && page.complete;
     let metrics = (terminal_eof && page.start_offset == 0 && read.missing_metrics).then(|| {
         parse_execution_metrics(
             &page.content,
@@ -133,9 +441,7 @@ pub(super) fn read_execution_output(
     };
     // File changes have their own fenced, scoped API. Reading a transcript
     // must not also parse tools or refresh a file-change cache as a side effect.
-    if read.status != "running"
-        && (metrics.is_some() || context.is_some() || total > read.output_bytes)
-    {
+    if settled && (metrics.is_some() || context.is_some() || total > read.output_bytes) {
         publish_read_metadata(
             service,
             ReadMetadata {
@@ -149,6 +455,14 @@ pub(super) fn read_execution_output(
             },
         );
     }
+    let (steer_offsets, steer_offsets_authoritative) = if read.has_steers {
+        let offsets =
+            cached_steer_offsets(&store, &read.root, &read.run_id, &read.execution_id, end)?;
+        let authoritative = !settled || !offsets.is_empty();
+        (Some(offsets), Some(authoritative))
+    } else {
+        (None, None)
+    };
     serde_json::to_value(crate::api_contract::ExecutionOutputPage {
         run_id: read.run_id,
         execution_id: read.execution_id,
@@ -158,6 +472,10 @@ pub(super) fn read_execution_output(
         total_bytes: page.total_bytes,
         complete: page.complete,
         status: read.status,
+        steer_offsets,
+        steer_offsets_authoritative,
+        summary_only: summary_only.then_some(true),
+        projection: projection.map(|p| p.as_str().to_string()),
     })
     .map_err(|e| e.to_string())
 }

@@ -25,6 +25,7 @@ import { TranscriptItem } from "../types";
 import { formatToolDuration } from "../utils/toolTiming";
 import { truncateToolText } from "../services/toolOutput";
 import { syncOverscrollContainment } from "../services/transcriptScroll";
+import { observeElementResize } from "../services/sharedResizeObserver";
 
 interface ToolCallCardProps {
   item: TranscriptItem;
@@ -68,37 +69,39 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       };
     }, []);
-    // Code blocks are scrollable only when their own content overflows. A
-    // contained but non-scrollable block would swallow the conversation wheel.
-    // One observer per mounted card watches the blocks that exist now and any
-    // block React adds later, instead of rebuilding observers on every streamed
-    // token (the card re-renders for each delta).
+    const [localExpanded, setLocalExpanded] = useState(defaultExpanded);
+    const isExpanded = expanded ?? localExpanded;
+
+    // Only observe `<pre>` overflow while the card body is actually mounted.
+    // Historical conversations can render dozens of collapsed tool cards;
+    // skipping per-card ResizeObserver/MutationObserver until expanded keeps
+    // scrollback and layout free of idle observer overhead.
     useLayoutEffect(() => {
       const card = cardRef.current;
-      if (!card) return;
+      if (!card || !isExpanded) return;
       const selector = "pre.tool-command-code, pre.tool-args-code, pre.tool-result-code";
-      const resize = typeof ResizeObserver === "undefined" ? null
-        : new ResizeObserver(entries => {
-            for (const entry of entries) syncOverscrollContainment(entry.target as HTMLElement);
-          });
-      const observed = new Set<HTMLElement>();
+      const observed = new Map<HTMLElement, () => void>();
       const sync = () => {
         const current = new Set(card.querySelectorAll<HTMLElement>(selector));
         for (const node of current) {
           if (!observed.has(node)) {
-            observed.add(node);
-            resize?.observe(node);
+            observed.set(node, observeElementResize(node, () => syncOverscrollContainment(node)));
           }
           syncOverscrollContainment(node);
         }
-        for (const node of observed) {
+        for (const [node, unobserve] of observed) {
           if (current.has(node)) continue;
+          unobserve();
           observed.delete(node);
-          resize?.unobserve(node);
         }
       };
       sync();
-      if (typeof MutationObserver === "undefined") return () => resize?.disconnect();
+      if (typeof MutationObserver === "undefined") {
+        return () => {
+          for (const unobserve of observed.values()) unobserve();
+          observed.clear();
+        };
+      }
       // Text deltas mutate the existing <pre> content without changing its
       // identity, so watch character data as well as inserted/removed blocks.
       // Mutation callbacks are delivered at the microtask checkpoint before
@@ -108,18 +111,23 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       mutations.observe(card, { childList: true, characterData: true, subtree: true });
       return () => {
         mutations.disconnect();
-        resize?.disconnect();
+        for (const unobserve of observed.values()) unobserve();
+        observed.clear();
       };
-    }, []);
+    }, [isExpanded]);
 
     const toolName = item.toolName || "tool";
     const args = item.args || {};
     const status = item.status || "success";
     // Also protect direct/live card callers that do not use the JSONL parser.
-    const resultPreview = useMemo(() => truncateToolText(item.result || ""), [item.result]);
+    const resultPreview = useMemo(() => (item.result ? truncateToolText(item.result) : { text: "", truncated: false }), [item.result]);
     const resultText = resultPreview.text;
     // Direct callers may still hand us whole file bodies as arguments.
-    const argsText = useMemo(() => truncateToolText(JSON.stringify(args, null, 2)), [args]);
+    // Skip JSON serialization while collapsed so historical lists stay fast.
+    const argsText = useMemo(
+      () => (isExpanded ? truncateToolText(JSON.stringify(args, null, 2)) : { text: "", truncated: false }),
+      [args, isExpanded],
+    );
 
     // Extract structured exit code
     const exitCode = useMemo(() => {
@@ -139,18 +147,18 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     // Detect masked subcommand step errors or real test failures (avoiding false positives from mere word FAIL)
     const hasSubcommandWarning = useMemo(() => {
-      if (isError || exitCode !== 0 || !resultText) return false;
+      if (isError || exitCode !== 0) return false;
+      if (item.subcommandWarning) return true;
+      if (!resultText) return false;
       const text = resultText;
       return (
         text.includes("[grapher:step_error") ||
         /\b(?:not ok\s+\d+|✖\s+[^\n]+|AssertionError:)\b/.test(text)
       );
-    }, [isError, exitCode, resultText]);
+    }, [isError, exitCode, item.subcommandWarning, resultText]);
 
-    const [localExpanded, setIsExpanded] = useState(defaultExpanded);
-    const isExpanded = expanded ?? localExpanded;
     const toggleExpanded = () => {
-      setIsExpanded(!isExpanded);
+      setLocalExpanded(!isExpanded);
       onExpandedChange?.(!isExpanded, cardRef.current ?? undefined);
     };
 
@@ -227,7 +235,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
-      const textToCopy = resultText || argsText.text;
+      const textToCopy = resultText || (argsText.text || truncateToolText(JSON.stringify(args, null, 2)).text);
       if (!textToCopy || !navigator.clipboard?.writeText) return;
       navigator.clipboard.writeText(textToCopy).then(() => {
         if (!mountedRef.current) return;
@@ -238,8 +246,8 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     };
 
     const isInterrupted = useMemo(
-      () => /(?:中断|终止|terminated|interrupted)/i.test(resultText),
-      [resultText]
+      () => Boolean(item.interruptedOutput) || /(?:中断|终止|terminated|interrupted)/i.test(resultText),
+      [item.interruptedOutput, resultText]
     );
 
     const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, item.animateAppear);
@@ -388,7 +396,16 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 </div>
               )}
 
-              {item.result !== undefined && item.result !== null && (
+              {item.hydrating && item.bodyOmitted && (
+                <div className="tool-result-section">
+                  <div className="tool-status running" style={{ padding: "6px 0" }}>
+                    <Loader2 size={12} className="spin" />
+                    <span>{t("正在加载历史记录…")}</span>
+                  </div>
+                </div>
+              )}
+
+              {item.result !== undefined && item.result !== null && !(item.hydrating && item.resultOmitted) && (
                 <div className="tool-result-section">
                   <div className="section-label">
                     {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}

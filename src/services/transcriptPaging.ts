@@ -2,6 +2,10 @@
  * bounded byte requests, not full-history reads; layout separately fills two views. */
 export const INITIAL_TRANSCRIPT_BYTES = 512 * 1024;
 export const OLDER_TRANSCRIPT_BYTES = 1024 * 1024;
+/** Summary-only projections strip tool results and thinking bodies (~10–50x smaller),
+ * so collapsed conversations can safely request much longer history per page. */
+export const SUMMARY_INITIAL_TRANSCRIPT_BYTES = 1024 * 1024;
+export const SUMMARY_OLDER_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 export const TRANSCRIPT_VIEWPORT_BUFFER = 2;
 /** Stop sparse initial/history auto-fill after this many loaded bytes per gesture.
  * A single in-flight page (including boundary look-behind) can cross the budget. */
@@ -10,15 +14,19 @@ export const MAX_AUTO_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
  * initial transcript page) load eagerly together so short histories render
  * completely on open without placeholder collapses during the first scroll. */
 export const EAGER_EXECUTION_COUNT_LIMIT = 6;
+export const SUMMARY_EAGER_EXECUTION_COUNT_LIMIT = 12;
 
 export function shouldDeferOlderExecutions(
   executions: readonly { outputBytes?: number }[],
+  cardsCollapsed = false,
 ): boolean {
-  if (executions.length > EAGER_EXECUTION_COUNT_LIMIT) return true;
+  const countLimit = cardsCollapsed ? SUMMARY_EAGER_EXECUTION_COUNT_LIMIT : EAGER_EXECUTION_COUNT_LIMIT;
+  const byteLimit = cardsCollapsed ? INITIAL_TRANSCRIPT_BYTES * 8 : INITIAL_TRANSCRIPT_BYTES;
+  if (executions.length > countLimit) return true;
   let totalBytes = 0;
   for (const execution of executions) {
     totalBytes += execution.outputBytes ?? 0;
-    if (totalBytes > INITIAL_TRANSCRIPT_BYTES) return true;
+    if (totalBytes > byteLimit) return true;
   }
   return false;
 }

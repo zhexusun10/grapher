@@ -1,0 +1,10 @@
+[[permission]]
+identifier = "allow-desktop-notification"
+description = "Allows the main window to check/request OS notification permission, open OS notification settings, and send native OS completion notifications when the window is not focused."
+commands.allow = [
+  "send_desktop_notification",
+  "desktop_notification_permission_status",
+  "request_desktop_notification_permission",
+  "open_desktop_notification_settings",
+  "take_pending_notification_click",
+]

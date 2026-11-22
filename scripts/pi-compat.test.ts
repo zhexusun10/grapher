@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { accessSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { SessionManager } from '../pi/packages/coding-agent/src/core/session-manager.ts';
+import { AgentSession } from '../pi/packages/coding-agent/src/core/agent-session.ts';
 import { ExtensionRunner } from '../pi/packages/coding-agent/src/core/extensions/runner.ts';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, relative, isAbsolute } from 'node:path';
@@ -15,7 +16,7 @@ import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities, composerCommandsExtension, clearUnreadQueue,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
-  assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager, installDefaultAggressiveTrim,
+  assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager, installDefaultAggressiveTrim, installQueueIdentity,
 } from '../engine/pi-compat.ts';
 
 test('retired Pi sessions are rejected before migration and current sessions retain Run identity', () => {
@@ -648,5 +649,77 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
     for (const id of ['deepseek-v3.2', 'deepseek-v4-flash']) {
       assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: retired in Pi 1.6.0`);
     }
+  }
+});
+
+test('installQueueIdentity tags emitted message_start/message_end with grapherRequestId even when text is rewritten', async () => {
+  const originalPrompt = AgentSession.prototype.prompt;
+  const originalSubscribe = AgentSession.prototype.subscribe;
+  const originalAgentSteer = Agent.prototype.steer;
+  const originalAgentPrompt = Agent.prototype.prompt;
+  const listeners: Array<(event: any) => void> = [];
+  const emitted: any[] = [];
+  const steerId = '12345678-1234-4123-8123-123456789abc';
+  const idleId = '87654321-4321-4321-8321-cba987654321';
+  try {
+    AgentSession.prototype.subscribe = function (listener: any) {
+      listeners.push(listener);
+      return () => {};
+    };
+    Agent.prototype.steer = function (message: any) {
+      for (const listener of listeners) {
+        listener({ type: 'message_start', message });
+        listener({ type: 'message_end', message });
+      }
+    };
+    Agent.prototype.prompt = async function (input: any) {
+      const list = Array.isArray(input) ? input : [input];
+      for (const message of list) {
+        for (const listener of listeners) listener({ type: 'message_start', message });
+      }
+    };
+    AgentSession.prototype.prompt = async function (text: string, options?: any) {
+      // Simulate an extension input hook completely rewriting the user text.
+      const rewritten = { role: 'user' as const, content: [{ type: 'text' as const, text: `REWRITTEN:${text}` }], timestamp: 1 };
+      if (options?.streamingBehavior === 'steer') {
+        this.agent.steer(rewritten);
+      } else {
+        await this.agent.prompt([rewritten]);
+      }
+    };
+
+    const restore = installQueueIdentity();
+    try {
+      const fakeAgent = Object.create(Agent.prototype);
+      const fakeSession = Object.create(AgentSession.prototype);
+      fakeSession.agent = fakeAgent;
+      fakeSession.subscribe((event: any) => emitted.push(event));
+
+      await fakeSession.prompt(`original steer\n\n<grapher-node-steer-id>${steerId}</grapher-node-steer-id>`, {
+        source: 'rpc', streamingBehavior: 'steer',
+      });
+      await fakeSession.prompt(`idle steer\n\n<grapher-node-steer-id>${idleId}</grapher-node-steer-id>`, {
+        source: 'rpc',
+      });
+      await fakeSession.prompt('unmarked prompt', { source: 'rpc' });
+
+      assert.equal(emitted.length, 4);
+      assert.equal(emitted[0].type, 'message_start');
+      assert.equal(emitted[0].grapherRequestId, steerId);
+      assert.equal(emitted[0].message.content[0].text, 'REWRITTEN:original steer');
+      assert.equal('grapherRequestId' in emitted[0].message, false, 'must not mutate the AgentMessage object');
+      assert.equal(emitted[1].type, 'message_end');
+      assert.equal(emitted[1].grapherRequestId, steerId);
+      assert.equal(emitted[2].grapherRequestId, idleId);
+      assert.equal(emitted[2].message.content[0].text, 'REWRITTEN:idle steer');
+      assert.equal(emitted[3].grapherRequestId, undefined);
+    } finally {
+      restore();
+    }
+  } finally {
+    AgentSession.prototype.prompt = originalPrompt;
+    AgentSession.prototype.subscribe = originalSubscribe;
+    Agent.prototype.steer = originalAgentSteer;
+    Agent.prototype.prompt = originalAgentPrompt;
   }
 });

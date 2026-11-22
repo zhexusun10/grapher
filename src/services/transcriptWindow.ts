@@ -1,5 +1,7 @@
 import { utf8Bytes } from "../lib/BoundedLruCache";
 
+export type TranscriptProjectionMode = "summary" | "cards";
+
 /** A contiguous byte range. Older reads move start; live reads move end.
  * The two cursors must never be interchanged, even when requests overlap. */
 export interface TranscriptWindow {
@@ -8,6 +10,10 @@ export interface TranscriptWindow {
   end: number;
   total: number;
   settled: boolean;
+  summaryOnly?: boolean;
+  projection?: TranscriptProjectionMode;
+  steerOffsets?: Record<string, number>;
+  steerOffsetsAuthoritative?: boolean;
 }
 
 export interface TranscriptPage {
@@ -15,22 +21,47 @@ export interface TranscriptPage {
   startOffset: number;
   nextOffset: number;
   totalBytes: number;
+  summaryOnly?: boolean;
+  projection?: string;
+  steerOffsets?: Record<string, number>;
+  steerOffsetsAuthoritative?: boolean;
+}
+
+export function normalizeTranscriptProjection(value: { summaryOnly?: boolean; projection?: string } | null | undefined): TranscriptProjectionMode | undefined {
+  if (!value) return undefined;
+  if (value.projection === "summary" || value.summaryOnly) return "summary";
+  if (value.projection === "cards") return "cards";
+  return undefined;
 }
 
 export function windowFromPage(page: TranscriptPage, settled: boolean): TranscriptWindow {
   const start = page.startOffset;
+  const projection = normalizeTranscriptProjection(page);
+  const summaryOnly = projection === "summary";
   // Comparisons alone accept NaN/Infinity totals and fractional byte cursors.
   // Those can poison the cache or keep an incomplete-page poll spinning forever.
   if (![start, page.nextOffset, page.totalBytes].every(value => Number.isSafeInteger(value) && value >= 0) ||
       page.nextOffset < start || page.nextOffset > page.totalBytes ||
-      utf8Bytes(page.content) !== page.nextOffset - start) throw new Error("Invalid transcript byte range");
-  return { text: page.content, start, end: page.nextOffset, total: page.totalBytes, settled };
+      (!projection && utf8Bytes(page.content) !== page.nextOffset - start)) throw new Error("Invalid transcript byte range");
+  return {
+    text: page.content, start, end: page.nextOffset, total: page.totalBytes, settled,
+    ...(summaryOnly ? { summaryOnly: true } : {}),
+    ...(projection ? { projection } : {}),
+    ...(page.steerOffsets !== undefined ? { steerOffsets: page.steerOffsets } : {}),
+    ...(page.steerOffsetsAuthoritative !== undefined ? { steerOffsetsAuthoritative: page.steerOffsetsAuthoritative } : {}),
+  };
 }
 
 export function appendTranscriptPage(window: TranscriptWindow, page: TranscriptPage, settled: boolean): TranscriptWindow {
   const next = windowFromPage(page, settled);
+  if (normalizeTranscriptProjection(window) !== normalizeTranscriptProjection(next)) throw new Error("Mismatched transcript projection");
   if (next.start !== window.end) throw new Error("Non-contiguous transcript append");
-  return { ...window, text: window.text + next.text, end: next.end, total: next.total, settled };
+  return {
+    ...window,
+    text: window.text + next.text, end: next.end, total: next.total, settled,
+    steerOffsets: next.steerOffsets ?? window.steerOffsets,
+    steerOffsetsAuthoritative: next.steerOffsetsAuthoritative ?? window.steerOffsetsAuthoritative,
+  };
 }
 
 /** Validate a fetched page before holding it outside the layout. A malformed or
@@ -38,13 +69,19 @@ export function appendTranscriptPage(window: TranscriptWindow, page: TranscriptP
  * event after the request's error handler has already finished. */
 export function validateTranscriptPrepend(window: TranscriptWindow, page: TranscriptPage): TranscriptWindow {
   const older = windowFromPage(page, window.settled);
+  if (normalizeTranscriptProjection(window) !== normalizeTranscriptProjection(older)) throw new Error("Mismatched transcript projection");
   if (older.end !== window.start || older.start >= window.start) throw new Error("Non-contiguous transcript history");
   return older;
 }
 
 export function prependTranscriptPage(window: TranscriptWindow, page: TranscriptPage): TranscriptWindow {
   const older = validateTranscriptPrepend(window, page);
-  return { ...window, text: older.text + window.text, start: older.start, total: Math.max(window.total, older.total) };
+  return {
+    ...window,
+    text: older.text + window.text, start: older.start, total: Math.max(window.total, older.total),
+    steerOffsets: window.steerOffsets ?? older.steerOffsets,
+    steerOffsetsAuthoritative: window.steerOffsetsAuthoritative ?? older.steerOffsetsAuthoritative,
+  };
 }
 
 /** Only the rendered view receives a synthetic newline; never advance a byte

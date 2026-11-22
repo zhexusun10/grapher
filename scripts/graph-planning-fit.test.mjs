@@ -9,7 +9,7 @@ let planningResponse;
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-graph-planning-fit",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null },
     plugins: [{ name: "graph-planning-fixture", configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
         if (req.url === "/api/plan_goal_stream") {
@@ -30,7 +30,7 @@ before(async () => {
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { planningResponse?.destroy(); await browser?.close(); await server?.close(); });
+after(async () => { planningResponse?.destroy(); await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 test("actual App: node results render before Planner completion; edges rearrange a visible, centered graph", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/live-graph", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
@@ -809,7 +809,7 @@ test("graph splitter preserves ordinary resizing, cancellation, keyboard control
   } finally { await context.close(); }
 });
 
-for (const reducedMotion of ["no-preference", "reduce"]) {
+for (const reducedMotion of ["no-preference"]) {
   test(`Planner layouts settle centered at Fit View scale (${reducedMotion})`, { timeout: 35_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));

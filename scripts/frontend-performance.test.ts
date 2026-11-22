@@ -368,6 +368,95 @@ test("a failed push channel wakes suspended pollers and recreates a dead stream"
   }
 });
 
+test("hidden documents suspend visibility polling and pause SSE until visible again", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  class FakeDocument extends EventTarget { hidden = false; }
+  const fakeDoc = new FakeDocument();
+  const originalDocument = (globalThis as { document?: unknown }).document;
+  const originalEventSource = (globalThis as { EventSource?: unknown }).EventSource;
+  class FakeEventSource {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    static instances: FakeEventSource[] = [];
+    readyState = FakeEventSource.CONNECTING;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    closed = false;
+    constructor(readonly url: string) { FakeEventSource.instances.push(this); }
+    addEventListener() {}
+    close() { this.closed = true; this.readyState = FakeEventSource.CLOSED; }
+  }
+  (globalThis as { document?: unknown }).document = fakeDoc;
+  (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource;
+
+  let polls = 0;
+  const stop = startVisibilityPolling(async () => {
+    polls++;
+    return 500;
+  }, 0, fakeDoc as unknown as Document);
+
+  const statuses: Array<{ connected: boolean; reconnected: boolean }> = [];
+  const unsubStatus = subscribeRuntimeEventsStatus(status => statuses.push(status));
+  const unsubSnapshot = subscribeSnapshotChanges(() => {});
+  try {
+    enableRuntimeEvents();
+    const first = FakeEventSource.instances.at(-1)!;
+    assert.ok(first, "EventSource opens while visible");
+    first.readyState = FakeEventSource.OPEN;
+    first.onopen!();
+    await advanceTimers(context);
+    assert.equal(polls, 1);
+    assert.deepEqual(statuses, [{ connected: true, reconnected: false }]);
+
+    // Hiding the document stops timer polling, ignores wakes, and closes SSE silently.
+    fakeDoc.hidden = true;
+    fakeDoc.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(first.closed, true, "EventSource closes when window/tab hides");
+    assert.equal(isRuntimeEventsConnected(), false);
+    stop.wake();
+    await advanceTimers(context, 60_000);
+    assert.equal(polls, 1, "hidden document runs zero polls and ignores wake() calls");
+    assert.equal(FakeEventSource.instances.length, 1, "hidden document never opens or retries SSE");
+    assert.equal(statuses.length, 1, "hiding pauses SSE silently without waking fallback pollers");
+
+    // Starting another poller while already hidden also stays suspended until visible.
+    let latePolls = 0;
+    const stopLate = startVisibilityPolling(async () => { latePolls++; return 500; }, 0, fakeDoc as unknown as Document);
+    try {
+      await advanceTimers(context, 60_000);
+      assert.equal(latePolls, 0, "poller created while hidden waits until visible");
+
+      // Becoming visible immediately runs catch-up polls and reconnects SSE with reconnected: true.
+      fakeDoc.hidden = false;
+      fakeDoc.dispatchEvent(new Event("visibilitychange"));
+      assert.equal(FakeEventSource.instances.length, 2, "becoming visible reopens SSE");
+      const reopened = FakeEventSource.instances.at(-1)!;
+      reopened.readyState = FakeEventSource.OPEN;
+      reopened.onopen!();
+      await advanceTimers(context);
+      assert.equal(polls, 2, "visible transition resumes suspended poller immediately");
+      assert.equal(latePolls, 1, "poller created while hidden runs immediately on visible");
+      assert.deepEqual(statuses, [
+        { connected: true, reconnected: false },
+        { connected: true, reconnected: true },
+      ]);
+    } finally {
+      stopLate();
+    }
+  } finally {
+    stop();
+    unsubSnapshot();
+    unsubStatus();
+    setRuntimeEventsConnectedForTest(false);
+    if (originalDocument === undefined) delete (globalThis as { document?: unknown }).document;
+    else (globalThis as { document?: unknown }).document = originalDocument;
+    if (originalEventSource === undefined) delete (globalThis as { EventSource?: unknown }).EventSource;
+    else (globalThis as { EventSource?: unknown }).EventSource = originalEventSource;
+    FakeEventSource.instances = [];
+  }
+});
+
 test("assistant stream deltas never grow a user steer row", () => {
   const steer: TranscriptItem = { id: "steer", type: "text", role: "user", content: "STEER", timestamp: 1 };
   const next = appendItemDelta([steer], "text", "ASSISTANT REPLY");

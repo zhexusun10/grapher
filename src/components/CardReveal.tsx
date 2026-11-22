@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { observeElementResize } from "../services/sharedResizeObserver";
 
 /** Give a just-presented card its height progressively instead of in one frame.
  *
@@ -19,6 +20,10 @@ export function CardReveal({ animate, children }: { animate: boolean; children: 
   useLayoutEffect(() => {
     const reveal = ref.current;
     if (!reveal || !entering) return;
+    if (reveal.closest(".conversation-preparing")) {
+      setSettled(true);
+      return;
+    }
     const child = reveal.firstElementChild as HTMLElement | null;
     if (!child) return;
 
@@ -33,11 +38,10 @@ export function CardReveal({ animate, children }: { animate: boolean; children: 
     };
     measure();
 
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    for (const part of child.children) observer.observe(part);
+    const unsubscribers: Array<() => void> = [];
+    for (const part of child.children) unsubscribers.push(observeElementResize(part, measure));
     return () => {
-      observer.disconnect();
+      for (const unobserve of unsubscribers) unobserve();
       reveal.style.removeProperty("--card-reveal-height");
       delete reveal.dataset.revealMeasured;
     };

@@ -33,14 +33,51 @@ let connecting = false;
 let connectionGeneration = 0;
 let source: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let boundDocument: Pick<Document, "hidden" | "addEventListener" | "removeEventListener"> | null = null;
 
 const planningListeners = new Set<(event: { runId: string; planningId: string }) => void>();
 const snapshotListeners = new Set<(event: SnapshotChangedEvent) => void>();
 const outputListeners = new Map<string, Set<(event: OutputAvailableEvent) => void>>();
+const settledOutputListeners = new Set<(event: OutputAvailableEvent) => void>();
 const statusListeners = new Set<(status: RuntimeEventsStatus) => void>();
 
+function isDocumentHidden(): boolean {
+  return typeof document !== "undefined" && Boolean(document.hidden);
+}
+
+function handleVisibilityChange(): void {
+  if (isDocumentHidden()) {
+    if (enabled && (source || connecting || retryTimer !== null)) {
+      // Mark prior activity so reconnecting on visibility reports `reconnected: true`
+      // and active pollers reconcile any backend changes that occurred while hidden.
+      hadConnectionOrError = true;
+      closeConnection();
+    }
+    return;
+  }
+  if (enabled && hasSubscribers()) {
+    ensureConnection();
+  }
+}
+
+function ensureVisibilityListener(): void {
+  if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+  if (boundDocument === document) return;
+  if (boundDocument) {
+    boundDocument.removeEventListener("visibilitychange", handleVisibilityChange);
+  }
+  boundDocument = document;
+  boundDocument.addEventListener("visibilitychange", handleVisibilityChange);
+}
+
+function detachVisibilityListener(): void {
+  if (!boundDocument) return;
+  boundDocument.removeEventListener("visibilitychange", handleVisibilityChange);
+  boundDocument = null;
+}
+
 function hasSubscribers(): boolean {
-  return snapshotListeners.size > 0 || outputListeners.size > 0 || planningListeners.size > 0;
+  return snapshotListeners.size > 0 || outputListeners.size > 0 || planningListeners.size > 0 || settledOutputListeners.size > 0;
 }
 
 function notifyStatus(status: RuntimeEventsStatus): void {
@@ -57,7 +94,7 @@ function clearRetry(): void {
 }
 
 function scheduleRetry(): void {
-  if (retryTimer !== null || !enabled || !hasSubscribers()) return;
+  if (retryTimer !== null || !enabled || !hasSubscribers() || isDocumentHidden()) return;
   retryTimer = setTimeout(() => {
     retryTimer = null;
     ensureConnection();
@@ -127,11 +164,19 @@ function openEventSource(url: string): void {
         const data = JSON.parse(String(event.data)) as OutputAvailableEvent;
         if (!data?.runId || !data?.executionId || typeof data.totalBytes !== "number") return;
         const key = `${data.runId}:${data.executionId}`;
-        if (!outputListeners.has(key)) return;
+        const hasSpecific = outputListeners.has(key);
+        const hasSettled = Boolean(data.settled) && settledOutputListeners.size > 0;
+        if (!hasSpecific && !hasSettled) return;
         queueMicrotask(() => {
-          const listeners = outputListeners.get(key);
-          if (!listeners) return;
-          for (const listener of listeners) listener(data);
+          if (hasSpecific) {
+            const listeners = outputListeners.get(key);
+            if (listeners) {
+              for (const listener of listeners) listener(data);
+            }
+          }
+          if (hasSettled) {
+            for (const listener of settledOutputListeners) listener(data);
+          }
         });
       } catch {}
     });
@@ -150,7 +195,12 @@ function openEventSource(url: string): void {
 }
 
 function ensureConnection(): void {
+  ensureVisibilityListener();
   if (!enabled || source || connecting || !hasSubscribers() || typeof EventSource === "undefined") {
+    return;
+  }
+  if (isDocumentHidden()) {
+    hadConnectionOrError = true;
     return;
   }
   const syncUrl = getCachedApiUrl("/api/events");
@@ -165,6 +215,10 @@ function ensureConnection(): void {
       if (generation !== connectionGeneration) return;
       connecting = false;
       if (!enabled || source || !hasSubscribers() || typeof EventSource === "undefined") return;
+      if (isDocumentHidden()) {
+        hadConnectionOrError = true;
+        return;
+      }
       openEventSource(url);
     },
     () => {
@@ -241,6 +295,24 @@ export function subscribeExecutionOutput(
   };
 }
 
+export function subscribeSettledOutputs(listener: (event: OutputAvailableEvent) => void): () => void {
+  settledOutputListeners.add(listener);
+  ensureConnection();
+  return () => {
+    settledOutputListeners.delete(listener);
+    if (!hasSubscribers()) closeConnection();
+  };
+}
+
+/** Immediately wake snapshot watchers when a transcript reader discovers a settled execution. */
+export function notifyExecutionSettled(runId: string, executionId: string, totalBytes = 0): void {
+  if (!runId || settledOutputListeners.size === 0) return;
+  const event: OutputAvailableEvent = { runId, executionId, totalBytes, settled: true };
+  queueMicrotask(() => {
+    for (const listener of settledOutputListeners) listener(event);
+  });
+}
+
 export function setRuntimeEventsConnectedForTest(isConnected: boolean, reconnected = false): void {
   enabled = isConnected;
   connected = isConnected;
@@ -249,6 +321,7 @@ export function setRuntimeEventsConnectedForTest(isConnected: boolean, reconnect
   } else {
     hadConnectionOrError = false;
     closeConnection();
+    detachVisibilityListener();
   }
 }
 
@@ -258,6 +331,10 @@ export function dispatchSnapshotChangedForTest(event: SnapshotChangedEvent): voi
 
 export function dispatchOutputAvailableForTest(event: OutputAvailableEvent): void {
   const listeners = outputListeners.get(`${event.runId}:${event.executionId}`);
-  if (!listeners) return;
-  for (const listener of listeners) listener(event);
+  if (listeners) {
+    for (const listener of listeners) listener(event);
+  }
+  if (event.settled) {
+    for (const listener of settledOutputListeners) listener(event);
+  }
 }

@@ -310,6 +310,54 @@ fn without_planner_steer_marker(text: &str) -> &str {
     }
 }
 
+fn without_image_dimension_hints(mut text: &str) -> &str {
+    loop {
+        let Some((prefix, hint)) = text.rsplit_once("[Image: original ") else {
+            return text;
+        };
+        if !hint.ends_with(']') {
+            return text;
+        }
+        let inner = &hint[..hint.len() - 1];
+        let Some((orig, rest)) = inner.split_once(", displayed at ") else {
+            return text;
+        };
+        let is_dims = |dims: &str| {
+            dims.split_once('x').is_some_and(|(w, h)| {
+                !w.is_empty()
+                    && !h.is_empty()
+                    && w.bytes().all(|b| b.is_ascii_digit())
+                    && h.bytes().all(|b| b.is_ascii_digit())
+            })
+        };
+        let valid_rest = rest
+            .strip_suffix('.')
+            .map(is_dims)
+            .or_else(|| {
+                rest.strip_suffix(" to map to original image.")
+                    .and_then(|value| value.split_once(". Multiply coordinates by "))
+                    .map(|(dims, scale)| {
+                        is_dims(dims)
+                            && !scale.is_empty()
+                            && scale.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                    })
+            })
+            .unwrap_or(false);
+        if !is_dims(orig) || !valid_rest {
+            return text;
+        }
+        let Some(trimmed) = prefix
+            .strip_suffix("\r\n\r\n")
+            .or_else(|| prefix.strip_suffix("\n\n"))
+            .or_else(|| prefix.strip_suffix("\r\n"))
+            .or_else(|| prefix.strip_suffix('\n'))
+        else {
+            return text;
+        };
+        text = trimmed;
+    }
+}
+
 pub fn branch_before_planner_user(
     session_dir: &Path,
     session_id: &str,
@@ -364,7 +412,7 @@ fn output_user_turns(output: &str, old_text: &str) -> Vec<(usize, Option<u64>, O
         let mut wrapped = event.clone();
         wrapped["type"] = json!("message");
         let text = user_text(&wrapped).unwrap_or_default();
-        if normalized(&text) != expected {
+        if normalized(&text) != expected && normalized(without_image_dimension_hints(&text)) != expected {
             continue;
         }
         let id = if kind == "message" {
@@ -540,12 +588,30 @@ fn prepare_user_branch(
             } else {
                 text
             };
-            text == old_text
+            let normalized = without_image_dimension_hints(text);
+            let direct = text == old_text
+                || normalized == old_text
                 || (planner
-                    && text.ends_with(&format!("\n{old_text}"))
-                    && (text.starts_with("Current graph node status:\n")
-                        || text.starts_with("User query:\n")
-                        || text.starts_with("You are now at ")))
+                    && crate::attachment_inputs::strip_leading_managed_mentions(normalized)
+                        == old_text);
+            if direct {
+                return true;
+            }
+            if planner
+                && (normalized.starts_with("Current graph node status:\n")
+                    || normalized.starts_with("User query:\n")
+                    || normalized.starts_with("You are now at "))
+            {
+                if normalized.ends_with(&format!("\n{old_text}")) {
+                    return true;
+                }
+                return normalized.match_indices('\n').any(|(idx, _)| {
+                    crate::attachment_inputs::strip_leading_managed_mentions(
+                        &normalized[idx + 1..],
+                    ) == old_text
+                });
+            }
+            false
         });
         if !matches_text {
             continue;
@@ -874,6 +940,9 @@ mod tests {
         )
         .unwrap();
         assert!(!branch.first_user_turn);
+        let stripped = branch_before_user(temp.path(), &id, temp.path(), "inspect", 0, 10).unwrap();
+        assert!(!stripped.first_user_turn);
+        assert_eq!(stripped.path, path);
         let contents = fs::read_to_string(&path).unwrap();
         assert!(
             contents.starts_with(&original),

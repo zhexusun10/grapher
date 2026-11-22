@@ -8,9 +8,33 @@ export function ExecutionTiming({ execution }: { execution: Execution }) {
   const running = execution.status === "running" && execution.completedAt == null;
   useEffect(() => {
     if (!running) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stopTimer = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const syncVisibility = () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        stopTimer();
+        return;
+      }
+      setNow(Date.now());
+      if (timer === null) {
+        timer = setInterval(() => setNow(Date.now()), 1000);
+      }
+    };
+    syncVisibility();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", syncVisibility);
+    }
+    return () => {
+      stopTimer();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", syncVisibility);
+      }
+    };
   }, [running, execution.id]);
   const end = execution.completedAt ?? (running ? now : null);
   const seconds = end == null ? null : Math.max(0, Math.floor((end - execution.startedAt) / 1000));

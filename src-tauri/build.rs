@@ -158,6 +158,22 @@ fn main() {
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let objc_src = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"),
+        )
+        .join("objc")
+        .join("macos_notifications.m");
+        println!("cargo:rerun-if-changed={}", objc_src.display());
+        cc::Build::new()
+            .file(&objc_src)
+            .flag("-fobjc-arc")
+            .compile("grapher_macos_notifications");
+        println!("cargo:rustc-link-lib=framework=UserNotifications");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=AppKit");
+    }
+
     // Ensure staged resource directories exist so `cargo check` and `cargo test`
     // succeed before `scripts/desktop-stage.mjs` populates them for packaging.
     for dir in ["resources/runtime", "resources/node"] {

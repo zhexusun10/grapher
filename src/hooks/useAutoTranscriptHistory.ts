@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { CONVERSATION_BOTTOM_THRESHOLD } from "../services/conversationScroll";
 import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, olderInsertionTop, transcriptScrollParent } from "../services/transcriptScroll";
 import { transcriptAutoFillBudget, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
@@ -114,16 +115,19 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         const readingNearTop = !staged && hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
         // Background viewport filling is not the reader asking for a page: it
         // commits immediately even when they sit somewhere in the middle of the
-        // history. Only a page that extends the history they are reading waits
-        // for them to reach its insertion point.
+        // history. Once the reader is actively paging up through history
+        // (`readingNearTop`), keep `preserveReading = true` even when collapsed
+        // cards shrink height below two viewports.
         const needsFill = needsInitialTranscriptFill(element, hasOlder, error);
         const withinBudget = budget.remaining >= 4;
+        const scrolledAway = initialReadyRef.current &&
+          parent.scrollHeight - parent.scrollTop - parent.clientHeight > CONVERSATION_BOTTOM_THRESHOLD;
         // A prefetched page may be waiting for the reader to reach its
         // insertion point. It is not an in-flight fill: retrying it on every
         // layout leaves initial readiness stuck until the reader scrolls.
         if (!holdingOlder && withinBudget && (needsFill || readingNearTop)) {
           measuredViewportRef.current = "";
-          load(needsFill ? false : readingNearTop);
+          load(readingNearTop || scrolledAway);
           return;
         }
         if (!initialReadyRef.current) {

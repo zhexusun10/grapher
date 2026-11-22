@@ -39,6 +39,7 @@
     "check": "tsc --noEmit",
     "test:frontend": "node scripts/test.mjs frontend",
     "test:ui": "node scripts/test.mjs ui",
+    "test:ui:audit": "node scripts/test.mjs ui:audit",
     "test:ui-polish": "node scripts/test.mjs ui-polish",
     "test:bundle": "node scripts/test.mjs bundle",
     "test:conversation-acceptance": "node scripts/test.mjs conversation-acceptance",

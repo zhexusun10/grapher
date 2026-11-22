@@ -325,19 +325,41 @@ marked.use({ tokenizer: { url: tokenizeBareLink } });
 
 export function repairStreamingMarkdown(text: string): string {
   const normalized = text.replace(/\r\n|\r/g, "\n");
-  const fences = /^(\s*)(`{3,}|~{3,})/mg;
-  let match: RegExpExecArray | null, inside = false, chars = "";
-  while ((match = fences.exec(normalized)) !== null) {
-    if (!inside) { inside = true; chars = match[2]; }
-    else if (match[2].startsWith(chars.slice(0, 3))) { inside = false; chars = ""; }
+  const lines = normalized.split("\n");
+  let inside = false;
+  let fenceChar = "";
+  let fenceLen = 0;
+  let fenceIndent = "";
+  for (const line of lines) {
+    if (!inside) {
+      const open = /^([ \t]*)(`{3,}|~{3,})(.*)$/.exec(line);
+      if (open) {
+        const marker = open[2];
+        // Backtick fence info strings may not contain backticks (CommonMark §4.5).
+        if (marker[0] === "`" && open[3].includes("`")) continue;
+        inside = true;
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+        fenceIndent = open[1];
+      }
+    } else {
+      const close = new RegExp(`^[ \\t]*\\${fenceChar}{${fenceLen},}[ \\t]*$`);
+      if (close.test(line)) {
+        inside = false;
+        fenceChar = "";
+        fenceLen = 0;
+        fenceIndent = "";
+      }
+    }
   }
   if (inside) {
-    // Strip a partial closing fence at EOF (`\n` or `\n``) so the streaming
+    const chars = fenceChar.repeat(fenceLen);
+    // Strip a partial closing fence at EOF (`\n` or `\n  ``) so the streaming
     // preview does not add a transient line and collapse when the fence closes.
-    const fenceChar = chars[0];
-    const partialClose = new RegExp(`\\n[ ]{0,3}\\${fenceChar}{1,${chars.length - 1}}[ \\t]*$`);
+    const partialClose = new RegExp(`\\n[ \\t]*\\${fenceChar}{1,${fenceLen - 1}}[ \\t]*$`);
     const trimmed = normalized.replace(partialClose, "\n");
-    return trimmed.endsWith("\n") ? `${trimmed}${chars}\n` : `${trimmed}\n${chars}\n`;
+    const closingLine = `${fenceIndent}${chars}\n`;
+    return trimmed.endsWith("\n") ? `${trimmed}${closingLine}` : `${trimmed}\n${closingLine}`;
   }
   // A trailing `-`/`=` line without a terminating newline promotes the entire
   // preceding paragraph into a transient setext heading until the next token

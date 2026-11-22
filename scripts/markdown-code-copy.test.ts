@@ -48,3 +48,18 @@ test("HTML-looking code stays escaped rather than becoming executable markup", (
   assert.ok(html.includes('&lt;button onclick="bad()"&gt;text&lt;/button&gt;'));
   assert.ok(html.includes("&lt;script&gt;"));
 });
+
+test("indented streaming code fences inside list items do not emit phantom empty code cards", () => {
+  const html = render("- **Tool**:\n  ```text\n  Search the live web", true);
+  assert.equal(buttons(html), 1);
+  assert.equal((html.match(/class="code-block-wrapper"/g) ?? []).length, 1);
+  assert.ok(!html.includes("<pre><code></code></pre>"));
+  assert.ok(html.includes("Search the live web"));
+});
+
+test("single-line triple-backtick inline code spans do not open a streaming fence", () => {
+  const html = render("```inline```\nnext paragraph", true);
+  assert.equal(buttons(html), 0);
+  assert.ok(html.includes("<code>inline</code>"));
+  assert.ok(html.includes("next paragraph"));
+});

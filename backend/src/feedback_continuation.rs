@@ -9,6 +9,78 @@ const SENDER_TEMPLATE: &str = "feedback-returned.md";
 const AFFECTED_TEMPLATE: &str = "feedback-updated.md";
 
 impl Runtime {
+    /// Returns true if an execution has evidence of actual model or tool
+    /// activity (or unreadable/oversized output), rather than only host startup
+    /// lifecycle lines emitted before Pi persisted a session file.
+    pub(super) fn execution_has_session_activity(&self, execution: &Execution) -> bool {
+        if execution.status == "completed" {
+            return true;
+        }
+        if execution.pid.is_none() && execution.output_bytes == 0 {
+            return false;
+        }
+        if execution.output_bytes == 0 {
+            return true;
+        }
+        const MAX_STARTUP_LOG_BYTES: usize = 64 * 1024;
+        if execution.output_bytes > MAX_STARTUP_LOG_BYTES {
+            return true;
+        }
+        let logged = match self.store.log_bytes(&self.state.run_id, &execution.id) {
+            Ok(bytes) => bytes,
+            Err(_) => return true,
+        };
+        let output = if logged > 0 {
+            if logged > MAX_STARTUP_LOG_BYTES {
+                return true;
+            }
+            match self
+                .store
+                .execution_log_page(&self.state.run_id, &execution.id, 0, logged)
+            {
+                Ok(page) if page.complete => page.content,
+                _ => return true,
+            }
+        } else if execution.output_bytes == execution.output.len() {
+            execution.output.clone()
+        } else {
+            return true;
+        };
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .any(|line| !Self::is_pre_session_output_line(line))
+    }
+
+    fn is_pre_session_output_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[stderr]") {
+            return true;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            return false;
+        };
+        let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        match kind {
+            "grapher_process_started"
+            | "grapher_session_resumed"
+            | "grapher_process_exited"
+            | "response"
+            | "agent_start"
+            | "turn_start" => true,
+            "message_start" | "message_end" => matches!(
+                value
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(serde_json::Value::as_str),
+                Some("system" | "user")
+            ),
+            _ => false,
+        }
+    }
+
     pub(super) fn node_session_missing(&self, previous: &Execution) -> bool {
         let origin = self
             .state
@@ -55,9 +127,7 @@ impl Runtime {
                     && !self.state.executions.iter().any(|execution| {
                         execution.node == node
                             && execution.session_id == previous.session_id
-                            && (execution.status == "completed"
-                                || execution.pid.is_some()
-                                || execution.output_bytes > 0)
+                            && self.execution_has_session_activity(execution)
                     });
                 let previous = if unstarted {
                     self.state

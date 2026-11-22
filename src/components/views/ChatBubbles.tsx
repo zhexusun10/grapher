@@ -5,6 +5,7 @@ import type { ChatMessageVersion, ImageAttachment, FileAttachment } from "../../
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
+import { ImagePreviewModal, type PreviewImageItem } from "../modals/ImagePreviewModal";
 import { notifyTranscriptContentGrowth, notifyTranscriptFinalOutput } from "../../services/transcriptScroll";
 
 function copyFallback(text: string, onSuccess: () => void) {
@@ -96,6 +97,7 @@ export function EditableUserBubble({
   // checkmark until the button has really faded out (`onCopyFadeEnd`).
   const [copyHold, setCopyHold] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -103,6 +105,15 @@ export function EditableUserBubble({
   const { cleanText, attachments, images: allImages } = useMemo(() => {
     return parseMessageAttachmentsAndText(text, files, images);
   }, [text, files, images]);
+
+  const previewImages = useMemo<PreviewImageItem[]>(() =>
+    allImages.map((img, idx) => ({
+      src: img.data.startsWith("data:") ? img.data : `data:${img.mimeType || "image/png"};base64,${img.data}`,
+      alt: img.name || t("图片 {0}", idx + 1),
+      name: img.name,
+    })),
+    [allImages]
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -266,16 +277,22 @@ export function EditableUserBubble({
           )}
 
           {/* 图片附件 */}
-          {allImages && allImages.length > 0 && (
+          {previewImages.length > 0 && (
             <div className="chat-user-images-preview">
-              {allImages.map((img, idx) => (
-                <div key={idx} className="chat-user-image-thumb">
+              {previewImages.map((img, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="chat-user-image-thumb"
+                  onClick={() => setPreviewIndex(idx)}
+                  aria-label={t("预览图片")}
+                >
                   <img
-                    src={img.data.startsWith("data:") ? img.data : `data:${img.mimeType || "image/png"};base64,${img.data}`}
-                    alt={img.name || t("图片 {0}", idx + 1)}
+                    src={img.src}
+                    alt={img.alt}
                     className="chat-user-img"
                   />
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -342,6 +359,12 @@ export function EditableUserBubble({
           ) : null}
         </div>
       </div>
+      <ImagePreviewModal
+        images={previewImages}
+        index={previewIndex}
+        onChangeIndex={setPreviewIndex}
+        onClose={() => setPreviewIndex(null)}
+      />
     </div>
   );
 }

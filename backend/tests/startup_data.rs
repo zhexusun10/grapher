@@ -149,6 +149,7 @@ fn server_starts_on_incompatible_data_and_reopens_the_same_new_database() {
                 &mut state,
                 EventKind::Routed {
                     plan_type: "graph".into(),
+                    images: None,
                 },
             )
             .unwrap();

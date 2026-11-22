@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test, { before, after } from "node:test";
+import test, { before, after, describe } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
@@ -27,7 +27,9 @@ before(async () => {
   await server.listen(); origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
+
+describe("bootstrap settings", { concurrency: 2 }, () => {
 
 async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false, reducedMotion = "reduce", storageHints = {}, sessionHints = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion });
@@ -447,10 +449,14 @@ test("sidebar summaries seed live status and watchdogs without polling settled R
   }, undefined, undefined, true);
   try {
     await page.locator('[data-run-id="background"] .running-pulse').waitFor();
+    const withDotWidth = await page.locator('[data-run-id="background"] .run-title-text').evaluate(el => el.getBoundingClientRect().width);
     snapshots.background = { ...snapshots.background, phase: "completed" };
     // No SSE change is delivered: the bounded watchdog must see completion.
     await page.clock.runFor(4500);
-    await until(async () => await page.locator('[data-run-id="background"] .running-pulse').count() === 0);
+    await until(async () => await page.locator('[data-run-id="background"] .run-dot').count() === 0);
+    const withoutDotWidth = await page.locator('[data-run-id="background"] .run-title-text').evaluate(el => el.getBoundingClientRect().width);
+    assert.ok(withoutDotWidth > withDotWidth + 10,
+      `title should expand to fill the card after the pulse disappears (${withDotWidth} -> ${withoutDotWidth})`);
     const polls = calls.filter(call => call.command === "snapshot_if_changed").map(call => call.body.runId);
     assert.ok(polls.includes("background"));
     assert.ok(polls.includes("standalone"), "a running standalone Merger is watched even in completed phase");
@@ -502,9 +508,81 @@ test("sidebar keeps the live dot through planning, follow-ups and standalone Mer
     snapshots.standalone = { ...snapshots.standalone, mergers: [{ ...running, status: "success" }] };
     // No SSE change is delivered: the bounded watchdog must retire the dot.
     await page.clock.runFor(4500);
-    await until(async () => await page.locator('[data-run-id="standalone"] .running-pulse').count() === 0);
+    await until(async () => await page.locator('[data-run-id="standalone"] .run-dot').count() === 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
+});
+
+test("sidebar shows the pulse immediately on submit, clears it on detached completion, and keeps scrollable cards unclipped", { timeout: 30_000 }, async () => {
+  let releasePlan;
+  const planGate = new Promise(resolve => { releasePlan = resolve; });
+  const manySummaries = Array.from({ length: 18 }, (_, i) => ({
+    runId: `hist-${i}`,
+    repository,
+    title: `Conversation card ${i} with a longer title to verify layout and scrolling`,
+    phase: "completed",
+    hasActiveExecutions: false,
+  }));
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty,
+        conversations: manySummaries, runs: manySummaries.map(item => item.runId) } } });
+      return true;
+    }
+    if (command === "plan_goal_stream") {
+      await planGate;
+      const doneSnapshot = { ...fast, runId: "fresh-run", phase: "awaiting_approval", approved: false,
+        graph: { ...fast.graph, originalGoal: body.goal } };
+      await route.fulfill({
+        contentType: "text/event-stream",
+        body: `event: run_started\ndata: ${JSON.stringify({ runId: "fresh-run" })}\n\nevent: complete\ndata: ${JSON.stringify({ snapshot: doneSnapshot })}\n\n`,
+      });
+      return true;
+    }
+    return false;
+  });
+  try {
+    // Overflowing the conversation list must not create horizontal overflow or shift cards left.
+    const scrollMetrics = await page.locator(".runs-list").evaluate(list => {
+      list.scrollLeft = 20;
+      const listRect = list.getBoundingClientRect();
+      const firstCard = list.querySelector(".run-item");
+      const cardRect = firstCard.getBoundingClientRect();
+      return {
+        scrollableY: list.scrollHeight > list.clientHeight,
+        scrollWidth: list.scrollWidth,
+        clientWidth: list.clientWidth,
+        scrollLeft: list.scrollLeft,
+        cardLeftDelta: Math.round(cardRect.left - listRect.left),
+      };
+    });
+    assert.equal(scrollMetrics.scrollableY, true);
+    assert.ok(scrollMetrics.scrollWidth <= scrollMetrics.clientWidth, JSON.stringify(scrollMetrics));
+    assert.equal(scrollMetrics.scrollLeft, 0);
+    assert.equal(scrollMetrics.cardLeftDelta, 0);
+
+    // Submitting a new prompt shows the pulse immediately on the provisional card before the backend responds.
+    await page.locator(".landing-screen textarea").fill("Check immediate pulse and full-width text reflow after completion");
+    await page.locator(".landing-screen textarea").press("Enter");
+    const pendingCard = page.locator('.run-item[data-run-id^="pending-"]');
+    await pendingCard.waitFor();
+    assert.equal(await pendingCard.locator(".running-pulse").count(), 1, "pulse must appear immediately without waiting for backend");
+    const pendingTitleWidth = await pendingCard.locator(".run-title-text").evaluate(el => el.getBoundingClientRect().width);
+
+    // Navigate away before planning finishes; completing in the background must retire the dot immediately.
+    await page.locator(".runs-label .sidebar-add-btn").click();
+    releasePlan();
+    const durableCard = page.locator('.run-item[data-run-id="fresh-run"]');
+    await durableCard.waitFor();
+    await until(async () => await durableCard.locator(".run-dot").count() === 0);
+    const settledTitleWidth = await durableCard.locator(".run-title-text").evaluate(el => el.getBoundingClientRect().width);
+    assert.ok(settledTitleWidth > pendingTitleWidth + 10,
+      `title should expand to occupy the full card after pulse disappears (${pendingTitleWidth} -> ${settledTitleWidth})`);
+    assert.deepEqual(errors, []);
+  } finally {
+    releasePlan();
+    await context.close();
+  }
 });
 
 test("paused sidebar cards stop pulsing after writers drain even with dirty descendants", { timeout: 30_000 }, async () => {
@@ -1721,4 +1799,5 @@ test("synchronous preflight rejection on landing keeps the composer draft and av
     assert.equal(calls.filter(call => call.command === "plan_goal").length, 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
+});
 });

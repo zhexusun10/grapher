@@ -46,6 +46,7 @@ fn base_command() -> Command {
 /// over source would preserve integrity but falsely let source writes succeed;
 /// read-only binds make those writes fail.
 /// Directories for the private exceptions exist before their parents are masked.
+#[allow(clippy::too_many_arguments)]
 fn mount_boundaries(
     command: &mut Command,
     mut masks: Vec<PathBuf>,
@@ -54,6 +55,7 @@ fn mount_boundaries(
     engine: &Path,
     installation: &Path,
     borrowed_objects: &[PathBuf],
+    read_only_data: &[PathBuf],
     state: Option<&Path>,
     additional: &[PathBuf],
     extra_binds: &[PathBuf],
@@ -82,6 +84,7 @@ fn mount_boundaries(
             .map(PathBuf::as_path)
             .chain([current, session])
             .chain(borrowed_objects.iter().map(PathBuf::as_path))
+            .chain(read_only_data.iter().map(PathBuf::as_path))
             .chain(state)
             .chain(additional.iter().map(PathBuf::as_path))
             .chain(extra_binds.iter().map(PathBuf::as_path))
@@ -104,6 +107,9 @@ fn mount_boundaries(
     }
     for objects in borrowed_objects {
         command.arg("--ro-bind").arg(objects).arg(objects);
+    }
+    for path in read_only_data {
+        command.arg("--ro-bind").arg(path).arg(path);
     }
     if let Some(state) = state {
         command.arg("--bind").arg(state).arg(state);
@@ -160,6 +166,7 @@ fn probe() -> Result<(), String> {
             &engine,
             &installation,
             &[],
+            &[],
             None,
             &[],
             &[],
@@ -210,9 +217,11 @@ pub fn execution_command(
         pi_dir,
         &[],
         &[],
+        &[],
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execution_command_scoped(
     source: &Path,
     root: &Path,
@@ -223,6 +232,7 @@ pub(crate) fn execution_command_scoped(
     pi_dir: &Path,
     workspaces: &[PathBuf],
     extra_binds: &[PathBuf],
+    read_only_data: &[PathBuf],
 ) -> Result<Command, String> {
     require_supported()?;
     let source = canonical(source)?;
@@ -250,6 +260,18 @@ pub(crate) fn execution_command_scoped(
         extra.push(target);
     }
     let data = canonical(data)?;
+    let attachment_bucket = data.join(crate::attachment_inputs::BUCKET);
+    let mut read_only = Vec::new();
+    for path in read_only_data {
+        let target = canonical(path)?;
+        if !target.is_dir() || !target.starts_with(&attachment_bucket) || target == attachment_bucket
+        {
+            return Err("Linux read-only attachment exception must live inside attachment-inputs".into());
+        }
+        read_only.push(target);
+    }
+    read_only.sort();
+    read_only.dedup();
     let session = canonical(session)?;
     let engine = canonical(engine)?;
     let pi_dir = canonical(pi_dir)?;
@@ -361,6 +383,7 @@ pub(crate) fn execution_command_scoped(
         &engine,
         &installation,
         &borrowed_objects,
+        &read_only,
         Some(&state),
         &additional,
         &extra,

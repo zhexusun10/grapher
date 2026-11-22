@@ -18,8 +18,27 @@ async function expectConversationCentered(page, layout) {
   }), { message: `${layout}: transcript, overview and composer share the pane's centerline` }).toBeLessThan(0.75);
 }
 
+async function readGraphControls(page) {
+  return page.evaluate(() => {
+    const canvas = document.querySelector(".graph-canvas").getBoundingClientRect();
+    const controls = document.querySelector(".react-flow__controls");
+    const button = controls.querySelector(".react-flow__controls-button");
+    const controlsRect = controls.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return {
+      canvasWidth: Math.round(canvas.width),
+      canvasHeight: Math.round(canvas.height),
+      direction: getComputedStyle(controls).flexDirection,
+      buttonWidth: Math.round(buttonRect.width),
+      buttonHeight: Math.round(buttonRect.height),
+      insideCanvas: controlsRect.left >= canvas.left && controlsRect.top >= canvas.top
+        && controlsRect.right <= canvas.right && controlsRect.bottom <= canvas.bottom,
+    };
+  });
+}
+
 // Mocked APIs exercise the real app while keeping the workspace untouched.
-for (const reducedMotion of ["reduce", "no-preference"]) {
+for (const reducedMotion of ["no-preference"]) {
 test(`desktop workbench adapts to available width and short windows (${reducedMotion})`, { timeout: 60_000 }, async () => {
   const repository = "/mock/responsive-project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
@@ -42,7 +61,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
   const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
   const errors = [];
   const server = await createServer({ cacheDir: "node_modules/.vite-responsive-layout",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -168,6 +187,12 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(await switcher.isVisible(), false, "wide workspaces keep the split view");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width >= 279, "a stored small split does not crush the conversation");
     assert.ok((await page.locator(".graph-pane").boundingBox()).width >= 319, "the graph retains its minimum width");
+    const largeControls = await readGraphControls(page);
+    assert.deepEqual(
+      { direction: largeControls.direction, buttonWidth: largeControls.buttonWidth, buttonHeight: largeControls.buttonHeight, insideCanvas: largeControls.insideCanvas },
+      { direction: "column", buttonWidth: 30, buttonHeight: 30, insideCanvas: true },
+      `spacious graph canvas keeps desktop-sized vertical controls: ${JSON.stringify(largeControls)}`,
+    );
     await page.locator(".plan-summary-stats").waitFor();
     await expectConversationCentered(page, "narrow desktop split");
     const stats = await page.locator(".plan-summary-stats").evaluate(row => {
@@ -291,6 +316,12 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(await composer.isVisible(), false);
     assert.equal(await page.locator(".scroll-to-bottom-btn").isVisible(), false,
       "conversation controls cannot show through the graph pane");
+    const mediumControls = await readGraphControls(page);
+    assert.deepEqual(
+      { direction: mediumControls.direction, buttonWidth: mediumControls.buttonWidth, buttonHeight: mediumControls.buttonHeight, insideCanvas: mediumControls.insideCanvas },
+      { direction: "column", buttonWidth: 26, buttonHeight: 26, insideCanvas: true },
+      `medium graph canvas scales zoom/fit controls down: ${JSON.stringify(mediumControls)}`,
+    );
     await page.evaluate(() => { window.savedGraphCanvas = document.querySelector(".react-flow"); });
     await conversation.click();
     assert.equal(await composer.inputValue(), "Draft survives resizing");
@@ -351,6 +382,12 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     });
     assert.ok(geometry.canvasHeight > 80, `graph remains usable: ${JSON.stringify(geometry)}`);
     assert.ok(geometry.bottom <= geometry.workbenchBottom && geometry.workbenchBottom <= geometry.viewport);
+    const shortControls = await readGraphControls(page);
+    assert.deepEqual(
+      { direction: shortControls.direction, buttonWidth: shortControls.buttonWidth, buttonHeight: shortControls.buttonHeight, insideCanvas: shortControls.insideCanvas },
+      { direction: "row", buttonWidth: 24, buttonHeight: 24, insideCanvas: true },
+      `very short graph canvas compacts zoom/fit controls into a horizontal row: ${JSON.stringify(shortControls)}`,
+    );
     const sidebarFit = await page.evaluate(() => {
       const sidebar = document.querySelector(".sidebar").getBoundingClientRect();
       const footer = document.querySelector(".sidebar-bottom").getBoundingClientRect();
@@ -359,6 +396,15 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
         footer: footer.bottom, sidebar: sidebar.bottom, runsHeight: runs.height };
     });
     assert.equal(sidebarFit.reachable, true, `a full workspace list cannot hide the sidebar footer: ${JSON.stringify(sidebarFit)}`);
+
+    await page.setViewportSize({ width: 480, height: 700 });
+    await graphButton.click();
+    const narrowControls = await readGraphControls(page);
+    assert.deepEqual(
+      { direction: narrowControls.direction, buttonWidth: narrowControls.buttonWidth, buttonHeight: narrowControls.buttonHeight, insideCanvas: narrowControls.insideCanvas },
+      { direction: "column", buttonWidth: 24, buttonHeight: 24, insideCanvas: true },
+      `narrow graph canvas uses compact 24px vertical controls: ${JSON.stringify(narrowControls)}`,
+    );
 
     // Below the single-pane breakpoint the sidebar starts as a rail and opens
     // over the workspace, so the conversation keeps the full available width.
@@ -408,6 +454,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     await context.close();
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });

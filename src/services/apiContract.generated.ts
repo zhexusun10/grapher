@@ -10,12 +10,14 @@ export type SnapshotPollRequest = { version: string | null, runId?: string, delt
 export type SnapshotDelta = { baseVersion: string, version: string, set: { [key in string]?: JsonValue }, removed: Array<string>, afterSequence: number, events: GraphEvent[], };
 export type RuntimeActivity = { kind: string, nodes: Array<string>, phase?: string, };
 export type SnapshotPollResponse = { version: string, snapshot: Snapshot | null, delta?: SnapshotDelta, activity: Array<RuntimeActivity>, busy?: boolean, };
-export type ExecutionOutputPage = { runId: string, executionId: string, content: string, startOffset: number, nextOffset: number, totalBytes: number, complete: boolean, status: string, };
-export type PlanningOutputPage = { planningId: string, role: string, content: string, startOffset: number, nextOffset: number, totalBytes: number, complete: boolean, running: boolean, };
+export type ExecutionOutputPage = { runId: string, executionId: string, content: string, startOffset: number, nextOffset: number, totalBytes: number, complete: boolean, status: string, steerOffsets?: Record<string, number>, steerOffsetsAuthoritative?: boolean, summaryOnly?: boolean, projection?: string, };
+export type PlanningOutputPage = { planningId: string, role: string, content: string, startOffset: number, nextOffset: number, totalBytes: number, complete: boolean, running: boolean, summaryOnly?: boolean, projection?: string, };
+export type ConversationSearchMatch = { runId: string, conversationTitle: string, planType?: string, role: string, sourceKind: string, node?: string, executionId?: string, snippetBefore: string, snippetMatch: string, snippetAfter: string, timestamp?: number, };
+export type ConversationSearchResponse = { query: string, matches: Array<ConversationSearchMatch>, totalMatches: number, matchedConversations: number, truncated: boolean, };
 export type OperationResponse = { status: number, body: JsonValue, };
 export type OperationState = "pending" | "completed" | "unknown";
 export type OperationStatus = { operationId: string, state: OperationState, response: OperationResponse | null, };
 export type PlannerOutputFrame = { raw?: string, event?: JsonValue, };
 
-export const READ_COMMANDS = ["bootstrap","host_preflight","history","snapshot","snapshot_if_changed","detect_repository","repository_status","get_planning","list_plannings","get_planning_snapshot","get_execution_output","get_planning_output","get_file_changes","get_workspace_image","get_merger_prompt","list_skills","list_files","compile_graph","environment_capabilities","get_cleanup_status","result_descriptor","operation_status"] as const;
+export const READ_COMMANDS = ["bootstrap","host_preflight","history","snapshot","snapshot_if_changed","detect_repository","repository_status","get_planning","list_plannings","get_planning_snapshot","get_execution_output","get_planning_output","search_conversations","get_file_changes","get_file_diff","get_workspace_image","get_merger_prompt","list_skills","list_files","compile_graph","environment_capabilities","get_cleanup_status","result_descriptor","operation_status"] as const;
 export const READ_OPERATIONS = {"composer_command":["catalog","poll"],"extension_command":["catalog"],"pi_extensions":["catalog"],"provider_auth":["catalog","poll","model_visibility"]} as const;

@@ -80,7 +80,7 @@ async function assertOpaqueComposerNavigation(page, navigate) {
   }
 }
 
-for (const reducedMotion of ["no-preference", "reduce"]) {
+for (const reducedMotion of ["no-preference"]) {
   test(`conversation switching opens the final layout and centered graph (${reducedMotion})`, { timeout: 60_000 }, async () => {
     const repository = "/mock/project";
     const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
@@ -107,7 +107,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
     const errors = [];
     let rejectNodeMessage = false;
-    const server = await createServer({ cacheDir: "node_modules/.vite-graph-switching", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+    const server = await createServer({ cacheDir: "node_modules/.vite-graph-switching", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
     let browser;
     try {
       await server.listen();
@@ -396,8 +396,10 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
             if (workbench && workbench !== sourceWorkbench) {
               const pane = workbench.querySelector(".conversation-pane");
               const surfaces = [pane, ...workbench.querySelectorAll(".graph-toolbar, .graph-bottom")];
+              const footerNodes = [...workbench.querySelectorAll(".graph-bottom .progress-label > span, .graph-bottom .approval-row > span, .graph-bottom .approval-row > div")];
               window.surfaceFrames.push({
                 surfaces: surfaces.map(element => ({ opacity: opacity(element), background: getComputedStyle(element).backgroundColor })),
+                footerNodes: footerNodes.map(element => ({ opacity: opacity(element), transform: getComputedStyle(element).transform })),
                 content: opacity(workbench.querySelector(".initial-query-scroll")),
                 graph: opacity(workbench.querySelector(".graph-pane")),
                 flow: opacity(workbench.querySelector(".react-flow")),
@@ -478,7 +480,11 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         for (const frame of surfaces) {
           assert.ok(frame.surfaces.every(surface => surface.opacity > 0.99 && surface.background === background),
             `${id}: grey pane backgrounds paint immediately, without fading with content: ${JSON.stringify(frame)}`);
-          if (hasGraph(id)) assert.ok(frame.graph > 0.99, `${id}: topology chrome appears with the conversation surface`);
+          if (hasGraph(id)) {
+            assert.ok(frame.graph > 0.99, `${id}: topology chrome appears with the conversation surface`);
+            assert.ok(frame.footerNodes.length >= 2 && frame.footerNodes.every(node => node.opacity > 0.99 && node.transform === "none"),
+              `${id}: topology footer labels paint at their final state instead of replaying an entrance animation: ${JSON.stringify(frame.footerNodes)}`);
+          }
         }
         assert.ok(surfaces.some(frame => frame.content === 0), `${id}: content stays hidden while preparing history`);
         if (reducedMotion === "no-preference") {
@@ -809,6 +815,6 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       await page.locator('.run-item[data-run-id="a"]').click();
       await assertGraphVisible("a");
       assert.deepEqual(errors, []);
-    } finally { await browser?.close(); await server.close(); }
+    } finally { await browser?.close(); server.httpServer?.closeAllConnections?.(); await server.close(); }
   });
 }

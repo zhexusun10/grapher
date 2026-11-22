@@ -2633,49 +2633,6 @@ fn failed_shared_retry_stays_in_place_and_review_is_claimed_once() {
     assert!(runtime.take_shared_workspace_review().unwrap().is_none());
 }
 
-#[test]
-fn current_attachment_receipts_preserve_edits_and_deletions_but_not_incomplete_copies() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("data");
-    let source = temp.path().join("source");
-    for path in [&root, &source] {
-        fs::create_dir(path).unwrap();
-    }
-    let run = Uuid::new_v4().to_string();
-    for case in ["edited", "deleted", "incomplete"] {
-        let id = Uuid::new_v4().to_string();
-        let relative = format!("grapher-attachments/{id}/data.csv");
-        crate::attachment_inputs::stage(&root, &run, "owner", &id, "data.csv", b"original")
-            .unwrap();
-        if case != "incomplete" {
-            crate::attachment_inputs::deliver(&root, &run, "owner", &relative, &source).unwrap();
-        }
-        if case == "deleted" {
-            fs::remove_file(source.join(&relative)).unwrap();
-        } else {
-            fs::create_dir_all(source.join(&relative).parent().unwrap()).unwrap();
-            fs::write(source.join(&relative), case).unwrap();
-        }
-        let result = crate::attachment_inputs::deliver_prepared(
-            &root, &run, "owner", &relative, &source, true,
-        );
-        if case == "incomplete" {
-            assert!(result.unwrap_err().contains("incomplete"));
-        } else {
-            result.unwrap();
-            crate::attachment_inputs::deliver_prepared(
-                &root, &run, "owner", &relative, &source, true,
-            )
-            .unwrap();
-        }
-        if case == "deleted" {
-            assert!(!source.join(&relative).exists());
-        } else {
-            assert_eq!(fs::read_to_string(source.join(&relative)).unwrap(), case);
-        }
-    }
-}
-
 #[cfg(feature = "fixture")]
 #[test]
 fn retained_planner_edits_after_completion_reopen_the_batch_handoff() {
@@ -2714,68 +2671,6 @@ fn retained_planner_edits_after_completion_reopen_the_batch_handoff() {
     );
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "completed");
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn shared_retry_does_not_recreate_a_proven_deleted_input() {
-    let (_temp, source, mut runtime) = adaptive(true, graph(&["a"], &[]), true, 0);
-    let job = runtime.jobs().unwrap().remove(0);
-    let id = Uuid::new_v4().to_string();
-    let reference = format!("grapher-attachments/{id}/input.txt");
-    crate::attachment_inputs::stage(
-        &runtime.root,
-        &job.run_id,
-        "a",
-        &id,
-        "input.txt",
-        b"original",
-    )
-    .unwrap();
-    crate::attachment_inputs::deliver(&runtime.root, &job.run_id, "a", &reference, &source)
-        .unwrap();
-    runtime
-        .emit(EventKind::Steered {
-            execution_id: job.execution.id.clone(),
-            node: "a".into(),
-            instruction: reference.clone(),
-            request_id: None,
-            images: None,
-        })
-        .unwrap();
-    let session = runtime.root.join("sessions").join(&job.execution.id);
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join(format!("test_{}.jsonl", job.execution.session_id)),
-        "retained history",
-    )
-    .unwrap();
-    fs::remove_file(source.join(&reference)).unwrap();
-    runtime
-        .finish(
-            &job.execution,
-            Err("failed after deleting its input".into()),
-        )
-        .unwrap();
-    runtime.resume_node("a").unwrap();
-    let mut retry = runtime.jobs().unwrap().remove(0);
-    assert!(retry.attachment_instructions.contains(&reference));
-    retry.config.pi_command = "grapher-nonexistent-fixture-command".into();
-    // Stop at engine admission, after the real host input-delivery path. No model
-    // is needed to observe whether the host has wrongly resurrected the input.
-    assert!(perform_with_merger(
-        &retry,
-        &runtime.root,
-        &[],
-        |_| {},
-        |_| Ok(()),
-        |_| Err("unexpected merger".into())
-    )
-    .is_err());
-    assert!(
-        !source.join(&reference).exists(),
-        "recovery must retain source deletions"
-    );
 }
 
 #[cfg(not(feature = "fixture"))]

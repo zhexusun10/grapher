@@ -160,8 +160,8 @@ h3 {
    starts cleanly below it rather than being clipped or covered, and collapses
    automatically in fullscreen. Browser mode is unaffected. */
 .desktop-titlebar {
-  flex: 0 0 var(--desktop-titlebar-inset, 30px);
-  height: var(--desktop-titlebar-inset, 30px);
+  flex: 0 0 var(--desktop-titlebar-inset, 32px);
+  height: var(--desktop-titlebar-inset, 32px);
   width: 100%;
   display: flex;
   align-items: stretch;
@@ -305,7 +305,7 @@ h3 {
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
   --sidebar-content-width: 230px;
-  --sidebar-scrollbar-offset: 10px;
+  --sidebar-scrollbar-offset: var(--scrollbar-size, 10px);
   --sidebar-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --sidebar-width-duration: 0.32s;
   --sidebar-content-duration: 0.2s;
@@ -321,26 +321,41 @@ h3 {
   padding: 18px 14px 16px;
   display: flex;
   flex-direction: column;
+  position: relative;
   z-index: 10;
+  isolation: isolate;
   -webkit-user-select: none;
   user-select: none;
-  overflow: clip;
-  will-change: width, max-width;
-  animation: sidebarEnter 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* Keep the sidebar on a stable compositing layer and avoid overflow: clip +
+     forwards fill-mode animations, which can drop the rounded surface backing
+     store for a frame in WKWebView when sibling/descendant layers churn during
+     rapid workspace or conversation switches. */
+  overflow: hidden;
+  transform: translateZ(0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  animation: sidebarEnter 0.36s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   transition:
     width var(--sidebar-width-duration) var(--sidebar-anim-ease),
     max-width var(--sidebar-width-duration) var(--sidebar-anim-ease);
 }
 
+/* The macOS overlay titlebar has no bottom border, so drop the redundant 12px
+   card top margin while the titlebar is visible (32px total instead of 44px)
+   and restore it automatically in fullscreen. */
+.has-desktop-titlebar .app-shell.is-tauri-macos .sidebar {
+  margin-top: 0;
+}
+
 @keyframes sidebarEnter {
   from {
     opacity: 0;
-    transform: translateX(-14px);
+    transform: translate3d(-14px, 0, 0);
   }
 
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: translate3d(0, 0, 0);
   }
 }
 
@@ -357,7 +372,7 @@ h3 {
   width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
-  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  padding-right: 0;
   box-sizing: border-box;
 }
 
@@ -375,7 +390,7 @@ h3 {
   white-space: nowrap;
   opacity: 1;
   visibility: visible;
-  transform: translateX(0);
+  transform: none;
   transition:
     opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
     visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
@@ -390,7 +405,7 @@ h3 {
   white-space: nowrap;
   opacity: 1;
   visibility: visible;
-  transform: translateX(0);
+  transform: none;
   transition:
     opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
     visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
@@ -401,7 +416,7 @@ h3 {
 .sidebar .projects-list {
   opacity: 1;
   visibility: visible;
-  transform: translateX(0);
+  transform: none;
   transition:
     opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
     visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
@@ -413,7 +428,7 @@ h3 {
 .sidebar .runs-list {
   opacity: 1;
   visibility: visible;
-  transform: translateX(0);
+  transform: none;
   transition:
     opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
     visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
@@ -427,7 +442,7 @@ h3 {
   white-space: nowrap;
   opacity: 1;
   visibility: visible;
-  transform: translateX(0);
+  transform: none;
   transition:
     opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
     visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
@@ -451,11 +466,11 @@ h3 {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -576,11 +591,35 @@ h3 {
   padding-right: 0;
 }
 
+.sidebar.is-collapsed .section-actions {
+  gap: 0;
+}
+
+.sidebar.is-collapsed .sidebar-archive-btn {
+  width: 0;
+  max-width: 0;
+  min-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  padding: 0;
+  margin: 0;
+  border-width: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transform: translateX(-8px);
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
+}
+
 .sidebar.is-collapsed .icon-tiny-btn,
 .sidebar.is-collapsed .sidebar-add-btn,
 .sidebar.is-collapsed .sidebar-toggle-btn {
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   min-width: 0;
   padding: 0;
   margin: 0 auto;
@@ -602,8 +641,6 @@ h3 {
 
 .sidebar.is-collapsed .sidebar-bottom-btn:hover {
   border-color: transparent;
-  /* Match the collapsed add buttons, which still get the global button dim. */
-  filter: brightness(0.96);
 }
 
 /* Below the workbench's single-pane breakpoint the expanded sidebar becomes an
@@ -620,6 +657,10 @@ h3 {
     margin: 0;
     box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
   }
+
+  .has-desktop-titlebar .app-shell.is-tauri-macos .sidebar:not(.is-collapsed) {
+    top: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -628,6 +669,7 @@ h3 {
   .sidebar .brand,
   .sidebar .nav-section,
   .sidebar .nav-section>span,
+  .sidebar .sidebar-archive-btn,
   .sidebar .projects-list,
   .sidebar .runs-list,
   .sidebar .sidebar-bottom,
@@ -696,7 +738,7 @@ h3 {
   min-height: 0;
   margin-bottom: 12px;
   margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
-  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  padding-right: 0;
   width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   box-sizing: border-box;
@@ -706,6 +748,14 @@ h3 {
   /* AnimatePresence keeps the removed card in flow while its box closes. Do
      not expose a one-frame scrollbar when that temporary box is measured. */
   overflow-y: hidden;
+}
+
+.projects-list-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--workspace-card-gap);
+  width: 100%;
+  min-width: 0;
 }
 
 .project-workspace-item {
@@ -721,8 +771,8 @@ h3 {
   transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   position: relative;
   height: var(--workspace-card-height);
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  width: min(var(--sidebar-content-width, 230px), 100%);
+  min-width: 0;
   flex-shrink: 0;
   box-sizing: border-box;
 }
@@ -903,6 +953,7 @@ h3 {
 
 /* 应用内确认弹窗 */
 .modal-backdrop.confirm-backdrop {
+  z-index: 1600;
   background: var(--bg-overlay, rgba(15, 23, 42, 0.45));
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -1068,7 +1119,7 @@ h3 {
 .section-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .icon-tiny-btn {
@@ -1093,36 +1144,67 @@ h3 {
 }
 
 .sidebar-add-btn,
+.sidebar-archive-btn,
 .nav-section .icon-tiny-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0;
   box-sizing: border-box;
-  transition: all 0.15s ease;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s var(--sidebar-anim-ease),
+    width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
 }
 
 .sidebar-add-btn:hover,
+.sidebar-archive-btn:hover,
 .nav-section .icon-tiny-btn:hover {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
 }
 
+.sidebar .sidebar-toggle-btn:hover,
+.sidebar .sidebar-add-btn:hover,
+.sidebar .sidebar-archive-btn:hover,
+.sidebar .nav-section .icon-tiny-btn:hover {
+  filter: none;
+}
+
+.sidebar-archive-btn.is-active {
+  background: var(--brand-subtle);
+  color: var(--brand-default);
+  border-color: var(--brand-border);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
+}
+
+.sidebar-archive-btn.is-active:hover {
+  background: var(--brand-subtle);
+  color: var(--brand-default);
+  border-color: var(--brand-border);
+}
+
 .sidebar-add-btn:focus-visible,
+.sidebar-archive-btn:focus-visible,
 .nav-section .icon-tiny-btn:focus-visible {
   outline: 2px solid var(--brand-default);
   outline-offset: 2px;
 }
 
 .sidebar-add-btn:disabled,
+.sidebar-archive-btn:disabled,
 .nav-section .icon-tiny-btn:disabled {
   opacity: 0.6;
   cursor: default;
@@ -1159,12 +1241,12 @@ h3 {
 }
 
 .nav-section.projects-label {
-  animation: sidebarItemFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: sidebarItemFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: 24ms;
 }
 
 .nav-section.runs-label {
-  animation: sidebarItemFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: sidebarItemFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: 60ms;
 }
 
@@ -1192,10 +1274,17 @@ h3 {
   flex: 1;
   min-height: 0;
   margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
-  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  padding-right: 0;
   width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
   box-sizing: border-box;
+}
+
+.runs-list-view {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
 }
 
 /* Modern shimmer skeleton loading placeholder */
@@ -1204,7 +1293,7 @@ h3 {
   flex-direction: column;
   gap: 6px;
   padding: 0;
-  width: var(--sidebar-content-width, 230px);
+  width: min(var(--sidebar-content-width, 230px), 100%);
   animation: sidebarListFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -1282,8 +1371,9 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  gap: 8px;
+  width: min(var(--sidebar-content-width, 230px), 100%);
+  min-width: 0;
   min-height: 40px;
   flex-shrink: 0;
   box-sizing: border-box;
@@ -1343,11 +1433,18 @@ h3 {
   color: var(--text-primary);
 }
 
+.run-title-slot {
+  display: block;
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
 .run-title-text {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   -webkit-box-orient: vertical;
+  width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: normal;
@@ -1356,8 +1453,6 @@ h3 {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  flex: 1;
-  min-width: 0;
   transition: opacity 0.2s ease, color 0.15s ease;
 }
 
@@ -1399,13 +1494,12 @@ h3 {
   0%,
   100% {
     transform: scale(1);
-    opacity: 0.8;
+    opacity: 0.78;
   }
 
   50% {
-    transform: scale(1.4);
+    transform: scale(1.35);
     opacity: 1;
-    box-shadow: 0 0 10px rgba(37, 99, 235, 0.6);
   }
 }
 
@@ -1432,8 +1526,8 @@ h3 {
   white-space: normal;
   word-break: break-word;
   line-height: 1.45;
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  width: min(var(--sidebar-content-width, 230px), 100%);
+  min-width: 0;
   box-sizing: border-box;
   animation: sidebarListFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -1453,7 +1547,7 @@ h3 {
   padding-top: 10px;
   border-top: 1px solid var(--border-default);
   flex-shrink: 0;
-  animation: sidebarItemFadeIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: sidebarItemFadeIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: 90ms;
 }
 
@@ -1580,6 +1674,7 @@ h3 {
 .app-shell:not(.landing-active) .landing-screen,
 .app-shell.landing-active .workspace-view-wrapper {
   pointer-events: none;
+  visibility: hidden;
 }
 
 .workspace-view-wrapper {
@@ -1725,6 +1820,8 @@ h3 {
   min-height: 0;
   margin-bottom: 16px;
   position: relative;
+  z-index: 0;
+  isolation: isolate;
   container: landing-title / size;
 }
 
@@ -1733,6 +1830,14 @@ h3 {
   max-width: 680px;
   align-self: center;
   position: relative;
+  z-index: 2;
+  isolation: isolate;
+  /* Keep the composer in its own compositing layer above the title-anchored
+     dot pattern (which overflows .landing-title-space's size container while
+     the welcome copy animates in WKWebView). */
+  transform: translateZ(0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
   flex-shrink: 0;
 }
 
@@ -1754,7 +1859,7 @@ h3 {
   top: 50%;
   width: 200vw;
   height: 200vh;
-  transform: translate(-50%, -50%);
+  transform: translate3d(-50%, -50%, 0);
   pointer-events: none;
   z-index: -1;
 }
@@ -1877,6 +1982,8 @@ h3 {
   left: 0;
   width: 100%;
   height: 0;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
 }
 
 .prompt-box-anchor>.prompt-box-container {
@@ -1896,14 +2003,16 @@ h3 {
   flex-direction: column;
   position: relative;
   box-sizing: border-box;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
 }
 
 .prompt-box-container.landing {
   max-width: 680px;
   border-radius: 26px;
   padding: 10px 14px 10px 14px;
-  background: color-mix(in srgb, var(--bg-surface) 90%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border-default) 85%, transparent);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
 }
 
 .prompt-box-container.compact {
@@ -1930,7 +2039,7 @@ h3 {
 .prompt-box-container.landing:focus-within,
 .prompt-box-container.landing:focus-visible,
 .prompt-box-container.landing:hover {
-  background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
+  background: var(--bg-surface);
   border-color: var(--border-default) !important;
 }
 
@@ -2034,6 +2143,13 @@ h3 {
   height: 100% !important;
 }
 
+.prompt-box-expand-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+}
+
 .prompt-box-expand-btn:focus-visible {
   box-shadow: inset 0 0 0 2px var(--border-default);
 }
@@ -2050,13 +2166,14 @@ h3 {
   line-height: 1.5;
   resize: none;
   min-width: 0;
-  word-break: keep-all;
+  word-break: normal;
   overflow-wrap: anywhere;
   overflow-y: auto;
   /* Reserve the scrollbar track from the first draft so growing past the capped
      height cannot narrow the text and visibly rewrap it. */
   scrollbar-gutter: stable;
-  padding: 4px 2px 2px 2px;
+  /* Reserve the top-right toggle's space even while hidden so its arrival cannot rewrap text. */
+  padding: 4px 36px 2px 2px;
   box-sizing: border-box;
 }
 
@@ -2079,7 +2196,7 @@ h3 {
 .prompt-box-container.compact .prompt-box-textarea {
   font-size: 14px;
   line-height: 1.45;
-  padding: 2px 2px 0 2px;
+  padding: 2px 30px 0 2px;
 }
 
 .prompt-box-textarea::placeholder {
@@ -2157,8 +2274,12 @@ h3 {
 
 /* 图片预览卡片 */
 .prompt-box-image-preview-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   margin-bottom: 8px;
-  width: fit-content;
+  max-width: 100%;
 }
 
 .prompt-box-image-thumb {
@@ -2168,12 +2289,34 @@ h3 {
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.prompt-box-image-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-subtle, #f8fafc);
+  color: var(--text-tertiary, #94a3b8);
+}
+
+.prompt-box-image-open-btn {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
 }
 
 .prompt-box-preview-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 
 .prompt-box-image-remove-btn {
@@ -2199,9 +2342,11 @@ h3 {
 
 /* 文件预览标签卡片 */
 .prompt-box-file-preview-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   margin-bottom: 8px;
-  width: -moz-fit-content;
-  width: fit-content;
   max-width: 100%;
 }
 
@@ -2530,4 +2675,129 @@ h3 {
     font-size: 11px;
     padding: 0 5px;
   }
+}
+
+/* Image preview lightbox modal */
+.image-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(15, 23, 42, 0.84);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(24px, calc(var(--desktop-titlebar-inset, 0px) + 16px)) 24px 24px;
+}
+
+.image-preview-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  max-width: 92vw;
+  max-height: 90vh;
+  outline: none;
+}
+
+.image-preview-full-img {
+  max-width: 90vw;
+  max-height: 82vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  background: rgba(255, 255, 255, 0.04);
+  user-select: none;
+}
+
+.image-preview-close-btn {
+  position: fixed;
+  top: calc(var(--desktop-titlebar-inset, 0px) + 16px);
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.image-preview-close-btn:hover {
+  background: rgba(15, 23, 42, 0.92);
+  transform: scale(1.05);
+}
+
+.image-preview-nav-btn {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.image-preview-nav-btn:hover {
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.image-preview-nav-btn.prev {
+  left: 20px;
+}
+
+.image-preview-nav-btn.next {
+  right: 20px;
+}
+
+.image-preview-caption {
+  margin-top: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 80vw;
+  padding: 6px 12px;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #f8fafc;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.image-preview-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-preview-counter {
+  color: rgba(248, 250, 252, 0.75);
+  flex-shrink: 0;
+}
+
+/* Pause infinite decorative animations when the window is hidden or unfocused
+   in desktop mode so WKWebView stops burning GPU/WindowServer frames off-focus. */
+:root.window-inactive .run-dot.running-pulse,
+:root.window-inactive .run-dot.approval-pulse,
+:root.window-inactive .working-indicator-dot,
+:root.window-inactive .thinking-icon-box.pulse,
+:root.window-inactive .tool-call-card.running::before,
+:root.window-inactive .activity-summary-icon.spin,
+:root.window-inactive .react-flow__edge.animated path,
+:root.window-inactive .sidebar-skeleton-item::after,
+:root.window-inactive .thinking-streaming-cursor {
+  animation-play-state: paused !important;
 }

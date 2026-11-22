@@ -9,7 +9,7 @@ import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx";
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
-import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader } from "../src/services/transcriptCache.ts";
+import { cacheTranscriptWindow, cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader, transcriptFromCache } from "../src/services/transcriptCache.ts";
 import type { Execution, TranscriptItem } from "../src/types.ts";
 import { finishTranscriptParseCacheLease, invalidateTranscriptParseCache, leaseTranscriptParseCache, readTranscriptParse, transcriptParseCache, writeTranscriptParse } from "../src/services/transcriptParseCache.ts";
 
@@ -509,5 +509,19 @@ test("prepend reconciliation preserves unrelated final responses, sources and or
     parseHistory(assistantEnd(answer), 0, items, source);
     assert.deepEqual(items, raw); // Only the provenance-marked runtime copy is removed.
   }
+});
+
+test("execution transcript cache round-trip preserves steerOffsets and steerOffsetsAuthoritative", () => {
+  const window = {
+    text: "tail-bytes\n",
+    start: 100_000,
+    end: 100_011,
+    total: 100_011,
+    settled: true,
+    steerOffsets: { "req-before": 5_000, "req-inside": 100_000 },
+    steerOffsetsAuthoritative: true,
+  };
+  const restored = transcriptFromCache(cacheTranscriptWindow(window));
+  assert.deepEqual(restored, window);
 });
 

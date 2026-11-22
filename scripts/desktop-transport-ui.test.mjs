@@ -85,6 +85,7 @@ before(async () => {
 
 after(async () => {
   await browser?.close();
+  server?.httpServer?.closeAllConnections?.();
   await server?.close();
 });
 
@@ -418,7 +419,7 @@ for (const platformOverride of [
         assert.deepEqual(await page.evaluate(() => window.__TEST_WINDOW__.state.shownShells), [{
           shellMounted: true,
           titlebarMounted: true,
-          inset: "30px",
+          inset: "32px",
         }]);
       } else {
         assert.deepEqual(await page.evaluate(() => window.__TEST_WINDOW__.state.shownShells), []);
@@ -485,7 +486,7 @@ test("Windows startup retries transient window IPC failures with animations enab
     assert.deepEqual(await page.evaluate(() => ({
       attempts: window.__TEST_WINDOW__.state.showAttempts,
       shells: window.__TEST_WINDOW__.state.shownShells,
-    })), { attempts: 3, shells: [{ shellMounted: true, titlebarMounted: true, inset: "30px" }] });
+    })), { attempts: 3, shells: [{ shellMounted: true, titlebarMounted: true, inset: "32px" }] });
     assert.equal(requests.length, 0, "window reveal must not depend on backend IPC");
     assert.equal(await page.locator('[data-testid="desktop-backend-status"]').count(), 0);
 
@@ -650,6 +651,7 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
     const macLayout = await mac.page.evaluate(() => {
       const bar = document.querySelector(".desktop-titlebar");
       const bgStage = document.querySelector(".app-background-root > .relative");
+      const sidebar = document.querySelector(".sidebar");
       const barCs = bar ? getComputedStyle(bar) : null;
       return {
         barHeight: barCs?.height,
@@ -657,34 +659,45 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
         barBackgroundColor: barCs?.backgroundColor,
         barBottom: bar?.getBoundingClientRect().bottom,
         bgStageTop: bgStage?.getBoundingClientRect().top,
+        sidebarTop: sidebar?.getBoundingClientRect().top,
+        sidebarMarginTop: sidebar ? getComputedStyle(sidebar).marginTop : null,
         insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
       };
     });
-    assert.equal(macLayout.barHeight, "30px");
+    assert.equal(macLayout.barHeight, "32px");
     assert.equal(macLayout.barBorderBottomWidth, "0px");
     assert.equal(macLayout.barBackgroundColor, "rgb(255, 255, 255)");
-    assert.equal(macLayout.barBottom, 30);
-    assert.equal(macLayout.bgStageTop, 30, "landing background starts below the independent titlebar instead of being clipped");
-    assert.equal(macLayout.insetVar, "30px");
+    assert.equal(macLayout.barBottom, 32);
+    assert.equal(macLayout.bgStageTop, 32, "landing background starts below the independent titlebar instead of being clipped");
+    assert.equal(macLayout.sidebarTop, 32, "macOS sidebar sits directly beneath the 32px overlay titlebar without a redundant 12px top margin");
+    assert.equal(macLayout.sidebarMarginTop, "0px");
+    assert.equal(macLayout.insetVar, "32px");
 
-    // Modal backdrop reserves top padding below the 30px titlebar safe area.
+    // Modal backdrop reserves top padding below the 32px titlebar safe area.
     await mac.page.getByRole("button", { name: "Settings" }).click();
     await mac.page.locator(".modal-backdrop").waitFor({ state: "visible" });
     const modalTopPadding = await mac.page.evaluate(() =>
       Number.parseFloat(getComputedStyle(document.querySelector(".modal-backdrop")).paddingTop),
     );
-    assert.ok(modalTopPadding >= 46, `expected modal backdrop paddingTop >= 46px, got ${modalTopPadding}`);
+    assert.ok(modalTopPadding >= 48, `expected modal backdrop paddingTop >= 48px, got ${modalTopPadding}`);
     await mac.page.keyboard.press("Escape");
     await mac.page.locator(".modal-backdrop").waitFor({ state: "hidden" });
 
     // Entering macOS fullscreen collapses the titlebar and resets the inset to 0px.
     await mac.page.evaluate(() => window.__TEST_WINDOW__.setFullscreen(true));
     await titlebar.waitFor({ state: "hidden" });
-    const fullscreenLayout = await mac.page.evaluate(() => ({
-      bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
-      insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
-    }));
+    const fullscreenLayout = await mac.page.evaluate(() => {
+      const sidebar = document.querySelector(".sidebar");
+      return {
+        bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
+        sidebarTop: sidebar?.getBoundingClientRect().top,
+        sidebarMarginTop: sidebar ? getComputedStyle(sidebar).marginTop : null,
+        insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
+      };
+    });
     assert.equal(fullscreenLayout.bgStageTop, 0);
+    assert.equal(fullscreenLayout.sidebarTop, 12, "macOS fullscreen restores the 12px sidebar top margin");
+    assert.equal(fullscreenLayout.sidebarMarginTop, "12px");
     assert.equal(fullscreenLayout.insetVar, "0px");
 
     // Leaving macOS fullscreen can fire `resize` while NSWindowStyleMaskFullScreen
@@ -695,12 +708,19 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
       setTimeout(() => { window.__TEST_WINDOW__.state.fullscreen = false; }, 200);
     });
     await titlebar.waitFor({ state: "visible" });
-    const restoredLayout = await mac.page.evaluate(() => ({
-      bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
-      insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
-    }));
-    assert.equal(restoredLayout.bgStageTop, 30);
-    assert.equal(restoredLayout.insetVar, "30px");
+    const restoredLayout = await mac.page.evaluate(() => {
+      const sidebar = document.querySelector(".sidebar");
+      return {
+        bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
+        sidebarTop: sidebar?.getBoundingClientRect().top,
+        sidebarMarginTop: sidebar ? getComputedStyle(sidebar).marginTop : null,
+        insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
+      };
+    });
+    assert.equal(restoredLayout.bgStageTop, 32);
+    assert.equal(restoredLayout.sidebarTop, 32);
+    assert.equal(restoredLayout.sidebarMarginTop, "0px");
+    assert.equal(restoredLayout.insetVar, "32px");
     assert.deepEqual(mac.pageErrors, []);
   } finally {
     await mac.context.close();
@@ -724,14 +744,21 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
     assert.equal(await win.page.locator(".app-shell.is-tauri-macos").count(), 0);
     assert.equal(await win.page.locator(".desktop-window-control").count(), 3);
 
-    const winLayout = await win.page.evaluate(() => ({
-      barHeight: getComputedStyle(document.querySelector(".desktop-titlebar")).height,
-      bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
-      insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
-    }));
-    assert.equal(winLayout.barHeight, "30px");
-    assert.equal(winLayout.bgStageTop, 30);
-    assert.equal(winLayout.insetVar, "30px");
+    const winLayout = await win.page.evaluate(() => {
+      const sidebar = document.querySelector(".sidebar");
+      return {
+        barHeight: getComputedStyle(document.querySelector(".desktop-titlebar")).height,
+        bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
+        sidebarTop: sidebar?.getBoundingClientRect().top,
+        sidebarMarginTop: sidebar ? getComputedStyle(sidebar).marginTop : null,
+        insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
+      };
+    });
+    assert.equal(winLayout.barHeight, "32px");
+    assert.equal(winLayout.bgStageTop, 32);
+    assert.equal(winLayout.sidebarTop, 44, "Windows keeps the 12px sidebar top margin below its bordered titlebar");
+    assert.equal(winLayout.sidebarMarginTop, "12px");
+    assert.equal(winLayout.insetVar, "32px");
 
     await win.page.locator('[data-window-action="minimize"]').click();
     await win.page.locator('[data-window-action="toggle-maximize"]').click();

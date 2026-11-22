@@ -281,6 +281,20 @@ impl Store {
         tx.commit().map_err(|error| error.to_string())
     }
 
+    pub(crate) fn is_attachment_input_referenced(&self, id: &str) -> Result<bool, String> {
+        let payload = serde_json::to_string(&Target::data(crate::attachment_inputs::BUCKET, id))
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=?1)
+                 OR EXISTS(SELECT 1 FROM run_owned_directories WHERE target=?2)
+                 OR EXISTS(SELECT 1 FROM cleanup_tasks WHERE run_id=?1)",
+                params![id, payload],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn cleanup_target_is_shared(
         &self,
         excluded: &str,

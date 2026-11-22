@@ -1,5 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState, useLayoutEffect, useRef, useId } from "react";
+import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
@@ -48,7 +49,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
   const dialogMotion = largeDialogMotion(reduceMotion);
   const veilMotion = dialogVeilMotion(reduceMotion);
 
-  return (
+  const content = (
     <div
       className="modal-backdrop subtle-backdrop"
       onMouseDown={(event) => {
@@ -112,6 +113,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
       </motion.section>
     </div>
   );
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 });
 
 EditorModal.displayName = "EditorModal";

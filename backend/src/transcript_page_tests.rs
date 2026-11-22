@@ -466,3 +466,450 @@ fn planner_missing_first_log_returns_a_complete_zero_byte_cursor_page() {
     assert_eq!((page.start_offset, page.next_offset, page.total_bytes), (0, 0, 0));
     assert!(page.content.is_empty() && page.complete && page.running);
 }
+
+#[test]
+fn execution_steer_offsets_survive_chunk_boundaries_and_partial_tail_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
+    runtime.state.run_id = "steer-offset-run".into();
+    let execution = Execution {
+        id: "exec-1".into(),
+        node: "task".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "session".into(),
+        worktree: "/unused".into(),
+        before: String::new(),
+        workspace_lineage: Vec::new(),
+        after: None,
+        input: None,
+        result: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 1,
+        completed_at: None,
+        metrics: None,
+    };
+    runtime
+        .state
+        .nodes
+        .insert("task".into(), crate::model::NodeState::default());
+    runtime
+        .emit(EventKind::Started {
+            execution,
+            message_sequences: Some(vec![]),
+            fresh_restart: true,
+        })
+        .unwrap();
+    let req1 = "11111111-1111-4111-8111-111111111111";
+    let req2 = "22222222-2222-4222-8222-222222222222";
+    let req_unread = "33333333-3333-4333-8333-333333333333";
+    for (req, text) in [(req1, "first"), (req2, "second"), (req_unread, "still queued")] {
+        runtime
+            .emit(EventKind::Steered {
+                execution_id: "exec-1".into(),
+                node: "task".into(),
+                instruction: text.into(),
+                request_id: Some(req.into()),
+                images: None,
+            })
+            .unwrap();
+    }
+
+    // Pad past a 32KB chunk boundary so req1's JSONL line itself crosses the boundary.
+    let prefix_pad = format!(
+        "{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n",
+        "a".repeat(32_768 - 95)
+    );
+    let steer1_offset = prefix_pad.len();
+    let steer1_line = format!(
+        "{{\"grapherRequestId\":\"{req1}\",\"type\":\"message_start\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"REWRITTEN_1\"}}]}}}}\n\
+         {{\"grapherRequestId\":\"{req1}\",\"type\":\"message_end\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"REWRITTEN_1\"}}]}}}}\n"
+    );
+    let mid_pad = format!(
+        "{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n",
+        "b".repeat(120_000)
+    );
+    let steer2_offset = steer1_offset + steer1_line.len() + mid_pad.len();
+    let steer2_line = format!(
+        "{{\"grapherRequestId\":\"{req2}\",\"type\":\"message_start\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"REWRITTEN_2\"}}]}}}}\n"
+    );
+    let output = format!("{prefix_pad}{steer1_line}{mid_pad}{steer2_line}");
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-1".into(),
+            text: output.clone(),
+        })
+        .unwrap();
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+    let body = serde_json::json!({
+        "runId": "steer-offset-run",
+        "executionId": "exec-1",
+        "tail": true,
+        "limit": 40_000
+    });
+    let page = get_execution_output(&body, &service).unwrap();
+    let start = page["startOffset"].as_u64().unwrap() as usize;
+    assert!(start > steer1_offset, "tail page must omit the earlier steer1");
+    assert!(start <= steer2_offset, "tail page must include steer2");
+    assert_eq!(page["steerOffsetsAuthoritative"], serde_json::json!(true));
+    assert_eq!(page["steerOffsets"][req1], serde_json::json!(steer1_offset));
+    assert_eq!(page["steerOffsets"][req2], serde_json::json!(steer2_offset));
+    assert!(
+        page["steerOffsets"].get(req_unread).is_none(),
+        "unread steer must be absent from consumed offsets"
+    );
+}
+
+#[test]
+fn steer_offsets_handle_multibyte_utf8_split_oversized_images_and_quoted_tool_payloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
+    runtime.state.run_id = "steer-utf8-img-run".into();
+    let execution = crate::model::Execution {
+        id: "exec-1".into(),
+        node: "task".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "session-1".into(),
+        worktree: "/unused".into(),
+        before: String::new(),
+        workspace_lineage: Vec::new(),
+        after: None,
+        input: None,
+        result: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 1,
+        completed_at: None,
+        metrics: None,
+    };
+    runtime
+        .state
+        .nodes
+        .insert("task".into(), crate::model::NodeState::default());
+    runtime
+        .emit(EventKind::Started {
+            execution,
+            message_sequences: Some(vec![]),
+            fresh_restart: true,
+        })
+        .unwrap();
+    let req_split = "aaaaaaaa-1111-4111-8111-111111111111";
+    let req_image = "bbbbbbbb-2222-4222-8222-222222222222";
+    let req_fake = "cccccccc-3333-4333-8333-333333333333";
+    for (req, text) in [(req_split, "split"), (req_image, "image")] {
+        runtime
+            .emit(EventKind::Steered {
+                execution_id: "exec-1".into(),
+                node: "task".into(),
+                instruction: text.into(),
+                request_id: Some(req.into()),
+                images: None,
+            })
+            .unwrap();
+    }
+
+    // Place multi-byte UTF-8 ("中文") within 16 bytes before a 32KB chunk boundary
+    // that splits `"grapherRequestId"` right between `grapherRe` and `questId`.
+    // `{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"...中文"}]}}\n`
+    // followed by `{"grapherRe` (11 bytes) ending right at byte 32_768.
+    let suffix = "中文\"}]}}\n";
+    let header = "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"";
+    let target_before_split = 32_768 - "{\"grapherRe".len();
+    let pad_len = target_before_split - header.len() - suffix.len();
+    let prefix = format!("{header}{}{suffix}", "x".repeat(pad_len));
+    let split_offset = prefix.len();
+    assert_eq!(split_offset + "{\"grapherRe".len(), 32_768);
+    // Verify `chunk.len() - 16` inside chunk 0 lands on a non-char-boundary of "中文".
+    let split_line = format!(
+        "{{\"grapherRequestId\":\"{req_split}\",\"type\":\"message_start\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"ok\"}}]}}}}\n"
+    );
+    // An oversized (> 128KB) base64 image steer line must still be indexed without parsing 128KB JSON.
+    let image_offset = split_offset + split_line.len();
+    let image_line = format!(
+        "{{\"grapherRequestId\":\"{req_image}\",\"type\":\"message_start\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"see pic\"}},{{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"{}\"}}]}}}}\n",
+        "A".repeat(140_000)
+    );
+    // A huge tool result quoting `"grapherRequestId"` deep inside its body must be ignored.
+    let quoted_tool_line = format!(
+        "{{\"type\":\"tool_execution_end\",\"toolCallId\":\"t1\",\"result\":\"{}{}\"}}\n",
+        "z".repeat(20_000),
+        format!("{{\\\"grapherRequestId\\\":\\\"{req_fake}\\\",\\\"type\\\":\\\"message_start\\\",\\\"message\\\":{{\\\"role\\\":\\\"user\\\"}}}}")
+    );
+    let output = format!("{prefix}{split_line}{image_line}{quoted_tool_line}");
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-1".into(),
+            text: output.clone(),
+        })
+        .unwrap();
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+    let page = get_execution_output(
+        &serde_json::json!({"runId":"steer-utf8-img-run","executionId":"exec-1","tail":true,"limit":16_384}),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(page["steerOffsetsAuthoritative"], serde_json::json!(true));
+    assert_eq!(page["steerOffsets"][req_split], serde_json::json!(split_offset));
+    assert_eq!(page["steerOffsets"][req_image], serde_json::json!(image_offset));
+    assert!(page["steerOffsets"].get(req_fake).is_none());
+
+    // Repeated prefix and full reads reuse the incremental steer offset cache
+    // accurately, and explicit invalidation clears it cleanly.
+    let prefix_end = image_offset;
+    let cached_prefix = get_execution_output(
+        &serde_json::json!({"runId":"steer-utf8-img-run","executionId":"exec-1","tail":true,"endOffset":prefix_end,"limit":16_384}),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(cached_prefix["steerOffsets"][req_split], serde_json::json!(split_offset));
+    assert!(cached_prefix["steerOffsets"].get(req_image).is_none());
+    transcript::invalidate_steer_offset_cache(Some("steer-utf8-img-run"));
+    let rehydrated = get_execution_output(
+        &serde_json::json!({"runId":"steer-utf8-img-run","executionId":"exec-1","tail":true,"limit":16_384}),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(rehydrated["steerOffsets"][req_split], serde_json::json!(split_offset));
+    assert_eq!(rehydrated["steerOffsets"][req_image], serde_json::json!(image_offset));
+}
+
+#[test]
+fn card_shell_projection_and_range_hydration_serve_settled_execution_and_planning_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
+    runtime.state.run_id = "cards-hydrate-run".into();
+    let execution = Execution {
+        id: "exec-cards".into(),
+        node: "worker".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "session".into(),
+        worktree: "/unused".into(),
+        before: String::new(),
+        workspace_lineage: Vec::new(),
+        after: None,
+        input: None,
+        result: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 1,
+        completed_at: None,
+        metrics: None,
+    };
+    runtime
+        .state
+        .nodes
+        .insert("worker".into(), crate::model::NodeState::default());
+    runtime
+        .emit(EventKind::Started {
+            execution,
+            message_sequences: Some(vec![]),
+            fresh_restart: true,
+        })
+        .unwrap();
+
+    let huge_write = "W".repeat(4000);
+    let huge_output = format!("{}\nnot ok 1 - sample failure\n", "O".repeat(130_000));
+    let huge_thinking = "T".repeat(4000);
+    let log = [
+        serde_json::json!({ "type": "message_start", "message": { "role": "assistant" } }).to_string(),
+        serde_json::json!({ "type": "message_update", "assistantMessageEvent": { "type": "thinking_delta", "contentIndex": 0, "delta": "delta" } }).to_string(),
+        serde_json::json!({ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": "Final answer." } }).to_string(),
+        serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": "small-call",
+            "toolName": "read",
+            "args": { "path": "Cargo.toml" }
+        }).to_string(),
+        serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "small-call",
+            "toolName": "read",
+            "isError": false,
+            "result": { "content": [{ "type": "text", "text": "small inline body" }] }
+        }).to_string(),
+        serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": "big-call",
+            "toolName": "write",
+            "args": { "path": "src/big.ts", "content": huge_write }
+        }).to_string(),
+        serde_json::json!({
+            "type": "tool_execution_update",
+            "toolCallId": "big-call",
+            "toolName": "write",
+            "partialResult": { "content": [{ "type": "text", "text": "progress spam" }] }
+        }).to_string(),
+        serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "big-call",
+            "toolName": "write",
+            "isError": false,
+            "result": { "content": [{ "type": "text", "text": huge_output }], "details": { "exitCode": 0 } }
+        }).to_string(),
+        serde_json::json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": huge_thinking },
+                    { "type": "text", "text": "Final answer." }
+                ]
+            }
+        }).to_string(),
+    ]
+    .join("\n")
+        + "\n";
+
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-cards".into(),
+            text: log.clone(),
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: "exec-cards".into(),
+            head: "".into(),
+            output: "".into(),
+            output_bytes: log.len(),
+            metrics: None,
+        })
+        .unwrap();
+
+    // Also seed a settled planning log with the exact same JSONL payload.
+    let planning_id = Uuid::new_v4().to_string();
+    let planning_dir = temp.path().join("planning").join(&planning_id);
+    std::fs::create_dir_all(&planning_dir).unwrap();
+    write_planning_summary(
+        &planning_dir,
+        &PlanningSummary {
+            planning_id: planning_id.clone(),
+            run_id: Some(Uuid::new_v4().to_string()),
+            repository: Some(temp.path().to_string_lossy().into()),
+            goal: Some("test".into()),
+            status: Some("completed".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(planning_dir.join("planner.jsonl"), &log).unwrap();
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+
+    // 1. Settled execution CardShell projection strips streaming noise, keeps
+    // small cards inline, and omits large payloads with raw ranges + header flags.
+    let cards_page = get_execution_output(
+        &serde_json::json!({"runId":"cards-hydrate-run","executionId":"exec-cards","tail":true,"limit":512 * 1024,"projection":"cards"}),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(cards_page["projection"], serde_json::json!("cards"));
+    assert!(cards_page.get("summaryOnly").is_none());
+    let cards_content = cards_page["content"].as_str().unwrap();
+    assert!(cards_content.contains("small inline body"));
+    assert!(!cards_content.contains("progress spam"));
+    assert!(!cards_content.contains("WWWW"));
+    assert!(!cards_content.contains("OOOO"));
+    assert!(!cards_content.contains("TTTT"));
+    assert!(cards_content.contains(r#""grapherSubcommandWarning":true"#));
+    assert!(cards_content.contains(r#""grapherThinkingChars":4000"#));
+
+    // Extract the omitted tool result range and thinking range, then hydrate ONLY those lines.
+    let parsed_lines: Vec<serde_json::Value> = cards_content
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let big_end = parsed_lines
+        .iter()
+        .find(|v| v["type"] == "tool_execution_end" && v["toolCallId"] == "big-call")
+        .unwrap();
+    let big_end_range = big_end["grapherRawRange"].as_array().unwrap().clone();
+    let msg_end = parsed_lines
+        .iter()
+        .find(|v| v["type"] == "message_end" && v["message"]["role"] == "assistant")
+        .unwrap();
+    let thinking_range = msg_end["grapherRawRange"].as_array().unwrap().clone();
+
+    let hydrated = get_execution_output(
+        &serde_json::json!({
+            "runId": "cards-hydrate-run",
+            "executionId": "exec-cards",
+            "ranges": [big_end_range, thinking_range]
+        }),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(hydrated["projection"], serde_json::json!("hydrated"));
+    let hydrated_content = hydrated["content"].as_str().unwrap();
+    assert!(hydrated_content.contains(&"T".repeat(4000)));
+    let hydrated_end: serde_json::Value = hydrated_content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "tool_execution_end")
+        .unwrap();
+    let hydrated_text = hydrated_end["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(hydrated_text.len() <= crate::compact_transcript::DISPLAY_TOOL_PREVIEW_BYTES);
+    assert!(hydrated_text.ends_with("\n..."));
+
+    // 2. Planning output supports the exact same CardShell + range hydration flow.
+    let plan_cards = get_planning_output_with_options(
+        planning_id.clone(),
+        "planner".into(),
+        0,
+        true,
+        None,
+        Some(512 * 1024),
+        Some(crate::compact_transcript::TranscriptProjection::CardShell),
+        None,
+        &service,
+    )
+    .unwrap();
+    assert_eq!(plan_cards["projection"], serde_json::json!("cards"));
+    assert!(plan_cards["content"].as_str().unwrap().contains("small inline body"));
+    assert!(!plan_cards["content"].as_str().unwrap().contains("TTTT"));
+
+    let plan_hydrate_body = serde_json::json!({ "ranges": [thinking_range] });
+    let plan_hydrated = get_planning_output_with_options(
+        planning_id,
+        "planner".into(),
+        0,
+        false,
+        None,
+        None,
+        None,
+        Some(&plan_hydrate_body),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(plan_hydrated["projection"], serde_json::json!("hydrated"));
+    assert!(plan_hydrated["content"].as_str().unwrap().contains(&"T".repeat(4000)));
+}

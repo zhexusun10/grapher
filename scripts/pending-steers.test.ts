@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { projectLiveSteerWithdrawals, projectWithdrawnSteers, inlineSteerKey, isPendingSteer, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../src/lib/pendingSteers.ts";
+import { matchRequestedUserTurn, stripPiImageDimensionHints } from "../src/services/plannerText.ts";
+import { parseTranscriptChunkLines } from "../src/services/transcriptParser.ts";
 import { ComposerDrafts } from "../src/services/composerDrafts.ts";
 import { newExecutionSteer } from "../src/services/plannerSteers.ts";
 import { emptySnapshot, type ChatMessage } from "../src/types.ts";
@@ -234,4 +236,186 @@ test("the rollback key is shared by the optimistic card and the durable event", 
   assert.notEqual(steerRollbackKey(optimistic), steerRollbackKey(steer("event-9", "run the tests", "exec-2")),
     "a different execution must not share the key");
   assert.equal(steerRollbackKey({ id: "msg-2", role: "user", text: "task" }), null);
+});
+
+test("reloaded attachment steers render inline when present and stay at tail when unread", () => {
+  const [image, text] = numberSteers([
+    steer("event-1", "inspect", "exec-1", { images: [{ type: "image", mimeType: "image/png", data: "abc" }] }),
+    steer("event-2", "inspect", "exec-1"),
+  ]);
+  const consumed: Record<string, InlineUserTurnWindow> = {
+    "exec-1": { texts: [], complete: true, turns: [{ text: "inspect", offset: 40 }] },
+  };
+  assert.equal(isPendingSteer(image, consumed), false);
+  assert.equal(steerFallbackPosition(image, consumed, false, true), null,
+    "a consumed image steer must render inline after reload instead of jumping above the transcript");
+  assert.equal(steerFallbackPosition(text, consumed, true, true), "after",
+    "a later text steer with the same text remains unread until its own turn arrives");
+
+  const unreadComplete: Record<string, InlineUserTurnWindow> = {
+    "exec-1": { texts: [], complete: true, turns: [] },
+  };
+  assert.equal(steerFallbackPosition(image, unreadComplete, true, true), "after",
+    "an unread image steer in a complete window stays after output, not above it");
+});
+
+test("Pi image resize dimension hints are stripped so resized image steers match inline turns", () => {
+  const resized = "check this\n\n" +
+    "[Image: original 3024x1964, displayed at 2000x1299. Multiply coordinates by 1.51 to map to original image.]";
+  assert.equal(stripPiImageDimensionHints(resized), "check this");
+  const lines = [
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "before" }] } }),
+    JSON.stringify({
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: resized },
+          { type: "image", mimeType: "image/png", data: "abc" },
+        ],
+      },
+    }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "after" }] } }),
+  ];
+  const parsed = parseTranscriptChunkLines(
+    lines,
+    [],
+    new Map(),
+    {
+      source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false,
+      inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false,
+      pendingUserStart: false, assistantStartIndex: 0, userMessageStarts: new Set(), compacting: false,
+    },
+    {
+      showUserTurns: true,
+      skipFirstUser: false,
+      userTurnTexts: ["check this"],
+    },
+  );
+  assert.deepEqual(
+    parsed.currentItems.map(item => [item.role, item.content, item.images?.length ?? 0]),
+    [
+      ["assistant", "before", 0],
+      ["user", "check this", 1],
+      ["assistant", "after", 0],
+    ],
+  );
+});
+
+test("skipLeadingUserTurn skips an opening prompt matching a later steer and collapses expanded /skill steers", () => {
+  const expandedSkill = `<skill name="review" location="/repo/skills/review/SKILL.md">\nReferences are relative to /repo/skills/review.\n\nCheck everything.\n</skill>\n\nauth.ts`;
+  assert.equal(matchRequestedUserTurn(expandedSkill, ["/skill:review auth.ts"]), "/skill:review auth.ts");
+
+  const lines = [
+    JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "继续" }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "继续" }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "step 1" }] } }),
+    JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "继续" }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "继续" }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "step 2" }] } }),
+    JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text: expandedSkill }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text: expandedSkill }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "step 3" }] } }),
+  ];
+  const parsed = parseTranscriptChunkLines(
+    lines,
+    [],
+    new Map(),
+    {
+      source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false,
+      inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false,
+      pendingUserStart: false, assistantStartIndex: 0, userMessageStarts: new Set(), compacting: false,
+    },
+    {
+      showUserTurns: true,
+      skipFirstUser: false,
+      skipLeadingUserTurn: true,
+      userTurnTexts: ["继续", "/skill:review auth.ts"],
+    },
+  );
+  assert.deepEqual(
+    parsed.currentItems.map(item => [item.role, item.content]),
+    [
+      ["assistant", "step 1"],
+      ["user", "继续"],
+      ["assistant", "step 2"],
+      ["user", "/skill:review auth.ts"],
+      ["assistant", "step 3"],
+    ],
+  );
+});
+
+test("grapherRequestId and authoritative steerOffsets place steers deterministically across rewrites and partial tails", () => {
+  const reqEarlier = "11111111-1111-4111-8111-111111111111";
+  const reqInWindow = "22222222-2222-4222-8222-222222222222";
+  const reqUnread = "33333333-3333-4333-8333-333333333333";
+  const reqBeyond = "44444444-4444-4444-8444-444444444444";
+
+  // 1. Parser matches an extension-rewritten user turn solely by grapherRequestId.
+  const lines = [
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "before" }] } }),
+    JSON.stringify({
+      grapherRequestId: reqInWindow,
+      type: "message_start",
+      message: { role: "user", content: [{ type: "text", text: "COMPLETELY_REWRITTEN_BY_EXTENSION" }] },
+    }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "after" }] } }),
+  ];
+  const parsed = parseTranscriptChunkLines(
+    lines,
+    [],
+    new Map(),
+    {
+      source: "output", byteOffset: 200_000, leadingFragment: false, inTagThinking: false,
+      inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false,
+      pendingUserStart: false, assistantStartIndex: 0, userMessageStarts: new Set(), compacting: false,
+    },
+    {
+      showUserTurns: true,
+      skipFirstUser: false,
+      skipLeadingUserTurn: true,
+      userTurnTexts: ["original user text"],
+      userTurnRequestIds: [reqEarlier, reqInWindow, reqUnread, reqBeyond],
+    },
+  );
+  assert.deepEqual(
+    parsed.currentItems.map(item => [item.role, item.steerRequestId ?? null]),
+    [["assistant", null], ["user", reqInWindow], ["assistant", null]],
+  );
+
+  // 2. Partial tail window [200_000, 300_000) without any live cursor (re-entered view):
+  const partial: Record<string, InlineUserTurnWindow> = {
+    "exec-1": {
+      complete: false,
+      start: 200_000,
+      end: 300_000,
+      texts: [],
+      turns: [{ text: "COMPLETELY_REWRITTEN_BY_EXTENSION", offset: 250_000, requestId: reqInWindow }],
+      steerOffsets: {
+        [reqEarlier]: 10_000,
+        [reqInWindow]: 250_000,
+        [reqBeyond]: 305_000,
+      },
+      steerOffsetsAuthoritative: true,
+    },
+  };
+  const earlier = steer("e1", "original 1", "exec-1", { steerRequestId: reqEarlier });
+  const inWindow = steer("e2", "original 2", "exec-1", { steerRequestId: reqInWindow });
+  const unread = steer("e3", "original 3", "exec-1", { steerRequestId: reqUnread });
+  const unreadImage = steer("e4", "original 4", "exec-1", {
+    steerRequestId: reqUnread,
+    images: [{ type: "image", mimeType: "image/png", data: "abc" }],
+  });
+  const beyond = steer("e5", "original 5", "exec-1", { steerRequestId: reqBeyond });
+
+  assert.equal(steerFallbackPosition(earlier, partial, true, true), "before");
+  assert.equal(steerFallbackPosition(inWindow, partial, true, true), null);
+  assert.equal(steerFallbackPosition(beyond, partial, true, true), "after");
+  assert.equal(steerFallbackPosition(unread, partial, true, true), "after",
+    "unread steer on a >256KB partial tail stays at tail after re-entering");
+  assert.equal(steerFallbackPosition(unreadImage, partial, true, true), "after",
+    "unread image steer on a >256KB partial tail stays at tail after re-entering");
+  assert.equal(isUncommittedSteer(earlier, partial), false);
+  assert.equal(isUncommittedSteer(inWindow, partial), false);
+  assert.equal(isUncommittedSteer(unread, partial), true);
 });

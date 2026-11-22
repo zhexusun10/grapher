@@ -4,14 +4,15 @@ export type PollingController = (() => void) & {
   wake: () => void;
 };
 
-/** Serial polling with bounded hidden-tab work. Returning null settles permanently;
+/** Serial polling that suspends while the document is hidden (by default) and
+ * catches up immediately when visible again. Returning null settles permanently;
  * returning Infinity suspends timer polling until woken by wake() or visibilitychange.
  * Becoming visible wakes the current cursor immediately, including during an in-flight
  * request; it never starts a second overlapping request.
  */
 export function startVisibilityPolling(
   poll: () => Promise<number | null>, initialDelay = 0,
-  visibility: Visibility = document, hiddenDelay = 10_000,
+  visibility: Visibility = document, hiddenDelay = Number.POSITIVE_INFINITY,
 ): PollingController {
   let stopped = false, busy = false, wake = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -22,8 +23,9 @@ export function startVisibilityPolling(
   }) as PollingController;
   const schedule = (delay: number) => {
     clearTimeout(timer);
-    if (!Number.isFinite(delay)) return;
-    timer = setTimeout(run, visibility.hidden ? Math.max(hiddenDelay, delay) : delay);
+    const effective = visibility.hidden ? Math.max(hiddenDelay, delay) : delay;
+    if (!Number.isFinite(effective)) return;
+    timer = setTimeout(run, effective);
   };
   const run = async () => {
     if (stopped) return;
@@ -46,6 +48,7 @@ export function startVisibilityPolling(
   };
   stop.wake = () => {
     if (stopped) return;
+    if (visibility.hidden && !Number.isFinite(hiddenDelay)) return;
     if (busy) { wake = true; return; }
     schedule(0);
   };

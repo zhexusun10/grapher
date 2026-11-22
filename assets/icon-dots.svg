@@ -7,12 +7,12 @@
     @media (prefers-color-scheme: light) { .edge { stroke: #4a4a4a; } }
     @media (prefers-color-scheme: dark) { .edge { stroke: #c9c9c9; } }
   </style>
-  <path class="edge" d="M 134 256 C 180 256, 174 128, 220 128"/>
-  <path class="edge" d="M 134 256 C 180 256, 174 384, 220 384"/>
-  <path class="edge" d="M 292 128 C 338 128, 332 256, 378 256"/>
-  <path class="edge" d="M 292 384 C 338 384, 332 256, 378 256"/>
-  <rect class="edge" x="62"  y="220" width="72" height="72" rx="10"/>
-  <rect class="edge" x="220" y="92"  width="72" height="72" rx="10"/>
-  <rect class="edge" x="220" y="348" width="72" height="72" rx="10"/>
-  <rect class="edge" x="378" y="220" width="72" height="72" rx="10"/>
+  <path class="edge" d="M 256 134 C 256 180, 128 174, 128 220"/>
+  <path class="edge" d="M 256 134 C 256 180, 384 174, 384 220"/>
+  <path class="edge" d="M 128 292 C 128 338, 256 332, 256 378"/>
+  <path class="edge" d="M 384 292 C 384 338, 256 332, 256 378"/>
+  <rect class="edge" x="220" y="62"  width="72" height="72" rx="17"/>
+  <rect class="edge" x="92"  y="220" width="72" height="72" rx="17"/>
+  <rect class="edge" x="348" y="220" width="72" height="72" rx="17"/>
+  <rect class="edge" x="220" y="378" width="72" height="72" rx="17"/>
 </svg>

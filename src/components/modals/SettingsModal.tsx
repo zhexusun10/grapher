@@ -1,7 +1,8 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useRef, useState, useId } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, Wallpaper } from "lucide-react";
+import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, Wallpaper, AlertTriangle, Info } from "lucide-react";
 import { Config, MAX_MAX_FEEDBACK, MAX_MAX_PARALLEL, MIN_MAX_FEEDBACK, MIN_MAX_PARALLEL, normalizeMaxFeedback, normalizeMaxParallel } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
 import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
@@ -11,7 +12,14 @@ import { ExtensionSettings } from "../ExtensionSettings";
 import { AutostartSettings } from "../AutostartSettings";
 import { UpdateSettings } from "../UpdateSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
-import { autoExpandCotEnabled, setAutoExpandCot, executionOverviewEnabled, setExecutionOverview, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode } from "../../services/displayPreferences";
+import { autoExpandCotEnabled, setAutoExpandCot, executionOverviewEnabled, setExecutionOverview, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode, completionNotificationsEnabled, setCompletionNotifications, completionNotificationSoundEnabled, setCompletionNotificationSound } from "../../services/displayPreferences";
+import {
+  getNotificationPermissionStatus,
+  openDesktopNotificationSettings,
+  requestBrowserNotificationPermission,
+  type NotificationPermissionState,
+} from "../../services/completionNotifications";
+import { isTauriDesktop } from "../../services/apiBase";
 import { DotPattern } from "../ui/dot-pattern";
 import { ConfirmModal } from "./ConfirmModal";
 import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
@@ -26,6 +34,8 @@ interface SettingsModalProps {
   conversationScoped?: boolean;
   onSaveConfig: (config: Config) => void | Promise<boolean>;
 }
+
+let cachedDesktopNotificationPermission: NotificationPermissionState | null = null;
 
 export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   isOpen,
@@ -52,6 +62,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const [executionOverview, setExecutionOverviewDraft] = useState(() => executionOverviewEnabled());
   const [landingBackground, setLandingBackgroundDraft] = useState(() => currentLandingBackground());
   const [hideAutoMode, setHideAutoModeDraft] = useState(() => hideAutoModeEnabled());
+  const [completionNotifications, setCompletionNotificationsDraft] = useState(() => completionNotificationsEnabled());
+  const [completionNotificationSound, setCompletionNotificationSoundDraft] = useState(() => completionNotificationSoundEnabled());
+  const [desktopNotificationPermission, setDesktopNotificationPermission] = useState<NotificationPermissionState | null>(
+    () => (isTauriDesktop() ? cachedDesktopNotificationPermission : null),
+  );
+  const [requestingNotificationPermission, setRequestingNotificationPermission] = useState(false);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
@@ -100,6 +116,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       setExecutionOverview(executionOverview);
       setLandingBackground(landingBackground);
       setHideAutoMode(hideAutoMode);
+      setCompletionNotifications(completionNotifications);
+      setCompletionNotificationSound(completionNotificationSound);
+      if (completionNotifications) void requestBrowserNotificationPermission();
     } catch (error) {
       savingRef.current = false;
       setSaving(false);
@@ -108,6 +127,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   };
   const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
   useEffect(() => providerAuth.subscribeCatalog(() => setCatalog(providerAuth.getCachedCatalog() ?? undefined)), []);
+  useEffect(() => {
+    if (!isOpen || !isTauriDesktop()) return;
+    let cancelled = false;
+    const syncPermission = () => {
+      void getNotificationPermissionStatus().then((status) => {
+        cachedDesktopNotificationPermission = status;
+        if (!cancelled) setDesktopNotificationPermission(status);
+      });
+    };
+    syncPermission();
+    window.addEventListener("focus", syncPermission);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", syncPermission);
+    };
+  }, [isOpen]);
   const [catalogBusy, setCatalogBusy] = useState(() => !providerAuth.getCachedCatalog());
   const [pendingLanguage, setPendingLanguage] = useState<LanguagePreference | null>(null);
   const [languageError, setLanguageError] = useState("");
@@ -127,7 +162,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const dialogMotion = largeDialogMotion(reduceMotion);
   const veilMotion = dialogVeilMotion(reduceMotion);
 
-  return (
+  const content = (
     <div className="modal-backdrop subtle-backdrop">
       {/* Light translucent veil only: a full-screen backdrop-filter forced the
           browser onto a slow compositing path and made even modal scrolling
@@ -342,6 +377,72 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   aria-label={t("显示执行拓扑概览")}
                 />
               </label>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("对话完成系统通知")}</strong>
+                  <small>{t("窗口未在前台获得焦点时，对话完成后推送系统通知并显示 Agent 最后输出的内容。默认开启，保存后生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={completionNotifications}
+                  disabled={saving}
+                  onChange={(event) => setCompletionNotificationsDraft(event.target.checked)}
+                  aria-label={t("对话完成系统通知")}
+                />
+              </label>
+              {isTauriDesktop() && completionNotifications && desktopNotificationPermission === "denied" && (
+                <div className="settings-notification-permission-bar is-warning" role="status">
+                  <span className="settings-notification-permission-text">
+                    <AlertTriangle size={14} aria-hidden="true" />
+                    <span>{t("系统通知权限未开启，请在系统设置中允许 Grapher 发送通知。")}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-notification-permission-btn"
+                    disabled={saving}
+                    onClick={() => void openDesktopNotificationSettings()}
+                  >
+                    {t("打开系统通知设置")}
+                  </button>
+                </div>
+              )}
+              {isTauriDesktop() && completionNotifications && desktopNotificationPermission === "default" && (
+                <div className="settings-notification-permission-bar" role="status">
+                  <span className="settings-notification-permission-text">
+                    <Info size={14} aria-hidden="true" />
+                    <span>{t("尚未授予系统通知权限，授权后才能在后台收到对话完成提醒。")}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-notification-permission-btn"
+                    disabled={saving || requestingNotificationPermission}
+                    onClick={() => {
+                      setRequestingNotificationPermission(true);
+                      void requestBrowserNotificationPermission()
+                        .then((status) => {
+                          cachedDesktopNotificationPermission = status;
+                          setDesktopNotificationPermission(status);
+                        })
+                        .finally(() => setRequestingNotificationPermission(false));
+                    }}
+                  >
+                    {t("允许系统通知")}
+                  </button>
+                </div>
+              )}
+              <label className={`settings-toggle-row is-suboption${!completionNotifications ? " is-disabled" : ""}`}>
+                <span>
+                  <strong>{t("通知提示音")}</strong>
+                  <small>{t("推送对话完成通知时播放系统提示音。关闭后将以静音方式推送通知，保存后生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={completionNotificationSound}
+                  disabled={saving || !completionNotifications}
+                  onChange={(event) => setCompletionNotificationSoundDraft(event.target.checked)}
+                  aria-label={t("通知提示音")}
+                />
+              </label>
               <h5 className="settings-ui-group-title">{t("首页背景")}</h5>
               <p className="section-desc">{t("选择首页背景，保存后在此浏览器中生效。")}</p>
               <fieldset className="settings-background-options" disabled={saving}>
@@ -466,6 +567,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       </AnimatePresence>
     </div>
   );
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 });
 
 SettingsModal.displayName = "SettingsModal";

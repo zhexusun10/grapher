@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { t } from "../i18n";
 import { scrollParent } from "./VirtualizedList";
+import { TRANSCRIPT_SCROLL_ADJUSTED_EVENT } from "../services/transcriptScroll";
 
 const SHOW_DELAY_MS = 150;
 const PAGE_GAP_MS = 200;
@@ -56,6 +57,7 @@ export function TranscriptHistoryStatus({ loading, reserve = true }: { loading: 
       if (scroller.scrollHeight > scroller.clientHeight) scroller.scrollTop = scroller.scrollHeight;
     } else if (scroller.scrollTop > 0 && statusAffectsViewport(element, scroller)) {
       scroller.scrollTop += height - previous;
+      scroller.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
     }
   }, [visible, reserve]);
 

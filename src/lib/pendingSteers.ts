@@ -106,9 +106,14 @@ export function numberSteers(messages: readonly ChatMessage[]): ChatMessage[] {
 export interface InlineUserTurnWindow {
   texts: readonly string[];
   complete: boolean;
-  /** Byte cursor of the loaded transcript, and user rows in that window. */
+  /** Byte cursors of the loaded transcript, and user rows in that window. */
+  start?: number;
   end?: number;
-  turns?: readonly { text: string; offset?: number }[];
+  turns?: readonly { text: string; offset?: number; requestId?: string }[];
+  /** Full-log byte offset index of grapherRequestId-tagged user turns. */
+  steerOffsets?: Readonly<Record<string, number>>;
+  /** True when absence from steerOffsets proves the steer is unread across 0..totalBytes. */
+  steerOffsetsAuthoritative?: boolean;
 }
 
 /** Presentation-only marker captured when a steer is sent in this view. */
@@ -123,9 +128,19 @@ export interface LiveSteerMarker {
   files?: FileAttachment[];
 }
 
+/** Durable metadata for steers rendered inline after reload or view switch. */
+export interface InlineSteerAttachment {
+  requestId?: string;
+  text: string;
+  inlineSteerOrdinal: number;
+  images?: ImageAttachment[];
+  files?: FileAttachment[];
+}
+
 export function liveSteerConsumed(marker: LiveSteerMarker, window?: InlineUserTurnWindow): boolean {
   if (!window?.turns) return false;
-  return window.turns.filter(turn => turn.text === marker.text && turn.offset !== undefined &&
+  if (marker.requestId && window.turns.some(turn => turn.requestId === marker.requestId)) return true;
+  return window.turns.filter(turn => !turn.requestId && turn.text === marker.text && turn.offset !== undefined &&
     turn.offset >= marker.afterOffset).length >= marker.occurrence;
 }
 
@@ -135,6 +150,12 @@ function steerText(message: ChatMessage): string {
 
 function loadedOccurrences(message: ChatMessage, window: InlineUserTurnWindow): number {
   return window.texts.filter(text => text === steerText(message)).length;
+}
+
+function inlineTurnOccurrences(message: ChatMessage, window: InlineUserTurnWindow): number {
+  const text = steerText(message);
+  if (window.turns) return window.turns.filter(turn => turn.text === text).length;
+  return window.texts.filter(item => item === text).length;
 }
 
 /**
@@ -160,6 +181,13 @@ export function isUncommittedSteer(
   if (message.delivery !== "steered" || !message.executionId) return false;
   if (message.images?.length || message.files?.length) return false;
   const window = windows[message.executionId];
+  if (message.steerRequestId && window) {
+    if (window.steerOffsets && Object.prototype.hasOwnProperty.call(window.steerOffsets, message.steerRequestId)) {
+      return false;
+    }
+    if (window.turns?.some(turn => turn.requestId === message.steerRequestId)) return false;
+    if (window.steerOffsetsAuthoritative) return true;
+  }
   if (window && !window.complete) return false;
   return (window?.texts ?? []).filter(text => text === steerText(message)).length <= (message.steerOrdinal ?? 0);
 }
@@ -175,8 +203,15 @@ export function isPendingSteer(
   windows: Record<string, InlineUserTurnWindow>,
 ): boolean {
   if (message.delivery !== "steered" || !message.executionId) return false;
-  if (message.images?.length || message.files?.length) return false;
   const window = windows[message.executionId];
+  if (message.steerRequestId && window?.turns?.some(turn => turn.requestId === message.steerRequestId)) {
+    return false;
+  }
+  if (message.images?.length || message.files?.length) {
+    if (!window?.turns) return true;
+    if (!window.complete) return !window.turns.some(turn => turn.text === steerText(message));
+    return inlineTurnOccurrences(message, window) <= (message.inlineSteerOrdinal ?? 0);
+  }
   if (!window) return true;
   if (!window.complete) return !window.texts.includes(steerText(message));
   return loadedOccurrences(message, window) <= (message.steerOrdinal ?? 0);
@@ -194,12 +229,28 @@ export function steerFallbackPosition(
   live?: LiveSteerMarker,
 ): "before" | "after" | null {
   if (!expanded) return "before";
-  if (live) return liveSteerConsumed(live, message.executionId ? windows[message.executionId] : undefined) ? null : "after";
-  if (message.images?.length || message.files?.length) return "before";
+  const window = message.executionId ? windows[message.executionId] : undefined;
+  if (message.steerRequestId && window) {
+    if (window.turns?.some(turn => turn.requestId === message.steerRequestId)) return null;
+    const consumedOffset = window.steerOffsets && Object.prototype.hasOwnProperty.call(window.steerOffsets, message.steerRequestId)
+      ? window.steerOffsets[message.steerRequestId]
+      : undefined;
+    if (consumedOffset !== undefined) {
+      const start = window.start ?? 0;
+      if (consumedOffset < start) return "before";
+      if (window.end !== undefined && consumedOffset >= window.end) return "after";
+      return null;
+    }
+    if (window.steerOffsetsAuthoritative) return "after";
+  }
+  if (live) return liveSteerConsumed(live, window) ? null : "after";
   if (!isPendingSteer(message, windows)) return null;
+  const complete = !!window?.complete;
+  if (message.images?.length || message.files?.length) {
+    return complete && window?.turns ? "after" : "before";
+  }
   // A complete window proves this turn is still absent even if the execution
   // has just settled. Keep it at the tail while the final page catches up.
-  const complete = !!(message.executionId && windows[message.executionId]?.complete);
   return (running || complete) && isUncommittedSteer(message, windows) ? "after" : "before";
 }
 

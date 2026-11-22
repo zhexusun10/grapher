@@ -129,6 +129,7 @@ test("empty composer continues without submitting a message; drafts and stop ret
     assert.equal(await page.locator("output").textContent(), "continue|continue|interrupt");
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });

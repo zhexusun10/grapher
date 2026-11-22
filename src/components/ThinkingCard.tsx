@@ -10,6 +10,7 @@ import { CardReveal } from "./CardReveal";
 import { useCardAppear } from "../services/cardAnimations";
 import { useAutoExpandCot } from "../services/displayPreferences";
 import { notifyTranscriptContentGrowth, syncOverscrollContainment } from "../services/transcriptScroll";
+import { observeElementResize } from "../services/sharedResizeObserver";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -124,17 +125,20 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
           lastScrollTopRef.current = target;
         }
       };
-      const observer = new ResizeObserver(() => {
+      const onResize = () => {
         // A short body cannot scroll; containing its overscroll would swallow
         // the conversation wheel gesture instead of forwarding it.
         syncOverscrollContainment(body);
         followContent();
-      });
-      observer.observe(content);
-      observer.observe(body);
+      };
+      const unobserveContent = observeElementResize(content, onResize);
+      const unobserveBody = observeElementResize(body, onResize);
       syncOverscrollContainment(body);
       followContent();
-      return () => observer.disconnect();
+      return () => {
+        unobserveContent();
+        unobserveBody();
+      };
     }, [isExpanded, isStreaming, stillTyping, hasVisibleContent]);
 
     const handleScroll = () => {
@@ -253,7 +257,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       onExpandedChange?.(nextExpanded, cardRef.current ?? undefined);
     };
 
-    const charCount = rawContent.trim() ? rawContent.length : 0;
+    const charCount = rawContent.trim() ? rawContent.length : (item?.thinkingCharCount ?? 0);
 
     const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, directAnimateAppear ?? item?.animateAppear);
 
@@ -296,7 +300,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             </div>
 
             <div className="thinking-header-right">
-              <AnimatePresence>
+              <AnimatePresence initial={false}>
                 {isStreaming && (
                   <motion.span
                     key="thinking-streaming-status"
@@ -344,10 +348,12 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                     className="thinking-markdown"
                   />
                 </div>
-              ) : isStreaming ? (
+              ) : isStreaming || item?.hydrating ? (
                 <div className="thinking-shimmer">
                   <span className="shimmer-line" />
-                  <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
+                  <span className="thinking-shimmer-text">
+                    {isStreaming ? t("模型正在生成分析与推演逻辑...") : t("正在加载历史记录…")}
+                  </span>
                 </div>
               ) : (
                 <div className="thinking-no-output">{t("此次思考未输出可见内容")}</div>

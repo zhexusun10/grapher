@@ -1,5 +1,5 @@
 import { BoundedLruCache, utf8Bytes } from "../lib/BoundedLruCache";
-import { renderTranscriptWindow, type TranscriptWindow } from "./transcriptWindow";
+import { normalizeTranscriptProjection, renderTranscriptWindow, type TranscriptProjectionMode, type TranscriptWindow } from "./transcriptWindow";
 import { invalidateTranscriptParseCache } from "./transcriptParseCache";
 import { invalidateFileChangeSummaryCache } from "./fileChanges";
 
@@ -11,25 +11,60 @@ export type CachedTranscript = {
   /** Complete means all bytes of a terminal log, not merely its current EOF. */
   complete: boolean;
   status?: string;
+  summaryOnly?: boolean;
+  projection?: TranscriptProjectionMode;
+  steerOffsets?: Record<string, number>;
+  steerOffsetsAuthoritative?: boolean;
 };
 // Validated contiguous windows already carry their retained UTF-8 byte count.
-// Do not rescan an ever-growing string on every live delta (or charge totalBytes).
-const transcriptBytes = (entry: CachedTranscript) => entry.startOffset !== undefined && entry.offset >= entry.startOffset
-  ? entry.offset - entry.startOffset : utf8Bytes(entry.text);
+// Projected windows (`summary` / `cards`) carry far less text than their raw
+// byte span, so charge their actual string size instead of raw offsets.
+const transcriptBytes = (entry: CachedTranscript) => (entry.summaryOnly || entry.projection)
+  ? utf8Bytes(entry.text)
+  : (entry.startOffset !== undefined && entry.offset >= entry.startOffset
+    ? entry.offset - entry.startOffset : utf8Bytes(entry.text));
 export const executionTranscriptCache = new BoundedLruCache<string, CachedTranscript>(transcriptBytes);
 // Each revision is independently reusable, including when the revision list grows.
 export const planningTranscriptCache = new BoundedLruCache<string, CachedTranscript>(transcriptBytes);
-export const planningTranscriptKey = (runId: string, planningId: string) => `${runId}:${planningId}`;
+export const planningTranscriptKey = (runId: string, planningId: string, mode: boolean | TranscriptProjectionMode = false) =>
+  mode === true || mode === "summary" ? `${runId}:${planningId}:summary`
+    : mode === "cards" ? `${runId}:${planningId}:cards`
+    : `${runId}:${planningId}`;
+
+export function executionTranscriptKey(baseKey: string, projection?: TranscriptProjectionMode): string {
+  return projection ? `${baseKey}:${projection}` : baseKey;
+}
 
 export function transcriptFromCache(entry: CachedTranscript | undefined): TranscriptWindow | null {
-  return entry ? { text: entry.text, start: entry.startOffset ?? 0, end: entry.offset,
-    total: entry.totalBytes ?? entry.offset, settled: entry.complete || (!!entry.status && entry.status !== "running") } : null;
+  if (!entry) return null;
+  const projection = normalizeTranscriptProjection(entry);
+  return {
+    text: entry.text,
+    start: entry.startOffset ?? 0,
+    end: entry.offset,
+    total: entry.totalBytes ?? entry.offset,
+    settled: entry.complete || (!!entry.status && entry.status !== "running"),
+    ...(projection === "summary" ? { summaryOnly: true } : {}),
+    ...(projection ? { projection } : {}),
+    ...(entry.steerOffsets !== undefined ? { steerOffsets: entry.steerOffsets } : {}),
+    ...(entry.steerOffsetsAuthoritative !== undefined ? { steerOffsetsAuthoritative: entry.steerOffsetsAuthoritative } : {}),
+  };
 }
 
 export function cacheTranscriptWindow(window: TranscriptWindow): CachedTranscript {
-  return { text: window.text, offset: window.end, startOffset: window.start, totalBytes: window.total,
+  const projection = normalizeTranscriptProjection(window);
+  return {
+    text: window.text,
+    offset: window.end,
+    startOffset: window.start,
+    totalBytes: window.total,
     complete: window.start === 0 && window.end === window.total && window.settled,
-    status: window.settled ? "completed" : "running" };
+    status: window.settled ? "completed" : "running",
+    ...(projection === "summary" ? { summaryOnly: true } : {}),
+    ...(projection ? { projection } : {}),
+    ...(window.steerOffsets !== undefined ? { steerOffsets: window.steerOffsets } : {}),
+    ...(window.steerOffsetsAuthoritative !== undefined ? { steerOffsetsAuthoritative: window.steerOffsetsAuthoritative } : {}),
+  };
 }
 
 export function composePlanningOutput(ids: string[], segments: ReadonlyMap<string, TranscriptWindow>): string {

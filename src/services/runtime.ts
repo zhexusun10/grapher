@@ -1,9 +1,10 @@
 import { t } from "../i18n";
 import { BoundedLruCache, utf8Bytes } from "../lib/BoundedLruCache";
+import { isManagedAttachmentPath } from "../utils/attachmentPath";
 import { DesktopBackendError, fetchApi, isTauriDesktop, probeDesktopBackendError } from "./apiBase";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { ApiRequestError, jsonRequest, observeApiResponse, requestHeaders, responseError, recoverOperationResponse } from "./apiClient";
-import type { SnapshotPollRequest, SnapshotPollResponse, ExecutionOutputPage, PlanningOutputPage, OperationStatus } from "./apiContract.generated";
+import type { SnapshotPollRequest, SnapshotPollResponse, ExecutionOutputPage, PlanningOutputPage, OperationStatus, ConversationSearchResponse } from "./apiContract.generated";
 import { applySnapshotDelta, validateSnapshot } from "./snapshotDelta";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
 import type { Bootstrap, Config, FileChangeSummary, Graph, HostPreflight, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
@@ -25,7 +26,7 @@ const snapshotMutations = new Set([
 const boundedCommands = new Set([
   "bootstrap", "host_preflight", "history", "snapshot", "snapshot_if_changed", "save_config", "composer_models", "composer_rename",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
-  "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
+  "get_planning_snapshot", "get_execution_output", "get_planning_output", "search_conversations", "get_file_changes", "get_file_diff",
   "open_workspace_file",
   "provider_auth", "pi_extensions", "list_skills", "list_files",
   "get_merger_prompt", "operation_status",
@@ -350,9 +351,23 @@ export const runtimeService = {
       reader.releaseLock();
     }
   },
-  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number) =>
+  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number, summaryOnlyOrProjection: boolean | "summary" | "cards" = false) => {
+    const projection = summaryOnlyOrProjection === true ? "summary" : summaryOnlyOrProjection || undefined;
+    return request<ExecutionOutputPage>(
+      "get_execution_output", {
+        runId, executionId, offset, full,
+        ...(projection === "summary" ? { summaryOnly: true, projection: "summary" } : projection ? { projection } : {}),
+        ...(endOffset !== undefined ? { endOffset } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}),
+      }, signal);
+  },
+  hydrateExecutionRanges: (runId: string, executionId: string, ranges: ReadonlyArray<readonly [number, number]>, signal?: AbortSignal, endOffset?: number) =>
     request<ExecutionOutputPage>(
-      "get_execution_output", { runId, executionId, offset, full, ...(endOffset !== undefined ? { endOffset } : {}), ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
+      "get_execution_output", {
+        runId, executionId, ranges,
+        ...(endOffset !== undefined ? { endOffset } : {}),
+      }, signal),
   getFileChanges: async (runId: string, execution?: string | string[], signal?: AbortSignal) => {
     const result = await request<{ runId: string; executionId: string | null; executionIds: string[] | null; summary: FileChangeSummary }>(
       "get_file_changes", {
@@ -381,6 +396,8 @@ export const runtimeService = {
     }
     return result;
   },
+  getFileDiff: (input: import("../types").FileDiffRequest, signal?: AbortSignal) =>
+    request<import("../types").FileDiffResult>("get_file_diff", { ...input }, signal),
   openWorkspaceFile: (input: OpenWorkspaceFileRequest) =>
     request<{ path: string }>("open_workspace_file", { ...input }),
   getWorkspaceImage: (runId: string, path: string, executionId?: string, signal?: AbortSignal): Promise<Blob> =>
@@ -402,11 +419,38 @@ export const runtimeService = {
   },
   getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
     request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
-  getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal, tail = false, before?: number, limit?: number) =>
+  getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal, tail = false, before?: number, limit?: number, summaryOnlyOrProjection: boolean | "summary" | "cards" = false) => {
+    const projection = summaryOnlyOrProjection === true ? "summary" : summaryOnlyOrProjection || undefined;
+    return request<PlanningOutputPage>(
+      "get_planning_output", {
+        planningId, role, offset,
+        ...(projection === "summary" ? { summaryOnly: true, projection: "summary" } : projection ? { projection } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}),
+      }, signal);
+  },
+  hydratePlanningRanges: (planningId: string, role: "partition" | "planner", ranges: ReadonlyArray<readonly [number, number]>, signal?: AbortSignal) =>
     request<PlanningOutputPage>(
-      "get_planning_output", { planningId, role, offset, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
+      "get_planning_output", { planningId, role, ranges }, signal),
   getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
   listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),
+  searchConversations: (
+    repository: string,
+    query: string,
+    options?: { role?: "all" | "user" | "assistant"; limit?: number; warm?: boolean },
+    signal?: AbortSignal,
+  ) =>
+    request<ConversationSearchResponse>(
+      "search_conversations",
+      {
+        repository,
+        query,
+        ...(options?.role && options.role !== "all" ? { role: options.role } : {}),
+        ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+        ...(options?.warm ? { warm: true } : {}),
+      },
+      signal,
+    ),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
   editPlanner: (input: { runId: string; oldText: string; instruction: string; versionIndex?: number }) =>
     request<Snapshot>("edit_planner", input),
@@ -519,17 +563,17 @@ export const runtimeService = {
         attachmentId: context?.attachmentId,
       });
     } catch (error) {
-      if (error instanceof Error && /Unknown command|404/i.test(error.message)) {
+      if (
+        (error instanceof ApiRequestError && error.code === "UNKNOWN_COMMAND") ||
+        (error instanceof Error && /Unknown command|404/i.test(error.message))
+      ) {
         throw new Error(t("后端不支持安全附件上传，请更新后端后重试。"));
       }
       throw error;
     }
-    if (typeof res?.path !== "string" || !/^grapher-attachments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/[^/\\]+$/.test(res.path)) {
+    if (!isManagedAttachmentPath(res?.path)) {
       throw new Error(t("后端未返回安全的附件路径，请更新后端后重试。"));
     }
-    const key = repository || "__default__";
-    filesCache.delete(key);
-    filesRequests.set(key, (filesRequests.get(key) ?? 0) + 1);
     return res;
   },
   deleteWorkspaceFile: async (
@@ -543,8 +587,5 @@ export const runtimeService = {
       runId: context?.runId || undefined,
       node: context?.node || undefined,
     });
-    const key = repository || "__default__";
-    filesCache.delete(key);
-    filesRequests.set(key, (filesRequests.get(key) ?? 0) + 1);
   },
 };

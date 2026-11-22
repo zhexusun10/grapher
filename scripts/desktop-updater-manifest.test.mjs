@@ -697,9 +697,9 @@ test('release workflow enforces least-privilege permissions, desktop + archive b
     assert.ok(workflow.includes(artifact), `missing archive output: ${artifact}`);
   }
 
-  // Separate Apple Silicon, Intel macOS, and Windows x64 desktop Tauri jobs
-  assert.match(workflow, /os:\s*macos-15\s*\n\s*platform:\s*macos\s*\n\s*target:\s*macos-arm64/);
-  assert.match(workflow, /os:\s*macos-15-intel\s*\n\s*platform:\s*macos\s*\n\s*target:\s*macos-x64/);
+  // Separate Apple Silicon, Intel macOS (macOS 26 SDK for native Tahoe+ traffic lights), and Windows x64 desktop Tauri jobs
+  assert.match(workflow, /os:\s*macos-26\s*\n\s*platform:\s*macos\s*\n\s*target:\s*macos-arm64/);
+  assert.match(workflow, /os:\s*macos-26-intel\s*\n\s*platform:\s*macos\s*\n\s*target:\s*macos-x64/);
   assert.match(workflow, /os:\s*windows-latest\s*\n\s*platform:\s*windows\s*\n\s*target:\s*windows-x64/);
   assert.match(workflow, /node scripts\/desktop-build\.mjs/);
 

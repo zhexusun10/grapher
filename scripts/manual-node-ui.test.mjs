@@ -19,7 +19,7 @@ test("returning from node creation keeps Planner history scrollable and restores
   const output = Buffer.from(rows.join(""));
   let olderReads = 0;
   const errors = [];
-  const server = await createServer({ cacheDir: "node_modules/.vite-manual-node", server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-manual-node", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -173,6 +173,7 @@ test("returning from node creation keeps Planner history scrollable and restores
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });
@@ -192,7 +193,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
   const taskEdits = [];
   const errors = [];
   let reject = true;
-  const server = await createServer({ cacheDir: "node_modules/.vite-manual-node", server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-manual-node", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   let browser;
   try {
     await server.listen();
@@ -359,6 +360,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
+    server.httpServer?.closeAllConnections?.();
     await server.close();
   }
 });

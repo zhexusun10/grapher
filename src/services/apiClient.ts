@@ -20,6 +20,9 @@ export class ApiRequestError extends Error {
     this.retryable = info.retryable;
     this.requestId = info.requestId;
   }
+  override toString(): string {
+    return this.message ? `Error: ${this.message}` : 'Error';
+  }
 }
 
 export function isReadRequest(command: string, body: Record<string, unknown> = {}): boolean {

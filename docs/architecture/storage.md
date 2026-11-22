@@ -17,7 +17,7 @@ effective data root reported in startup logs and bootstrap `dataPath`:
   runtime.lock           # One backend writer per data directory
   config.json            # Saved defaults shared by Run services
   file-changes/          # Versioned per-Run derived changes.json sidecars
-  attachment-inputs/     # Immutable Run/node-scoped inputs awaiting delivery
+  attachment-inputs/     # Immutable external attachments mounted read-only into sandboxes
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
   planner-sessions/      # One deterministic Planner conversation per Run

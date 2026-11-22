@@ -1,9 +1,66 @@
 import type { TranscriptItem } from "../types";
 
+export function isCollapsibleTranscriptCard(item: TranscriptItem): boolean {
+  if (item.type === "thinking" || item.type === "tool_call") return true;
+  if (item.errorItems?.length) return true;
+  return (item.type === "system" || (item.type === "text" && item.role === "assistant")) &&
+    Boolean(item.isError || item.status === "error");
+}
+
+function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, number>) {
+  const boundaries = new Set(starts.values());
+  const collapsed: TranscriptItem[] = [];
+  const collapsedRanges: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < rows.length;) {
+    if (!isCollapsibleTranscriptCard(rows[index])) {
+      collapsed.push(rows[index++]);
+      continue;
+    }
+    let end = index + 1;
+    while (end < rows.length && !boundaries.has(end) && isCollapsibleTranscriptCard(rows[end])) end++;
+    const group = rows.slice(index, end);
+    const first = group[0];
+    const last = group[group.length - 1];
+    const hasRunning = group.some(item => item.status === "running");
+    const hasError = group.some(item => Boolean(item.errorItems?.length || item.isError || item.status === "error"));
+    // Only the leading settled group (`index === 0`) can grow at the front when
+    // older history pages prepend, so only it needs to anchor on its trailing
+    // item. Every other group (and an actively running tail) anchors on its
+    // leading item so settling a running group never renames it mid-expand.
+    // Prefer a stable `toolCallId` when present so upgrading `summaryOnly` to
+    // full output (which changes offset-based `think_`/`err_` IDs) keeps the
+    // exact same summary identity.
+    const anchorFromEnd = index === 0 && !(end === rows.length && hasRunning);
+    const stableTool = anchorFromEnd
+      ? [...group].reverse().find(item => item.type === "tool_call" && Boolean(item.toolCallId))
+      : group.find(item => item.type === "tool_call" && Boolean(item.toolCallId));
+    const anchorId = stableTool?.toolCallId ?? (anchorFromEnd ? last.id : first.id);
+    collapsed.push({
+      id: `summary_${anchorId}`,
+      type: "activity_summary",
+      role: "assistant",
+      status: hasRunning ? "running" : hasError ? "error" : "success",
+      timestamp: first.timestamp,
+      summaryItems: group,
+    });
+    if (end - index > 1) collapsedRanges.push({ start: index, end });
+    index = end;
+  }
+
+  if (!collapsedRanges.length) return { rows: collapsed, starts };
+  const remappedStarts = new Map([...starts].map(([source, index]) => [source,
+    index - collapsedRanges.reduce((removed, range) => removed + (range.end <= index ? range.end - range.start - 1 : 0), 0)]));
+  return { rows: collapsed, starts: remappedStarts };
+}
+
 /** Whitespace-only assistant text has no visible Markdown, but still takes a
  * row and two list gaps. Keep it in the parser so later deltas can extend it;
  * omit it only from the rendered projection and remap revision boundaries. */
-export function visibleTranscriptRows(rows: TranscriptItem[], starts = new Map<string, number>()) {
+export function visibleTranscriptRows(
+  rows: TranscriptItem[],
+  starts = new Map<string, number>(),
+  options?: { collapseCards?: boolean },
+) {
   const blank = (item: TranscriptItem) => item.type === "text" && item.role === "assistant" &&
     !item.content?.trim() && !item.images?.length && !item.files?.length;
   const first = rows.findIndex(blank);
@@ -39,13 +96,18 @@ export function visibleTranscriptRows(rows: TranscriptItem[], starts = new Map<s
     index = end;
   }
 
-  if (!collapsedRanges.length) return { rows: visible, starts: visibleStarts };
-  const remappedStarts = new Map([...visibleStarts].map(([source, index]) => [source,
-    index - collapsedRanges.reduce((removed, range) => removed + (range.end <= index ? range.end - range.start - 1 : 0), 0)]));
-  return { rows: grouped, starts: remappedStarts };
+  const base = !collapsedRanges.length
+    ? { rows: visible, starts: visibleStarts }
+    : {
+        rows: grouped,
+        starts: new Map([...visibleStarts].map(([source, index]) => [source,
+          index - collapsedRanges.reduce((removed, range) => removed + (range.end <= index ? range.end - range.start - 1 : 0), 0)])),
+      };
+  return options?.collapseCards ? collapseTranscriptCards(base.rows, base.starts) : base;
 }
 
 export function estimateTranscriptRowHeight(id: string): number {
+  if (id.startsWith("summary_")) return 28;
   if (id.startsWith("think_")) return 44;
   if (id.startsWith("divider_")) return 25;
   if (id.startsWith("tool") || id.startsWith("call_")) return 48;
@@ -98,9 +160,15 @@ export function retainedRowAnchor(beforeIds: string[], afterIds: string[], befor
   return null;
 }
 
-export function visibleRows(offsets: number[], top: number, height: number, overscan = 6) {
+export function visibleRows(offsets: number[], top: number, height: number, overscan = 6, pixelOverscan = 0) {
   const count = offsets.length - 1;
-  const start = Math.max(0, rowAt(offsets, top) - overscan);
-  const end = Math.min(count, rowAt(offsets, top + height) + overscan + 1);
+  let start = Math.max(0, rowAt(offsets, top) - overscan);
+  let end = Math.min(count, rowAt(offsets, top + height) + overscan + 1);
+  if (pixelOverscan > 0 && count > 0) {
+    const pixelStart = rowAt(offsets, Math.max(0, top - pixelOverscan));
+    const pixelEnd = Math.min(count, rowAt(offsets, top + height + pixelOverscan) + 1);
+    start = Math.min(start, pixelStart);
+    end = Math.max(end, pixelEnd);
+  }
   return { start, end, paddingTop: offsets[start], paddingBottom: offsets[count] - offsets[end] };
 }

@@ -49,7 +49,7 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
     };
     const errors = [];
     const server = await createServer({ cacheDir: "node_modules/.vite-workbench-details",
-      server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+      server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
     let browser;
     try {
       await server.listen();
@@ -184,6 +184,7 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
       assert.deepEqual(errors, []);
     } finally {
       await browser?.close();
+      server.httpServer?.closeAllConnections?.();
       await server.close();
     }
   });

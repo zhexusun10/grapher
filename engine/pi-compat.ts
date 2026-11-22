@@ -272,6 +272,8 @@ export function installQueueIdentity() {
   const prompt = AgentSession.prototype.prompt;
   const sessionSteer = AgentSession.prototype.steer;
   const sessionFollowUp = AgentSession.prototype.followUp;
+  const subscribe = AgentSession.prototype.subscribe;
+  const agentPrompt = Agent.prototype.prompt;
   const steer = Agent.prototype.steer;
   const followUp = Agent.prototype.followUp;
   const clearQueue = AgentSession.prototype.clearQueue;
@@ -285,6 +287,23 @@ export function installQueueIdentity() {
   AgentSession.prototype.prompt = wrap(prompt, true);
   AgentSession.prototype.steer = wrap(sessionSteer);
   AgentSession.prototype.followUp = wrap(sessionFollowUp);
+  AgentSession.prototype.subscribe = function (listener) {
+    return subscribe.call(this, (event) => {
+      if ((event.type === 'message_start' || event.type === 'message_end') && event.message?.role === 'user') {
+        const requestId = identities.get(event.message);
+        if (requestId) return listener({ grapherRequestId: requestId, ...event } as typeof event);
+      }
+      return listener(event);
+    });
+  };
+  Agent.prototype.prompt = function (input: any, ...rest: any[]) {
+    if (Array.isArray(input)) {
+      for (const message of input) if (message && typeof message === 'object') identify(this, message);
+    } else if (input && typeof input === 'object') {
+      identify(this, input);
+    }
+    return agentPrompt.call(this, input, ...rest);
+  };
   Agent.prototype.steer = function (message) { identify(this, message); steer.call(this, message); };
   Agent.prototype.followUp = function (message) { identify(this, message); followUp.call(this, message); };
   AgentSession.prototype.clearQueue = function () { return clearUnreadQueue(this.agent, () => clearQueue.call(this), identities); };
@@ -292,6 +311,8 @@ export function installQueueIdentity() {
     AgentSession.prototype.prompt = prompt;
     AgentSession.prototype.steer = sessionSteer;
     AgentSession.prototype.followUp = sessionFollowUp;
+    AgentSession.prototype.subscribe = subscribe;
+    Agent.prototype.prompt = agentPrompt;
     Agent.prototype.steer = steer;
     Agent.prototype.followUp = followUp;
     AgentSession.prototype.clearQueue = clearQueue;

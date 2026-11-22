@@ -123,43 +123,27 @@ fn wait_for_worker(service: &Arc<Service>) {
 }
 
 #[test]
-fn merger_continuation_delivery_failure_releases_reservation_and_survives_restart() {
+fn merger_continuation_external_attachment_never_touches_project_files() {
     for node in ["merger", "merge:task"] {
         let (_temp, service, run, previous, source) = setup(node);
         let attachment = Uuid::new_v4().to_string();
         let root = service.runtime.lock().unwrap().root.clone();
-        crate::attachment_inputs::stage(&root, &run, node, &attachment, "input.txt", b"content")
-            .unwrap();
+        let stored =
+            crate::attachment_inputs::store(&root, Some(&run), &attachment, "input.txt", b"content")
+                .unwrap();
+        let display = crate::attachment_inputs::display_path(&stored);
+        // Even if the user has a file literally named `grapher-attachments`,
+        // external attachments never touch the project directory.
         fs::write(source.join("grapher-attachments"), b"existing user file").unwrap();
-        let error = continue_with(
-            &service,
-            &run,
-            &previous,
-            format!("Read grapher-attachments/{attachment}/input.txt"),
-        )
-        .unwrap_err();
-        {
-            let runtime = service.runtime.lock().unwrap();
-            assert!(
-                !runtime.active(),
-                "delivery failure must not leave an active writer"
-            );
-            assert!(!runtime.path_is_running(&source));
-            let failed = runtime.state.mergers.last().unwrap();
-            assert_eq!(failed.status, "failed");
-            assert!(failed.pid.is_none());
-            assert!(matches!(&runtime.state.events.last().unwrap().kind,
-                EventKind::MergerFailed { error: recorded, .. } if recorded == &error));
-        }
+        let snapshot = continue_with(&service, &run, &previous, format!("Read @{display}"))
+            .unwrap();
+        assert!(!snapshot.mergers.is_empty());
         assert_eq!(
             fs::read(source.join("grapher-attachments")).unwrap(),
             b"existing user file"
         );
-        drop(service);
-        let primary = Runtime::open(&root).unwrap();
-        let recovered = primary.open_run(&run).unwrap();
-        assert!(!recovered.active());
-        assert_eq!(recovered.state.mergers.last().unwrap().status, "failed");
+        assert_eq!(fs::read(&stored).unwrap(), b"content");
+        wait_for_worker(&service);
     }
 }
 

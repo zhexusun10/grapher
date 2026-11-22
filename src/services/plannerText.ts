@@ -1,4 +1,28 @@
 const steerMarker = /\n\n<grapher-steer-id>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<\/grapher-steer-id>$/;
+const piImageDimensionHint = /(?:\r?\n){1,2}\[Image: original \d+x\d+, displayed at \d+x\d+\.(?: Multiply coordinates by [\d.]+ to map to original image\.)?\]$/;
+const piSkillExpansion = /^<skill name="([^"]+)" location="[^"]+">[\s\S]*?\r?\n<\/skill>(?:\r?\n\r?\n([\s\S]*))?$/;
+
+/** Pi appends a coordinate-scaling note when it resizes an attached image.
+ * Strip that synthetic suffix for display and inline-turn matching. */
+export function stripPiImageDimensionHints(text: string): string {
+  let value = text;
+  while (piImageDimensionHint.test(value)) {
+    value = value.replace(piImageDimensionHint, "");
+  }
+  return value;
+}
+
+/** Match a normalized transcript user turn against requested inline steer texts,
+ * collapsing Pi's `<skill ...>` expansion back to `/skill:<name>` when needed. */
+export function matchRequestedUserTurn(display: string, requested?: readonly string[]): string | null {
+  if (!requested) return display;
+  if (requested.includes(display)) return display;
+  const skill = display.match(piSkillExpansion);
+  if (!skill) return null;
+  const args = skill[2]?.trim();
+  const command = args ? `/skill:${skill[1]} ${args}` : `/skill:${skill[1]}`;
+  return requested.includes(command) ? command : null;
+}
 
 export function plannerSteerId(text: string): string | undefined {
   return text.match(steerMarker)?.[1];

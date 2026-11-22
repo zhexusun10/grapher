@@ -48,6 +48,27 @@ export function bindRunToWorkspace(index: WorkspaceRuns, runId: string, reposito
 }
 
 /**
+ * Move a conversation to the first position of its workspace list (and enforce
+ * exclusive ownership) when a new turn starts in that conversation.
+ */
+export function promoteRunInWorkspace(index: WorkspaceRuns, runId: string, repository: string): WorkspaceRuns {
+  const owner = workspaceKey(repository);
+  if (!runId || !owner) return index;
+  const existing = index[owner] ?? [];
+  if (existing[0] === runId &&
+    !Object.entries(index).some(([key, ids]) => key !== owner && ids.includes(runId))) {
+    return index;
+  }
+
+  const next: WorkspaceRuns = {};
+  for (const [key, ids] of Object.entries(index)) {
+    next[key] = ids.filter(id => id !== runId);
+  }
+  next[owner] = [runId, ...(next[owner] ?? [])];
+  return next;
+}
+
+/**
  * Fold one progressive validation batch into the warm cached index without
  * replacing cards whose histories are still unresolved. `validated` must be the
  * batch built for this publish: reading live validation state here would let a

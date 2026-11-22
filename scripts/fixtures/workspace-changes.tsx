@@ -45,6 +45,83 @@ const longConversationOutput = Array.from({ length: 80 }, (_, index) => JSON.str
   type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Review message ${index}: the implementation is ready for inspection.` }] },
 })).join("\n") + "\n";
 
+const cardsConversationOutput = [
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Inspect docs and package configuration first." },
+        { type: "toolCall", id: "call-bash-1", name: "bash", arguments: { command: "cat docs/index.md && cat package.json" } },
+      ],
+    },
+  }),
+  JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "call-bash-1",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: "ok" }] },
+    isError: false,
+  }),
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "First assistant milestone text." }],
+    },
+  }),
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Read source files and run checks." },
+        { type: "toolCall", id: "call-read-1", name: "read", arguments: { path: "src/App.tsx" } },
+        { type: "toolCall", id: "call-bash-2", name: "bash", arguments: { command: "npm run check" } },
+        { type: "toolCall", id: "call-bash-3", name: "bash", arguments: { command: "npm test" } },
+      ],
+    },
+  }),
+  JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "call-read-1",
+    toolName: "read",
+    result: { content: [{ type: "text", text: "export default App;" }] },
+    isError: false,
+  }),
+  JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "call-bash-2",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: "ok" }] },
+    isError: false,
+  }),
+  JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "call-bash-3",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: "ok" }] },
+    isError: false,
+  }),
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Second assistant milestone text." }],
+    },
+  }),
+].join("\n") + "\n";
+
+const plannerCardItems = [
+  { id: "p-think-1", type: "thinking" as const, role: "assistant" as const, content: "Plan the architecture.", status: "success" as const },
+  { id: "p-tool-1", type: "tool_call" as const, toolName: "bash", args: { command: "cat docs/index.md && cat package.json" }, result: "ok", status: "success" as const },
+  { id: "p-text-1", type: "text" as const, role: "assistant" as const, content: "First assistant milestone text.", status: "success" as const },
+  { id: "p-tool-2", type: "tool_call" as const, toolName: "read", args: { path: "src/App.tsx" }, result: "ok", status: "success" as const },
+  { id: "p-tool-3", type: "tool_call" as const, toolName: "bash", args: { command: "npm run check" }, result: "ok", status: "success" as const },
+  { id: "p-tool-4", type: "tool_call" as const, toolName: "bash", args: { command: "npm test" }, result: "ok", status: "success" as const },
+  { id: "p-text-2", type: "text" as const, role: "assistant" as const, content: "Second assistant milestone text.", status: "success" as const },
+];
+
 const openRequests: OpenWorkspaceFileRequest[] = [];
 
 function Fixture() {
@@ -64,7 +141,8 @@ function Fixture() {
   const summary = buildSummaryFromFiles(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
     ...file, additions: file.additions + (index === 0 ? revision : 0),
   })), false);
-  const outputText = params.has("bytes") ? "" : params.get("long") === "1" ? longConversationOutput
+  const cardsMode = params.get("cards") === "1";
+  const outputText = params.has("bytes") ? "" : cardsMode ? cardsConversationOutput : params.get("long") === "1" ? longConversationOutput
     : JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n";
   const execution: Execution = {
     id: "execution", node: "worker", revision: 0, attempt: 1,
@@ -95,7 +173,8 @@ function Fixture() {
   return <div style={{ height: "100dvh", display: "flex", padding: "12px", boxSizing: "border-box" }}>
     <GraphWorkbench state={state} routeType={mode === "serial" ? "serial" : "graph"}
       selected={selected} setSelected={setSelected} selectedMergerId={selectedMergerId} setSelectedMergerId={setSelectedMergerId}
-      effectiveMessages={[]} isPlanning={mode === "planner" && running} plannerStream={{ items: [] }}
+      effectiveMessages={[]} isPlanning={mode === "planner" && running}
+      plannerStream={{ runId: "changes-run", items: mode === "planner" && cardsMode ? plannerCardItems : [] }}
       onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
       onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
       onOpenFile={request => { openRequests.push(request); }}

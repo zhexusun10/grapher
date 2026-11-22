@@ -6,15 +6,17 @@
   justify-content: center;
 }
 
-.workbench.dialogue-only-mode:not(.graph-collapsed) .conversation-pane {
+.workbench.dialogue-only-mode:not(.graph-collapsed):not(.right-pane-closing) .conversation-pane {
   transition: none !important;
 }
 
-.workbench.graph-collapsed {
+.workbench.graph-collapsed,
+.workbench.right-pane-closing {
   justify-content: flex-start;
 }
 
-.workbench.graph-collapsed .graph-pane {
+.workbench.graph-collapsed .graph-pane,
+.workbench.right-pane-closing .graph-pane {
   overflow: hidden;
 }
 
@@ -86,7 +88,7 @@
 }
 
 .workbench.historical-settled:not(.was-live-planning) .task-node,
-.workbench.historical-settled:not(.was-live-planning):not(.graph-collapsed) .graph-pane,
+.workbench.historical-settled:not(.was-live-planning):not(.graph-collapsed):not(.right-pane-closing) .graph-pane,
 .workbench.historical-settled:not(.was-live-planning) .workbench-resizer,
 .workbench.historical-settled:not(.was-live-planning) .thinking-card {
   animation: none !important;
@@ -94,10 +96,16 @@
 }
 
 .initial-query-scroll.conversation-preparing .thinking-card,
+.initial-query-scroll.conversation-preparing .tool-call-card,
 .initial-query-scroll.conversation-preparing .card-reveal.entering {
   grid-template-rows: 1fr;
   animation: none !important;
   transform: none !important;
+}
+
+.card-reveal:not(.entering)>.tool-call-card.appear-active,
+.card-reveal:not(.entering)>.thinking-card.appear-active {
+  animation: none;
 }
 
 /* Route Decision Pill */
@@ -441,6 +449,7 @@
   background: #f8fafc;
   border: 1px solid var(--border-default);
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .thinking-card-body .thinking-markdown pre code {
@@ -1118,6 +1127,7 @@ button.transcript-error-toggle {
   border-radius: 8px;
   border: 1px solid var(--border-default);
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .markdown-content pre code {
@@ -1137,6 +1147,7 @@ button.transcript-error-toggle {
   background: #0b0f17;
   border: 1px solid var(--border-default);
   border-radius: 8px;
+  overflow: hidden;
 }
 
 .markdown-content .code-block-wrapper pre {
@@ -1144,6 +1155,17 @@ button.transcript-error-toggle {
   background: transparent;
   border: none;
   border-radius: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* WebKit flex ancestors size auto-height boxes before `overflow-x: auto`
+   allocates a classic horizontal scrollbar, so the scrollbar initially paints
+   outside the card and jumps inside on the next relayout. Switching overflowing
+   blocks to `overflow-x: scroll` synchronously before paint reserves the track
+   inside the wrapper from the first frame while keeping short blocks compact. */
+.markdown-content .code-block-wrapper[data-overflow-x="true"] pre {
+  overflow-x: scroll;
 }
 
 .thinking-markdown .code-block-wrapper {
@@ -1304,6 +1326,103 @@ button.transcript-error-toggle {
   margin: 16px 0 8px;
   border-radius: 1px;
   background: var(--border-default);
+}
+
+/* Codex-style compact summary row shown between model text outputs when
+   transcript cards are collapsed. */
+.activity-summary-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.activity-summary-trigger {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  text-align: left;
+  transition: none;
+}
+
+.activity-summary-row .activity-summary-trigger:not(:disabled):hover {
+  color: var(--text-primary);
+  background-color: transparent;
+  filter: none;
+}
+
+.activity-summary-trigger:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.activity-summary-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.activity-summary-row .activity-summary-trigger:not(:disabled):hover .activity-summary-icon-wrap {
+  color: currentColor;
+}
+
+.activity-summary-row.has-error .activity-summary-icon-wrap {
+  color: var(--status-danger-strong);
+}
+
+.activity-summary-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.activity-summary-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.activity-summary-chevron.open {
+  transform: rotate(90deg);
+}
+
+.activity-summary-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding-top: 8px;
+}
+
+.activity-summary-row.collapsing .activity-summary-cards,
+.activity-summary-row.expanding .activity-summary-cards {
+  padding-top: 0;
 }
 
 .system-pill {
@@ -1503,7 +1622,7 @@ button.transcript-error-toggle {
 }
 
 .initial-query-scroll.conversation-ready .execution-transcript-content {
-  transition: opacity 0.2s ease-out;
+  transition: opacity 0.24s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {

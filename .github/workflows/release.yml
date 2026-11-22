@@ -86,10 +86,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-26
             platform: macos
             target: macos-arm64
-          - os: macos-15-intel
+          - os: macos-26-intel
             platform: macos
             target: macos-x64
           - os: windows-latest

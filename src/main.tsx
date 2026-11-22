@@ -2,6 +2,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { locale } from "./i18n";
 import { installDesktopExternalLinkHandler } from "./services/externalLink";
+import { installWindowFileDropGuard } from "./utils/fileDrop";
 import "@xyflow/react/dist/style.css";
 import "katex/dist/katex.min.css";
 import "./tailwind.css";
@@ -13,4 +14,5 @@ import "./styles-planning.css";
 
 document.documentElement.lang = locale;
 installDesktopExternalLinkHandler();
+installWindowFileDropGuard();
 ReactDOM.createRoot(document.getElementById("root")!).render(<App />);

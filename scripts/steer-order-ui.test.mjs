@@ -18,7 +18,7 @@ before(async () => {
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { await browser?.close(); server?.httpServer?.closeAllConnections?.(); await server?.close(); });
 
 async function fixturePage(context) {
   const page = await context.newPage();
@@ -30,6 +30,23 @@ async function fixturePage(context) {
     return route.fulfill({ json: { result: fixtureExecutionPage(route.request().postDataJSON(), [snapshot]) } });
   });
   return page;
+}
+
+function withdrawSnapshot(events) {
+  return {
+    runId: "steer-run",
+    phase: "running",
+    approved: true,
+    paused: false,
+    base: "",
+    feedbackCounts: {},
+    graph: { originalGoal: "Original task", nodes: [{ id: "task", task: "Original task" }], edges: [] },
+    config: null,
+    plan: null,
+    nodes: { task: { status: "running", revision: 0, instruction: "", error: null } },
+    executions: [],
+    events,
+  };
 }
 
 for (const mode of ["serial", "graph"]) {
@@ -48,7 +65,7 @@ for (const mode of ["serial", "graph"]) {
         assert.equal(body.node, "task");
         if (fail) return route.fulfill({ status: 500, json: { error: "Cannot withdraw" } });
         return route.fulfill({ json: { result: { messages: withdrawals === 1 ? [{ text: "SAME" }] : [],
-          snapshot: { events: [...events, withdrawn] } } } });
+          snapshot: withdrawSnapshot([...events, withdrawn]) } } });
       }
       return route.fulfill({ json: { result: {} } });
     });
@@ -107,7 +124,7 @@ for (const mode of ["serial", "graph"]) {
       const body = route.request().postDataJSON();
       if (body?.operation === "withdraw") {
         withdrawals++;
-        return route.fulfill({ json: { result: { messages: [{ text: "inspect queued image", images: [image] }], snapshot: { events: [] } } } });
+        return route.fulfill({ json: { result: { messages: [{ text: "inspect queued image", images: [image] }], snapshot: withdrawSnapshot([]) } } });
       }
       return route.fulfill({ json: { result: {} } });
     });
@@ -157,7 +174,7 @@ for (const mode of ["serial", "graph"]) {
       await expect(input).toHaveCount(0);
       await page.getByRole("button", { name: "Toggle view" }).click();
       await expect(input).toBeDisabled();
-      await pending.fulfill({ json: { result: { messages: [{ text: "recalled image", images: [image] }], snapshot: { events: [] } } } });
+      await pending.fulfill({ json: { result: { messages: [{ text: "recalled image", images: [image] }], snapshot: withdrawSnapshot([]) } } });
       await expect(input).toHaveValue("existing draft\n\nrecalled image");
       await expect(input).toBeEnabled();
       await expect(page.locator(".prompt-box-preview-img")).toHaveCount(1);
@@ -326,15 +343,18 @@ for (const mode of ["serial", "graph"]) {
     } finally { await context.close(); }
   });
 
-  test(`${mode}: an image steer retains its preview when it enters the transcript`, { timeout: 30_000 }, async () => {
+  test(`${mode}: an image steer retains its preview, avoids disk upload and duplicate attachment cards, stays ordered on re-entry, and opens preview modal`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    let uploadedToDisk = 0;
     await context.route("**/api/*", route => {
       const command = new URL(route.request().url()).pathname.split("/").at(-1);
-      return route.fulfill({ json: { result: command === "write_workspace_attachment"
-        ? { name: "image.png", path: "grapher-attachments/12345678-1234-1234-1234-123456789abc/image.png" } : {} } });
+      if (command === "write_workspace_attachment") uploadedToDisk += 1;
+      return route.fulfill({ json: { result: {} } });
     });
     const page = await fixturePage(context);
+    const errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
     try {
       await page.goto(`${origin}/__steer?mode=${mode}`);
       await page.getByText("OUTPUT BEFORE STEER", { exact: true }).waitFor();
@@ -344,21 +364,60 @@ for (const mode of ["serial", "graph"]) {
       await input.press("Enter");
       const bubble = page.locator(".chat-bubble-user", { hasText: "inspect image" });
       await bubble.waitFor();
+      assert.equal(uploadedToDisk, 0, "images must travel inline via RPC without writing to disk");
       assert.equal(await bubble.locator(".. >> img.chat-user-img").count(), 1);
-      await page.evaluate(() => window.steerAudit.consume("@grapher-attachments/12345678-1234-1234-1234-123456789abc/image.png inspect image"));
+      assert.equal(await bubble.locator(".. >> .chat-bubble-file-badge").count(), 0,
+        "image sends must not duplicate as a file attachment card");
+      // Simulate Pi 1.6.0 appending a resize dimension note to the consumed user turn.
+      await page.evaluate(() => window.steerAudit.consume(
+        "inspect image\n\n" +
+        "[Image: original 3024x1964, displayed at 2000x1299. Multiply coordinates by 1.51 to map to original image.]"
+      ));
       await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
+      const inOrder = () => page.evaluate(() => {
+        const before = [...document.querySelectorAll("*")].find(e => e.textContent === "OUTPUT BEFORE STEER");
+        const steer = [...document.querySelectorAll(".chat-bubble-user")].find(e => e.textContent.includes("inspect image"));
+        const after = [...document.querySelectorAll("*")].find(e => e.textContent === "OUTPUT AFTER STEER");
+        return !!before && !!steer && !!after &&
+          !!(before.compareDocumentPosition(steer) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          !!(steer.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
       assert.equal(await bubble.count(), 1);
       assert.equal(await bubble.locator(".. >> img.chat-user-img").count(), 1);
+      assert.equal(await bubble.locator(".. >> .chat-bubble-file-badge").count(), 0);
+      assert.equal(await inOrder(), true, "resized image steer must render between before-steer and after-steer output");
+      assert.equal(await bubble.textContent().then(t => t?.includes("Multiply coordinates")), false);
+
+      // Settle, leave view, and re-enter: the image steer must stay in chronological order (not jump to the top).
+      await page.evaluate(() => window.steerAudit.settle());
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await expect(bubble).toHaveCount(0);
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
+      await expect(bubble).toHaveCount(1);
+      assert.equal(await bubble.locator(".. >> img.chat-user-img").count(), 1);
+      assert.equal(await bubble.locator(".. >> .chat-bubble-file-badge").count(), 0);
+      assert.equal(await inOrder(), true, "re-entering must keep the image steer in chronological order");
+
+      // Clicking the image opens the preview dialog and Escape closes it.
+      await bubble.locator(".. >> button.chat-user-image-thumb").click();
+      const dialog = page.locator('[role="dialog"][aria-label="Image preview"]');
+      await dialog.waitFor();
+      assert.equal(await dialog.locator("img.image-preview-full-img").count(), 1);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
 
   test(`${mode}: an attachment stays with its steer through transcript handoff`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    const externalPath = "/data/attachment-inputs/12345678-1234-1234-1234-123456789abc/evidence.txt";
     await context.route("**/api/*", route => {
       const command = new URL(route.request().url()).pathname.split("/").at(-1);
       return route.fulfill({ json: { result: command === "write_workspace_attachment"
-        ? { name: "evidence.txt", path: "grapher-attachments/12345678-1234-1234-1234-123456789abc/evidence.txt" } : {} } });
+        ? { name: "evidence.txt", path: externalPath } : {} } });
     });
     const page = await fixturePage(context);
     const errors = [];
@@ -373,17 +432,20 @@ for (const mode of ["serial", "graph"]) {
       const steer = page.locator(".chat-bubble-user", { hasText: "inspect this file" });
       await steer.waitFor();
       assert.equal(await steer.locator(".. >> .chat-bubble-file-badge", { hasText: "evidence.txt" }).count(), 1);
+      assert.equal(await steer.textContent().then(t => t?.includes("attachment-inputs")), false,
+        "external attachment path must be hidden behind the attachment card");
       const follows = () => page.evaluate(() => {
         const output = [...document.querySelectorAll("*")].find(e => e.textContent === "OUTPUT BEFORE STEER");
         const steer = [...document.querySelectorAll(".chat-bubble-user")].find(e => e.textContent.includes("inspect this file"));
         return !!output && !!steer && !!(output.compareDocumentPosition(steer) & Node.DOCUMENT_POSITION_FOLLOWING);
       });
       assert.equal(await follows(), true);
-      await page.evaluate(() => window.steerAudit.consume("@grapher-attachments/12345678-1234-1234-1234-123456789abc/evidence.txt inspect this file"));
+      await page.evaluate((path) => window.steerAudit.consume(`@${path} inspect this file`), externalPath);
       await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
       await page.waitForTimeout(100);
       assert.equal(await steer.count(), 1);
       assert.equal(await steer.locator(".. >> .chat-bubble-file-badge", { hasText: "evidence.txt" }).count(), 1);
+      assert.equal(await steer.textContent().then(t => t?.includes("attachment-inputs")), false);
       assert.equal(await follows(), true);
       assert.deepEqual(errors, []);
     } finally { await context.close(); }

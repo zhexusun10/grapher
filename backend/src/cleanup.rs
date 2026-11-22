@@ -297,9 +297,11 @@ pub(crate) fn manifest(
         }
         if safe_id(&state.run_id) {
             targets.insert(Target::data("planner-sessions", &state.run_id));
-        }
-        if safe_id(&state.run_id) {
             targets.insert(Target::data("file-changes", &state.run_id));
+            targets.insert(Target::data(
+                crate::attachment_inputs::BUCKET,
+                &state.run_id,
+            ));
         }
     } else {
         targets.retain(|target| matches!(target, Target::Workspace { .. }));

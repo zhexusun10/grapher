@@ -1009,6 +1009,8 @@ pub enum EventKind {
     /// Persist routing independently of graph shape.
     Routed {
         plan_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
     },
     Approved {
         base: String,
@@ -2557,8 +2559,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .collect();
             state.phase = "awaiting_approval".into();
         }
-        EventKind::Routed { plan_type } => {
+        EventKind::Routed { plan_type, images } => {
             state.plan_type = Some(plan_type.clone());
+            if plan_type == "serial" {
+                if let Some(imgs) = images.as_ref().filter(|imgs| !imgs.is_empty()) {
+                    if let Some(node) = state.nodes.get_mut("task") {
+                        node.instruction_images = Some(imgs.clone());
+                    }
+                }
+            }
         }
         EventKind::WorkspaceIsolationSelected { isolated } => {
             state.isolated_workspaces = Some(*isolated);
@@ -3858,6 +3867,7 @@ mod metrics_tests {
                 1_000,
                 EventKind::Routed {
                     plan_type: "serial".into(),
+                    images: None,
                 },
             ),
             (

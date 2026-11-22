@@ -23,10 +23,72 @@ import { parseSlashCommand } from "../../services/composerCommands";
 import { ExtensionCommandUI } from "./ExtensionCommandUI";
 import { ComposerNotice } from "./ComposerNotice";
 import { ScopedModelsModal } from "../modals/ScopedModelsModal";
+import { ImagePreviewModal, type PreviewImageItem } from "../modals/ImagePreviewModal";
 import { useHideAutoMode } from "../../services/displayPreferences";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
+import { extractDroppedFiles, hasDraggedFiles } from "../../utils/fileDrop";
+import { prepareVisionImageAttachment } from "../../utils/imageCompress";
 import { createUuid } from "../../lib/uuid";
 import type { SkillItem, ImageAttachment } from "../../types";
+
+const MAX_EXTERNAL_ATTACHMENT_BYTES = 22 * 1024 * 1024;
+const MAX_VISION_IMAGE_INPUT_BYTES = 100 * 1024 * 1024;
+const MAX_TOTAL_INLINE_IMAGE_BASE64_BYTES = 24 * 1024 * 1024;
+const MAX_COMPOSER_ATTACHMENTS = 10;
+
+const VISION_IMAGE_TYPES: Record<string, string> = {
+  "image/png": "image/png",
+  "image/jpeg": "image/jpeg",
+  "image/jpg": "image/jpeg",
+  "image/gif": "image/gif",
+  "image/webp": "image/webp",
+};
+
+const VISION_IMAGE_EXTS: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+const MIME_TO_DEFAULT_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/tiff": "tiff",
+  "text/plain": "txt",
+  "application/pdf": "pdf",
+};
+
+function normalizeIncomingFile(file: File): File {
+  if (file.name && file.name.trim()) return file;
+  const normalizedType = file.type.trim().toLowerCase();
+  const ext = MIME_TO_DEFAULT_EXT[normalizedType] ?? (normalizedType.startsWith("image/") ? "png" : "bin");
+  const prefix = normalizedType.startsWith("image/") ? "pasted-image" : "pasted-file";
+  try {
+    return new File([file], `${prefix}.${ext}`, {
+      type: file.type,
+      lastModified: file.lastModified || Date.now(),
+    });
+  } catch {
+    return file;
+  }
+}
+
+/** Return a vision-API-compatible MIME type for raster images that can travel
+ * inline via Pi RPC `images`; vector/unsupported formats (e.g. SVG) fall
+ * through to external read-only file attachments so the agent can read them. */
+function visionImageMimeType(file: File): string | null {
+  const normalized = file.type.trim().toLowerCase();
+  if (normalized) return VISION_IMAGE_TYPES[normalized] ?? null;
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return VISION_IMAGE_EXTS[ext] ?? null;
+}
 
 export interface PromptBoxSubmitOptions {
   requestId?: string;
@@ -135,6 +197,7 @@ function PromptModeOption({ item, selected, onSelect, pillLayoutId, reduceMotion
           <motion.div
             layoutId={`mode-pill-indicator-${pillLayoutId}`}
             layoutCrossfade={false}
+            layoutDependency={item.id}
             initial={false}
             aria-hidden="true"
             className="prompt-box-mode-pill-indicator"
@@ -189,6 +252,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const drafts = draftStore ?? localDrafts.current;
     const key = draftKey ?? JSON.stringify([repository, runId, node]);
     const recall = useSyncExternalStore(drafts.subscribe, () => drafts.recall(key), () => drafts.recall(key));
+    const draftAttachments = useSyncExternalStore(drafts.subscribe, () => drafts.attachments(key), () => drafts.attachments(key));
     const restoredImages = recall.images;
     const setRestoredImages = (update: ImageAttachment[] | ((images: ImageAttachment[]) => ImageAttachment[])) => {
       drafts.setImages(key, typeof update === "function" ? update(drafts.recall(key).images) : update);
@@ -224,15 +288,51 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       onExpandedChange?.(expanded);
     };
     const textareaId = useId();
-    const [selectedImage, setSelectedImage] = useState<string | null>(null);
-    const [selectedFile, setSelectedFile] = useState<File | null>(null);
-    const hasAttachment = !!selectedFile || restoredImages.length > 0;
+    const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+    const { visionDraftAttachments, fileDraftAttachments, composerPreviewImages, previewIndexByAttachmentId, restoredImageStartIndex } = useMemo(() => {
+      const visionItems: typeof draftAttachments[number][] = [];
+      const fileItems: typeof draftAttachments[number][] = [];
+      const previewItems: PreviewImageItem[] = [];
+      const indexById = new Map<string, number>();
+
+      for (const item of draftAttachments) {
+        if (visionImageMimeType(item.file)) {
+          visionItems.push(item);
+          if (item.imagePreview) {
+            indexById.set(item.attachmentId, previewItems.length);
+            previewItems.push({
+              src: item.imagePreview,
+              alt: item.file.name || t("上传附件预览"),
+              name: item.file.name,
+            });
+          }
+        } else {
+          fileItems.push(item);
+        }
+      }
+
+      const restoredStart = previewItems.length;
+      for (const image of restoredImages) {
+        previewItems.push({
+          src: `data:${image.mimeType};base64,${image.data}`,
+          alt: image.name || t("上传附件预览"),
+          name: image.name,
+        });
+      }
+
+      return {
+        visionDraftAttachments: visionItems,
+        fileDraftAttachments: fileItems,
+        composerPreviewImages: previewItems,
+        previewIndexByAttachmentId: indexById,
+        restoredImageStartIndex: restoredStart,
+      };
+    }, [draftAttachments, restoredImages]);
+    const hasAttachment = draftAttachments.length > 0 || restoredImages.length > 0;
     const [isWithdrawing, setIsWithdrawing] = useState(false);
     const withdrawFocusKey = useRef<string | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
-    const selectedFileRef = useRef<File | null>(null);
-    const attachmentIdRef = useRef<string | null>(null);
     const attachmentGenerationRef = useRef(0);
     const [isPreparing, setIsPreparing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -270,11 +370,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     }, []);
 
     useEffect(() => {
-      selectedFileRef.current = null;
-      attachmentIdRef.current = null;
       submittingRef.current = false;
-      setSelectedFile(null);
-      setSelectedImage(null);
+      setPreviewIndex(null);
       setIsWithdrawing(false);
       setAttachmentError("");
       setCommandError("");
@@ -765,74 +862,199 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
-    const processIncomingFile = useCallback((file: File) => {
-      setAttachmentError("");
-      selectedFileRef.current = file;
-      attachmentIdRef.current = createUuid();
-      setSelectedFile(file);
-      setSelectedImage(null);
-      // Selection is local only. Persist a collision-safe attachment on Send.
-      if (file.type.startsWith("image/")) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (selectedFileRef.current === file) setSelectedImage(reader.result as string);
-        };
-        reader.readAsDataURL(file);
+    const processIncomingFiles = useCallback((incomingFiles: readonly File[], options?: { skippedDirectories?: number }) => {
+      const targetDrafts = drafts;
+      const targetKey = key;
+      const currentCount = targetDrafts.attachments(targetKey).length + targetDrafts.recall(targetKey).images.length;
+      let remainingSlots = Math.max(0, MAX_COMPOSER_ATTACHMENTS - currentCount);
+
+      const accepted: Array<{
+        file: File;
+        imagePreview: string | null;
+        previewIsObjectUrl?: boolean;
+        attachmentId: string;
+        needsDataUrlFallback: boolean;
+      }> = [];
+      const errors: string[] = [];
+
+      if (options?.skippedDirectories) {
+        errors.push(t("暂不支持直接拖入文件夹，请选择具体文件。"));
       }
-    }, []);
+
+      for (const rawFile of incomingFiles) {
+        if (remainingSlots <= 0) {
+          errors.push(t("单次最多添加 {0} 个附件。", MAX_COMPOSER_ATTACHMENTS));
+          break;
+        }
+        const file = normalizeIncomingFile(rawFile);
+        const isVisionImage = Boolean(visionImageMimeType(file));
+        if (isVisionImage) {
+          if (file.size > MAX_VISION_IMAGE_INPUT_BYTES) {
+            errors.push(t("图片「{0}」体积过大，无法处理。", file.name));
+            continue;
+          }
+          let imagePreview: string | null = null;
+          let previewIsObjectUrl = false;
+          let needsDataUrlFallback = false;
+          if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+            imagePreview = URL.createObjectURL(file);
+            previewIsObjectUrl = true;
+          } else {
+            needsDataUrlFallback = true;
+          }
+          accepted.push({
+            file,
+            imagePreview,
+            previewIsObjectUrl,
+            attachmentId: createUuid(),
+            needsDataUrlFallback,
+          });
+          remainingSlots -= 1;
+        } else {
+          if (file.size > MAX_EXTERNAL_ATTACHMENT_BYTES) {
+            errors.push(t("文件「{0}」超过 22 MB 上限。", file.name));
+            continue;
+          }
+          accepted.push({
+            file,
+            imagePreview: null,
+            attachmentId: createUuid(),
+            needsDataUrlFallback: false,
+          });
+          remainingSlots -= 1;
+        }
+      }
+
+      if (accepted.length > 0) {
+        targetDrafts.addAttachments(
+          targetKey,
+          accepted.map(({ file, imagePreview, previewIsObjectUrl, attachmentId }) => ({
+            file,
+            imagePreview,
+            previewIsObjectUrl,
+            attachmentId,
+          })),
+        );
+        for (const item of accepted) {
+          if (!item.needsDataUrlFallback) continue;
+          const reader = new FileReader();
+          reader.onload = () => {
+            targetDrafts.updateAttachment(targetKey, item.attachmentId, {
+              imagePreview: reader.result as string,
+              previewIsObjectUrl: false,
+              previewError: false,
+            });
+          };
+          reader.onerror = () => {
+            targetDrafts.updateAttachment(targetKey, item.attachmentId, {
+              previewError: true,
+            });
+            if (mountedRef.current) {
+              setAttachmentError(t("无法预览图片「{0}」，请重新选择文件后重试。", item.file.name));
+            }
+          };
+          reader.readAsDataURL(item.file);
+        }
+      }
+
+      setAttachmentError(errors.length > 0 ? errors[0] : "");
+    }, [drafts, key]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      processIncomingFile(file);
+      const files = Array.from(e.target.files ?? []);
+      if (files.length === 0) return;
+      processIncomingFiles(files);
       e.target.value = "";
     };
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (disabled || isBusy || isPreparing || isSubmitting) return;
+      const pastedImages: File[] = [];
       const items = e.clipboardData?.items;
       if (items) {
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          if (item.kind === "file" && item.type.startsWith("image/")) {
-            const file = item.getAsFile();
-            if (file) {
-              e.preventDefault();
-              processIncomingFile(file);
-              return;
+          if (item.kind !== "file") continue;
+          const file = item.getAsFile();
+          if (file && (item.type.startsWith("image/") || visionImageMimeType(file))) {
+            pastedImages.push(file);
+          }
+        }
+      }
+      if (pastedImages.length === 0) {
+        const files = e.clipboardData?.files;
+        if (files && files.length > 0) {
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            if (file && (file.type.startsWith("image/") || visionImageMimeType(file))) {
+              pastedImages.push(file);
             }
           }
         }
       }
-      const files = e.clipboardData?.files;
-      if (files && files.length > 0 && files[0].type.startsWith("image/")) {
+      if (pastedImages.length > 0) {
         e.preventDefault();
-        processIncomingFile(files[0]);
+        processIncomingFiles(pastedImages);
         return;
       }
       restProps.onPaste?.(e);
     };
 
+    const canAcceptFileDrop = !disabled && !isBusy && !isPreparing && !isSubmitting;
+
+    useEffect(() => {
+      if (!isDraggingOver) return;
+      if (!canAcceptFileDrop) {
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+        return;
+      }
+      const resetDrag = () => {
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+      };
+      window.addEventListener("dragend", resetDrag);
+      window.addEventListener("drop", resetDrag);
+      window.addEventListener("blur", resetDrag);
+      return () => {
+        window.removeEventListener("dragend", resetDrag);
+        window.removeEventListener("drop", resetDrag);
+        window.removeEventListener("blur", resetDrag);
+      };
+    }, [isDraggingOver, canAcceptFileDrop]);
+
     const handleDragEnter = (e: React.DragEvent) => {
+      if (!hasDraggedFiles(e.dataTransfer)) return;
       e.preventDefault();
       e.stopPropagation();
+      if (!canAcceptFileDrop) return;
       dragCounterRef.current += 1;
-      if (e.dataTransfer && e.dataTransfer.types.includes("Files")) {
+      setIsDraggingOver(true);
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+      if (!hasDraggedFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = canAcceptFileDrop ? "copy" : "none";
+      }
+      if (canAcceptFileDrop && !isDraggingOver) {
+        dragCounterRef.current = Math.max(1, dragCounterRef.current);
         setIsDraggingOver(true);
       }
     };
 
-    const handleDragOver = (e: React.DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = "copy";
-      }
-    };
-
     const handleDragLeave = (e: React.DragEvent) => {
+      if (!isDraggingOver && dragCounterRef.current === 0) return;
       e.preventDefault();
       e.stopPropagation();
+      const related = e.relatedTarget as Node | null;
+      if (related && !e.currentTarget.contains(related)) {
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+        return;
+      }
       dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
       if (dragCounterRef.current === 0) {
         setIsDraggingOver(false);
@@ -840,30 +1062,37 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     };
 
     const handleDrop = (e: React.DragEvent) => {
+      if (!hasDraggedFiles(e.dataTransfer)) {
+        dragCounterRef.current = 0;
+        setIsDraggingOver(false);
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       dragCounterRef.current = 0;
       setIsDraggingOver(false);
-      if (disabled || isBusy || isPreparing || isSubmitting) return;
-      const files = e.dataTransfer?.files;
-      if (files && files.length > 0) {
-        processIncomingFile(files[0]);
+      if (!canAcceptFileDrop) return;
+      const { files, skippedDirectories } = extractDroppedFiles(e.dataTransfer);
+      if (files.length > 0 || skippedDirectories > 0) {
+        processIncomingFiles(files, { skippedDirectories });
       }
     };
 
-    const handleRemoveFile = (e: React.MouseEvent) => {
+    const handleRemoveAttachment = (attachmentId: string, e: React.MouseEvent) => {
       e.stopPropagation();
       if (submittingRef.current) return;
       setAttachmentError("");
-      selectedFileRef.current = null;
-      attachmentIdRef.current = null;
-      setSelectedImage(null);
-      setSelectedFile(null);
+      const removed = drafts.removeAttachment(key, attachmentId);
+      setPreviewIndex(null);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-      // Never unlink a project file on Cancel. An earlier rejected/ambiguous
-      // send may already have delivered its uniquely named attachment.
+      // Reclaim external attachment uploaded during an earlier rejected send.
+      if (removed?.uploadedPath) {
+        void runtimeService
+          .deleteWorkspaceFile(removed.uploadedPath, removed.uploadedContext?.repository, removed.uploadedContext)
+          .catch(() => {});
+      }
     };
 
     const handleSubmitAction = async (fromPointer = false, interrupt = false) => {
@@ -909,7 +1138,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
       const generation = attachmentGenerationRef.current;
       const isCurrent = () => mountedRef.current && generation === attachmentGenerationRef.current;
-      const currentAttachment = selectedFile;
+      const submittedAttachments = [...draftAttachments];
+      const submitDrafts = drafts;
+      const submitKey = key;
       const slash = parseSlashCommand(trimmed);
       if (slash && !slash.name.startsWith("skill:")) {
         setCommandError("");
@@ -927,35 +1158,54 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         }
         if (!promptCommand || !isCurrent()) return;
       }
-      let combinedPrompt = trimmed || (restoredImages.length ? t("请查看附图。") : "");
+      let combinedPrompt = trimmed;
+      const structuredImages: ImageAttachment[] = [];
+      const externalFiles: File[] = [];
+      const fileMentions: string[] = [];
 
-      if (currentAttachment) {
-        const attachmentId = attachmentIdRef.current ??= createUuid();
-        let uploadedPath: string;
+      if (submittedAttachments.length > 0) {
         setIsPreparing(true);
         try {
-          if (!currentAttachment.type.startsWith("image/")) {
-            try {
-              await currentAttachment.text();
-            } catch {
-              await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(reader.result as string);
-                reader.onerror = reject;
-                reader.readAsText(currentAttachment);
+          let totalImageBase64Bytes = restoredImages.reduce((sum, img) => sum + img.data.length, 0);
+          for (const item of submittedAttachments) {
+            const imageMimeType = visionImageMimeType(item.file);
+            if (imageMimeType) {
+              const prepared = await prepareVisionImageAttachment(
+                item.file,
+                imageMimeType,
+                item.imagePreview,
+              );
+              if (!isCurrent()) return;
+              totalImageBase64Bytes += prepared.data.length;
+              if (totalImageBase64Bytes > MAX_TOTAL_INLINE_IMAGE_BASE64_BYTES) {
+                throw new Error(t("图片总大小超过单次请求限制，请减少图片数量后重试。"));
+              }
+              structuredImages.push({
+                type: "image",
+                mimeType: prepared.mimeType,
+                data: prepared.data,
+                name: item.file.name,
               });
+            } else {
+              if (item.file.size > MAX_EXTERNAL_ATTACHMENT_BYTES) {
+                throw new Error(t("文件「{0}」超过 22 MB 上限。", item.file.name));
+              }
+              // Persist to Grapher's external attachment store (never inside the user's repository).
+              const uploaded = await runtimeService.writeWorkspaceFile(item.file, repository, {
+                runId, node, attachmentId: item.attachmentId,
+              });
+              if (!isCurrent()) return;
+              submitDrafts.updateAttachment(submitKey, item.attachmentId, {
+                uploadedPath: uploaded.path,
+                uploadedContext: { repository, runId, node },
+              });
+              externalFiles.push(item.file);
+              const path = uploaded.path;
+              fileMentions.push(`@${/[\s"\\]/.test(path) ? JSON.stringify(path) : path}`);
             }
           }
-          if (!isCurrent()) return;
-          // Revalidate delivery on every retry: the backend may have handed
-          // this node to another workspace or published it since the last send.
-          const uploaded = await runtimeService.writeWorkspaceFile(currentAttachment, repository, {
-            runId, node, attachmentId,
-          });
-          if (!isCurrent()) return;
-          uploadedPath = uploaded.path;
         } catch (err) {
-          console.error("Failed to process attached file:", err);
+          console.error("Failed to prepare attachment:", err);
           if (isCurrent()) {
             submittingRef.current = false;
             setAttachmentError(`${t("无法读取附件，请重新选择文件后重试。")} ${err instanceof Error ? err.message : String(err)}`);
@@ -966,53 +1216,40 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         } finally {
           if (isCurrent()) setIsPreparing(false);
         }
-        if (!isCurrent()) return;
-        const path = uploadedPath;
-        const fileMention = `@${/[\s"\\]/.test(path) ? JSON.stringify(path) : path}`;
-        combinedPrompt = trimmed ? `${fileMention} ${trimmed}` : fileMention;
+      }
+
+      if (fileMentions.length > 0) {
+        const prefix = fileMentions.join(" ");
+        combinedPrompt = trimmed ? `${prefix} ${trimmed}` : prefix;
+      } else if (!combinedPrompt && (restoredImages.length > 0 || structuredImages.length > 0)) {
+        combinedPrompt = t("请查看附图。");
       }
       const displayText = combinedPrompt;
-      let structuredImages: ImageAttachment[] | undefined = undefined;
-
-      if (currentAttachment && currentAttachment.type.startsWith("image/")) {
-        try {
-          let dataUrl = selectedImage;
-          if (!dataUrl) {
-            dataUrl = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(currentAttachment);
-            });
-          }
-          const commaIndex = dataUrl.indexOf(",");
-          const base64Data = commaIndex !== -1 ? dataUrl.slice(commaIndex + 1) : dataUrl;
-          structuredImages = [
-            {
-              type: "image",
-              mimeType: currentAttachment.type || "image/png",
-              data: base64Data,
-              name: currentAttachment.name,
-            },
-          ];
-        } catch {
-          // 忽略图片转换异常
-        }
-      }
+      const combinedImages = restoredImages.length || structuredImages.length
+        ? [...restoredImages, ...structuredImages]
+        : undefined;
 
       try {
         if (!isCurrent()) return;
         if (onSubmit) {
           setIsAwaitingAcceptance(true);
           const accepted = await onSubmit(combinedPrompt, {
-            files: currentAttachment ? [currentAttachment] : [],
-            images: restoredImages.length ? [...restoredImages, ...(structuredImages ?? [])] : structuredImages,
+            files: externalFiles,
+            images: combinedImages,
             interrupt: interrupt && (isExecuting || isWorking),
             rawText: trimmed,
             displayText,
             mode: (isExecuting || isWorking) ? "steer" : undefined,
           });
-          if (accepted === false || !isCurrent()) return;
+          if (accepted === false) return;
+          for (const item of submittedAttachments) {
+            submitDrafts.removeAttachment(submitKey, item.attachmentId);
+          }
+          if (!isCurrent()) return;
+        } else {
+          for (const item of submittedAttachments) {
+            submitDrafts.removeAttachment(submitKey, item.attachmentId);
+          }
         }
 
         animateSendArrowRef.current = true;
@@ -1021,11 +1258,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         onChange?.({ target: { value: "" } } as React.ChangeEvent<HTMLTextAreaElement>);
         setCursorPos(0);
         setDismissedTrigger(null);
-        selectedFileRef.current = null;
-        setSelectedImage(null);
-        setSelectedFile(null);
         setRestoredImages([]);
-        attachmentIdRef.current = null;
       } catch (error) {
         console.error("Failed to send message:", error);
       } finally {
@@ -1143,10 +1376,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const showWorkingStop = isWorking && !hasText && !hasAttachment && !sendGrace && !isSubmitting && !isPreparing && !recall.pending;
 
     const prompt = (
-      <motion.div
+      <div
         ref={containerRef}
-        initial={false}
-        animate={{ opacity: 1 }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${isExpanded ? "expanded" : ""} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {
@@ -1283,6 +1514,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         {/* Hidden File Input: allows text, code (ipynb, py, etc.), images, any single file */}
         <input
           type="file"
+          multiple
           ref={fileInputRef}
           onChange={handleFileChange}
           style={{ display: "none" }}
@@ -1290,7 +1522,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
         {/* Keep the preview mounted during exit so the box can shrink smoothly. */}
         <AnimatePresence initial={false}>
-          {selectedFile && (
+          {draftAttachments.length > 0 && (
             <motion.div
               key="attachment-preview"
               className="prompt-box-attachment-slot"
@@ -1299,43 +1531,74 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               exit={{ height: 0, opacity: 0 }}
               transition={{ height: { duration: 0.26, ease: [0.16, 1, 0.3, 1] }, opacity: { duration: 0.16 } }}
             >
-              {selectedFile.type.startsWith("image/") ? (
+              {visionDraftAttachments.length > 0 && (
                 <div className="prompt-box-image-preview-wrapper">
-                  <div className="prompt-box-image-thumb">
-                    {selectedImage && <img src={selectedImage} alt={t("上传附件预览")} className="prompt-box-preview-img" />}
-                    <button
-                      type="button"
-                      onClick={handleRemoveFile}
-                      className="prompt-box-image-remove-btn"
-                      aria-label={t("移除图片")}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
+                  {visionDraftAttachments.map((item) => {
+                    const idx = previewIndexByAttachmentId.get(item.attachmentId);
+                    return (
+                      <div key={item.attachmentId} className="prompt-box-image-thumb">
+                        {item.imagePreview && !item.previewError ? (
+                          <button
+                            type="button"
+                            className="prompt-box-image-open-btn"
+                            onClick={() => idx !== undefined && setPreviewIndex(idx)}
+                            aria-label={t("预览图片")}
+                          >
+                            <img
+                              src={item.imagePreview}
+                              alt={item.file.name || t("上传附件预览")}
+                              className="prompt-box-preview-img"
+                              onError={() => {
+                                drafts.updateAttachment(key, item.attachmentId, { previewError: true });
+                                setAttachmentError(t("无法预览图片「{0}」，请重新选择文件后重试。", item.file.name));
+                              }}
+                            />
+                          </button>
+                        ) : (
+                          <div className="prompt-box-image-fallback" title={item.file.name}>
+                            {getFileIcon(item.file.name)}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => handleRemoveAttachment(item.attachmentId, e)}
+                          className="prompt-box-image-remove-btn"
+                          aria-label={t("移除图片")}
+                          disabled={isSubmitting}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-              ) : (
+              )}
+              {fileDraftAttachments.length > 0 && (
                 <div className="prompt-box-file-preview-wrapper">
-                  <div className="prompt-box-file-badge">
-                    <span className="prompt-box-file-icon">
-                      {getFileIcon(selectedFile.name)}
-                    </span>
-                    <div className="prompt-box-file-info">
-                      <span className="prompt-box-file-name">
-                        {selectedFile.name}
+                  {fileDraftAttachments.map((item) => (
+                    <div key={item.attachmentId} className="prompt-box-file-badge">
+                      <span className="prompt-box-file-icon">
+                        {getFileIcon(item.file.name)}
                       </span>
-                      <span className="prompt-box-file-size">
-                        {formatFileSize(selectedFile.size)}
-                      </span>
+                      <div className="prompt-box-file-info">
+                        <span className="prompt-box-file-name">
+                          {item.file.name}
+                        </span>
+                        <span className="prompt-box-file-size">
+                          {formatFileSize(item.file.size)}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => handleRemoveAttachment(item.attachmentId, e)}
+                        className="prompt-box-file-remove-btn"
+                        aria-label={t("移除文件")}
+                        disabled={isSubmitting}
+                      >
+                        <X size={12} />
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleRemoveFile}
-                      className="prompt-box-file-remove-btn"
-                      aria-label={t("移除文件")}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
+                  ))}
                 </div>
               )}
             </motion.div>
@@ -1344,7 +1607,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
         {restoredImages.length > 0 && <div className="prompt-box-image-preview-wrapper">
           {restoredImages.map((image, index) => <div className="prompt-box-image-thumb" key={index}>
-            <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name || t("上传附件预览")} className="prompt-box-preview-img" />
+            <button
+              type="button"
+              className="prompt-box-image-open-btn"
+              onClick={() => setPreviewIndex(restoredImageStartIndex + index)}
+              aria-label={t("预览图片")}
+            >
+              <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name || t("上传附件预览")} className="prompt-box-preview-img" />
+            </button>
             <button type="button" className="prompt-box-image-remove-btn" aria-label={t("移除图片")} disabled={isSubmitting}
               onClick={event => { event.stopPropagation(); setRestoredImages(images => images.filter((_, i) => i !== index)); }}><X size={12} /></button>
           </div>)}
@@ -1411,6 +1681,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
           />
+          {(canExpand || isExpanded) && (
+            <button
+              type="button"
+              className="prompt-box-icon-btn prompt-box-expand-btn"
+              aria-label={isExpanded ? t("收起输入框") : t("放大输入框")}
+              title={isExpanded ? t("收起输入框") : t("放大输入框")}
+              aria-expanded={isExpanded}
+              aria-controls={restProps.id ?? textareaId}
+              disabled={disabled || isBusy || isPreparing || isSubmitting}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={(event) => {
+                event.stopPropagation();
+                changeExpanded(!isExpanded);
+                internalTextareaRef.current?.focus({ preventScroll: true });
+              }}
+            >
+              {isExpanded ? <Minimize2 size={compact ? 14 : 16} /> : <Maximize2 size={compact ? 14 : 16} />}
+            </button>
+          )}
         </div>
 
         {/* The shared bottom anchor owns navigation motion. Controls stay in
@@ -1432,25 +1721,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               <Paperclip size={compact ? 15 : 18} />
             </button>
-            {(canExpand || isExpanded) && (
-              <button
-                type="button"
-                className="prompt-box-icon-btn prompt-box-expand-btn"
-                aria-label={isExpanded ? t("收起输入框") : t("放大输入框")}
-                title={isExpanded ? t("收起输入框") : t("放大输入框")}
-                aria-expanded={isExpanded}
-                aria-controls={restProps.id ?? textareaId}
-                disabled={disabled || isBusy || isPreparing || isSubmitting}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  changeExpanded(!isExpanded);
-                  internalTextareaRef.current?.focus({ preventScroll: true });
-                }}
-              >
-                {isExpanded ? <Minimize2 size={compact ? 14 : 16} /> : <Maximize2 size={compact ? 14 : 16} />}
-              </button>
-            )}
           </div>
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
@@ -1556,7 +1826,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             </button>
           </div>
         </div>
-      </motion.div>
+        <ImagePreviewModal
+          images={composerPreviewImages}
+          index={previewIndex}
+          onChangeIndex={setPreviewIndex}
+          onClose={() => setPreviewIndex(null)}
+        />
+      </div>
     );
 
     if (!layoutId) return prompt;

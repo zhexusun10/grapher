@@ -1,5 +1,6 @@
 import { t } from "../../i18n";
 import React, { useId } from "react";
+import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { AlertTriangle, Trash2 } from "lucide-react";
 import { useDialogFocus } from "../../hooks/useDialogFocus";
@@ -37,7 +38,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
 
   if (!config) return null;
 
-  return (
+  const content = (
     <motion.div
       className="modal-backdrop confirm-backdrop"
       initial={{ opacity: 0 }}
@@ -96,6 +97,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
       </motion.div>
     </motion.div>
   );
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 });
 
 ConfirmModal.displayName = "ConfirmModal";

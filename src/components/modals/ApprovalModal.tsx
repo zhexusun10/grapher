@@ -1,5 +1,6 @@
 import { t, localizePlanWarning } from "../../i18n";
 import React, { useId } from "react";
+import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { ShieldCheck, Play, X } from "lucide-react";
 import { Snapshot, Config, normalizeMaxFeedback } from "../../types";
@@ -32,7 +33,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
 
   if (!isOpen) return null;
 
-  return (
+  const content = (
     <motion.div
       className="modal-backdrop"
       initial={{ opacity: 0 }}
@@ -101,6 +102,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
       </motion.section>
     </motion.div>
   );
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 });
 
 ApprovalModal.displayName = "ApprovalModal";

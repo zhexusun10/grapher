@@ -4,10 +4,25 @@ import { isNodeWorking, nodeDependenciesCompleted } from "../src/lib/nodeWorking
 import { resolveGraphPhase } from "../src/lib/graphPhase.ts";
 import { runHasActiveExecutions, runHasLiveWork } from "../src/lib/runPhase.ts";
 
-test("run activity counts result launches but not queued dirty nodes", () => {
+test("run activity counts result launches and active planning but not queued dirty nodes or awaiting approval", () => {
   const dirty = { nodes: { task: { status: "dirty" } } } as Parameters<typeof runHasActiveExecutions>[0];
   assert.equal(runHasActiveExecutions(dirty), false);
   assert.equal(runHasLiveWork("paused", dirty), false);
+  assert.equal(runHasLiveWork("awaiting_approval", dirty), false);
+  assert.equal(runHasLiveWork("launching_result", dirty), true);
+  assert.equal(runHasLiveWork("completed", { planning: { status: "running" } } as Parameters<typeof runHasLiveWork>[1]), true);
+  assert.equal(runHasLiveWork("running", {
+    planType: "serial",
+    nodes: { task: { status: "completed" } },
+    executions: [{ status: "completed" }],
+  } as Parameters<typeof runHasLiveWork>[1]), false,
+    "a settled Serial node retires live work immediately even before Settled updates phase");
+  assert.equal(runHasLiveWork("running", {
+    planType: "serial",
+    nodes: { task: { status: "dirty" } },
+    executions: [{ status: "completed" }],
+  } as Parameters<typeof runHasLiveWork>[1]), true,
+    "a dirty Serial node awaiting redispatch stays live");
   const launching = { ...dirty, resultExecution: { status: "running" } };
   assert.equal(runHasActiveExecutions(launching), true);
   assert.equal(runHasLiveWork("paused", launching), true);

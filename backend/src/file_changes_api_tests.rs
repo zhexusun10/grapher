@@ -603,3 +603,121 @@ fn open_workspace_file_rejects_missing_files_and_unknown_executions_without_laun
     )
     .is_err());
 }
+
+#[test]
+fn get_file_diff_returns_unified_hunks_untracked_files_and_rejects_traversal() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    crate::workspace::git(&repo, &["init"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.name", "Tester"]).unwrap();
+    fs::write(repo.join("src/ledger.rs"), "fn apply() {\n    let a = 1;\n}\n").unwrap();
+    crate::workspace::git(&repo, &["add", "."]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-m", "initial"]).unwrap();
+    let before = crate::workspace::git(&repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    fs::write(
+        repo.join("src/ledger.rs"),
+        "fn apply() {\n    let b = 2;\n    let c = 3;\n}\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/added.rs"), "pub fn extra() {}\n").unwrap();
+    fs::write(repo.join("src/blob.bin"), [0u8, 1, 2, 3]).unwrap();
+
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run = Uuid::new_v4().to_string();
+    runtime.state.run_id = run.clone();
+    runtime.state.base = before.clone();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "diff test".into(),
+                nodes: vec![Node {
+                    id: "worker".into(),
+                    task: "edit ledger".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": repo, "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime.state.executions.push(Execution {
+        id: "exec-1".into(),
+        node: "worker".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "s1".into(),
+        worktree: repo.to_string_lossy().into_owned(),
+        before,
+        after: None,
+        workspace_lineage: vec![],
+        input: None,
+        result: None,
+        status: "running".into(),
+        started_at: 1,
+        completed_at: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        metrics: None,
+    });
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+
+    let modified = get_file_diff(
+        &serde_json::json!({ "runId": run, "path": "src/ledger.rs", "executionIds": ["exec-1"] }),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(modified["binary"], false);
+    let lines = modified["lines"].as_array().unwrap();
+    assert!(lines.iter().any(|line| line["kind"] == "hunk"));
+    assert!(lines
+        .iter()
+        .any(|line| line["kind"] == "removed" && line["text"] == "    let a = 1;"));
+    assert!(lines
+        .iter()
+        .any(|line| line["kind"] == "added" && line["text"] == "    let b = 2;"));
+
+    let added = get_file_diff(
+        &serde_json::json!({ "runId": run, "path": "src/added.rs", "status": "added", "executionIds": ["exec-1"] }),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(added["binary"], false);
+    assert_eq!(added["lines"].as_array().unwrap().len(), 1);
+    assert_eq!(added["lines"][0]["kind"], "added");
+    assert_eq!(added["lines"][0]["text"], "pub fn extra() {}");
+
+    let binary = get_file_diff(
+        &serde_json::json!({ "runId": run, "path": "src/blob.bin", "status": "added", "executionIds": ["exec-1"] }),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(binary["binary"], true);
+
+    assert!(get_file_diff(
+        &serde_json::json!({ "runId": run, "path": "../outside.txt" }),
+        &service,
+    )
+    .is_err());
+    assert!(get_file_diff(
+        &serde_json::json!({ "runId": run, "path": ".git/config" }),
+        &service,
+    )
+    .is_err());
+}
