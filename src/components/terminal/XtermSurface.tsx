@@ -1,11 +1,14 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { isWindowsTauriDesktop } from "../../services/apiBase";
 import "@xterm/xterm/css/xterm.css";
 
 interface XtermSurfaceProps {
   instanceId: number;
+  ptyBackend?: "conpty" | "unix";
   visible: boolean;
+  animating: boolean;
   focusNonce: number;
   onData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
@@ -39,7 +42,9 @@ const LIGHT_TERMINAL_THEME = {
 
 export const XtermSurface: React.FC<XtermSurfaceProps> = ({
   instanceId,
+  ptyBackend,
   visible,
+  animating,
   focusNonce,
   onData,
   onResize,
@@ -48,19 +53,28 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
+  const fitEnabledRef = useRef(visible && !animating);
+  // Keep the screen/PTY grid stable while its enclosing card is clipped or
+  // expanded. Fitting each animation frame clears/reflows xterm repeatedly and
+  // makes interactive programs redraw on every intermediate SIGWINCH.
+  fitEnabledRef.current = visible && !animating;
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
   const onResizeRef = useRef(onResize);
   onResizeRef.current = onResize;
   const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Use the server's PTY, not the browser's OS. The native fallback also
+  // configures startup output before terminal_create returns (older hosts
+  // may omit ptyBackend).
+  const conpty = ptyBackend === "conpty" || (ptyBackend === undefined && isWindowsTauriDesktop());
+  const conptyRef = useRef(conpty);
+  conptyRef.current = conpty;
 
   const fitAndNotify = useRef(() => {
     const host = hostRef.current;
     const term = terminalRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!host || !term || !fitAddon || !visibleRef.current) return;
+    if (!host || !term || !fitAddon || !fitEnabledRef.current) return;
     const rect = host.getBoundingClientRect();
     if (rect.width < 24 || rect.height < 24) return;
     try {
@@ -92,6 +106,7 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
       scrollback: 5000,
       allowProposedApi: false,
       macOptionIsMeta: false,
+      windowsPty: conptyRef.current ? { backend: "conpty" } : {},
       theme: LIGHT_TERMINAL_THEME,
     });
     const fitAddon = new FitAddon();
@@ -164,14 +179,22 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
     };
   }, [instanceId, attachOutputListener]);
 
+  useLayoutEffect(() => {
+    if (terminalRef.current) {
+      // ConPTY repaints its own viewport on resize; pulling old scrollback
+      // into that viewport first produces blank/duplicated rows and lost text.
+      terminalRef.current.options.windowsPty = conpty ? { backend: "conpty" } : {};
+    }
+  }, [conpty]);
+
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || animating) return;
     const rafId = requestAnimationFrame(() => {
       fitAndNotify.current();
       terminalRef.current?.focus();
     });
     return () => cancelAnimationFrame(rafId);
-  }, [visible, focusNonce]);
+  }, [visible, animating, focusNonce]);
 
   return (
     <div

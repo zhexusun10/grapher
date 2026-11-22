@@ -19,6 +19,7 @@ export interface WorkspaceTerminalEntry {
   instanceId: number;
   sessionId: string | null;
   shell: string;
+  ptyBackend?: "conpty" | "unix";
   mode: WorkspaceTerminalMode;
   closing: boolean;
   status: WorkspaceTerminalStatus;
@@ -278,7 +279,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
           // writable before handing those bytes to xterm, even before commit.
           entriesRef.current = {
             ...entriesRef.current,
-            [key]: { ...current, sessionId: info.sessionId, shell: info.shell, status: "running", error: null },
+            [key]: { ...current, sessionId: info.sessionId, shell: info.shell, ptyBackend: info.ptyBackend, status: "running", error: null },
           };
           setEntriesByKey((prev) => {
             const latest = prev[key];
@@ -289,6 +290,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
                 ...latest,
                 sessionId: info.sessionId,
                 shell: info.shell,
+                ptyBackend: info.ptyBackend,
                 status: "running",
                 error: null,
               },

@@ -7,11 +7,11 @@ import "./workspace-terminal.css";
 
 const LazyXtermSurface = lazy(() => import("./XtermSurface"));
 
-const TERMINAL_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
-const OPEN_DURATION_MS = 260;
-const CLOSE_DOCKED_DURATION_MS = 220;
+const TERMINAL_EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+const OPEN_DURATION_MS = 240;
+const CLOSE_DOCKED_DURATION_MS = 240;
 const CLOSE_MAXIMIZED_DURATION_MS = 200;
-const RESIZE_MODE_DURATION_MS = 280;
+const RESIZE_MODE_DURATION_MS = 240;
 
 interface WorkspaceTerminalHostProps {
   entries: WorkspaceTerminalEntry[];
@@ -81,324 +81,202 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
       closing: boolean;
     } | null>(null);
 
-    const [exitingMinimizeFrom, setExitingMinimizeFrom] = useState<"docked" | "maximized" | null>(null);
+    const lastVisibleModeRef = useRef<"open" | "maximized">("open");
+    const [minimizeComplete, setMinimizeComplete] = useState(entry.mode === "minimized");
+    const [animating, setAnimating] = useState(false);
     const [focusNonce, setFocusNonce] = useState(0);
 
     const cancelActiveAnimations = useCallback(() => {
-      dockAnimRef.current?.cancel();
+      const animations = [dockAnimRef.current, cardAnimRef.current];
       dockAnimRef.current = null;
-      cardAnimRef.current?.cancel();
       cardAnimRef.current = null;
-      const dockEl = dockRef.current;
-      const cardEl = cardRef.current;
-      if (dockEl) {
-        dockEl.classList.remove("is-restoring-from-max");
-        dockEl.style.overflow = "";
+      for (const animation of animations) {
+        if (!animation) continue;
+        // A queued cancellation event must not clean up a newer transition.
+        animation.onfinish = null;
+        animation.oncancel = null;
+        animation.cancel();
       }
-      if (cardEl) {
-        cardEl.style.flex = "";
+      if (dockRef.current) {
+        dockRef.current.classList.remove("is-restoring-from-max");
+        dockRef.current.style.overflow = "";
       }
+      if (cardRef.current) cardRef.current.style.flex = "";
     }, []);
 
     const captureCurrentDimensions = useCallback(() => {
       const cardRect = cardRef.current?.getBoundingClientRect();
-      if (cardRect && cardRect.height > 20) {
-        lastCardHeightRef.current = cardRect.height;
-      }
+      if (cardRect && cardRect.height > 20) lastCardHeightRef.current = cardRect.height;
       const dockRect = dockRef.current?.getBoundingClientRect();
-      if (dockRect && dockRect.height > 20) {
-        lastDockHeightRef.current = dockRect.height;
-      }
+      if (dockRect && dockRect.height > 20) lastDockHeightRef.current = dockRect.height;
     }, []);
 
-    // Keep measured height fresh during normal visible states (window resize,
-    // vertical drag resize, etc.) so composer-triggered minimize or maximize
-    // transitions always animate from the true rendered height.
     useEffect(() => {
       const cardEl = cardRef.current;
       if (!cardEl || typeof ResizeObserver === "undefined") return;
       const observer = new ResizeObserver(() => {
-        if (dockAnimRef.current || cardAnimRef.current) return;
-        captureCurrentDimensions();
+        if (!dockAnimRef.current && !cardAnimRef.current) captureCurrentDimensions();
       });
       observer.observe(cardEl);
       return () => observer.disconnect();
     }, [captureCurrentDimensions]);
 
-    // Cancel any running animation immediately if the user grabs the drag resizer.
-    useEffect(() => {
-      if (isResizing) {
-        cancelActiveAnimations();
-      }
+    useLayoutEffect(() => {
+      if (!isResizing) return;
+      cancelActiveAnimations();
+      setAnimating(false);
     }, [isResizing, cancelActiveAnimations]);
 
-    // Clean up animations on unmount.
     useEffect(() => cancelActiveAnimations, [cancelActiveAnimations]);
 
-    // Orchestrate Open / Minimize / Close / Maximize / Restore transitions.
     useLayoutEffect(() => {
       const prev = prevStateRef.current;
-      prevStateRef.current = {
-        isActiveWorkspace,
-        mode: entry.mode,
-        closing: entry.closing,
-      };
-
+      prevStateRef.current = { isActiveWorkspace, mode: entry.mode, closing: entry.closing };
+      if (entry.mode !== "minimized") lastVisibleModeRef.current = entry.mode;
       const dockEl = dockRef.current;
       const cardEl = cardRef.current;
-      const reduced = prefersReducedMotion();
+      // Read the in-flight presentation before cancelling it. Reversing a
+      // transition must start where the window is now, not at its old endpoint.
+      const fromCardHeight = cardAnimRef.current && cardEl
+        ? cardEl.getBoundingClientRect().height : lastCardHeightRef.current;
+      const fromDockHeight = dockAnimRef.current && dockEl
+        ? dockEl.getBoundingClientRect().height : lastDockHeightRef.current;
+      const fromOpacity = dockAnimRef.current && dockEl
+        ? Number(getComputedStyle(dockEl).opacity) : 1;
+      const fromCardOpacity = cardEl ? Number(getComputedStyle(cardEl).opacity) : 1;
+      const fromCardTransform = cardEl ? getComputedStyle(cardEl).transform : "none";
+      const wasFadingCard = prev?.mode === "minimized" && Boolean(cardAnimRef.current);
+      const wasCollapsing = prev?.mode === "minimized" && Boolean(dockAnimRef.current);
+      cancelActiveAnimations();
+      setAnimating(false);
 
-      // Workspace switched away: cancel animations and settle immediately.
-      if (!isActiveWorkspace) {
-        cancelActiveAnimations();
-        setExitingMinimizeFrom(null);
-        if (entry.closing) {
-          onFinishClose(entry.key, entry.instanceId);
-        }
+      if (!isActiveWorkspace || (prev && !prev.isActiveWorkspace) || prefersReducedMotion() ||
+          !dockEl || !cardEl || typeof dockEl.animate !== "function") {
+        setMinimizeComplete(entry.mode === "minimized");
+        if (entry.closing) onFinishClose(entry.key, entry.instanceId);
+        else if (isActiveWorkspace && entry.mode !== "minimized") setFocusNonce(n => n + 1);
         return;
       }
 
-      // Switched back to this workspace: snap immediately without open/close animation.
-      if (prev && !prev.isActiveWorkspace && isActiveWorkspace) {
-        cancelActiveAnimations();
-        setExitingMinimizeFrom(null);
-        if (entry.closing) {
-          onFinishClose(entry.key, entry.instanceId);
-        } else if (entry.mode !== "minimized") {
-          setFocusNonce((n) => n + 1);
-        }
-        return;
-      }
-
-      // Red close button: PTY is already killed; animate out, then remove entry.
-      if (entry.closing) {
-        if (reduced || !dockEl || !cardEl || typeof dockEl.animate !== "function") {
-          cancelActiveAnimations();
-          onFinishClose(entry.key, entry.instanceId);
+      if (entry.closing || entry.mode === "minimized") {
+        if (prev?.mode === "minimized" && !wasCollapsing) {
+          setMinimizeComplete(true);
+          if (entry.closing) onFinishClose(entry.key, entry.instanceId);
           return;
         }
-        cancelActiveAnimations();
-        if (entry.mode === "maximized") {
-          const anim = cardEl.animate(
-            [
-              { opacity: 1, transform: "scale(1) translateY(0px)" },
-              { opacity: 0, transform: "scale(0.985) translateY(14px)" },
-            ],
-            { duration: CLOSE_MAXIMIZED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
+        setAnimating(true);
+        const maximized = entry.mode === "maximized" ||
+          (entry.mode === "minimized" && lastVisibleModeRef.current === "maximized");
+        let animation: Animation;
+        if (maximized) {
+          cardEl.style.flex = "0 0 auto";
+          animation = cardEl.animate(
+            [{ height: `${fromCardHeight}px`, opacity: fromCardOpacity, transform: fromCardTransform },
+             { height: `${fromCardHeight}px`, opacity: 0, transform: "translateY(12px)" }],
+            { duration: CLOSE_MAXIMIZED_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
           );
-          cardAnimRef.current = anim;
-          anim.onfinish = () => {
-            if (cardAnimRef.current === anim) cardAnimRef.current = null;
-            onFinishClose(entry.key, entry.instanceId);
-          };
-          return;
+          cardAnimRef.current = animation;
+        } else {
+          // A restore can still protrude above the dock when minimized. Keep
+          // that visible frame instead of clipping it to the settled dock size.
+          if (fromCardHeight > cardEl.getBoundingClientRect().height + 1) {
+            dockEl.classList.add("is-restoring-from-max");
+            cardEl.style.flex = "0 0 auto";
+            cardAnimRef.current = cardEl.animate(
+              [{ height: `${fromCardHeight}px` }, { height: `${fromCardHeight}px` }],
+              { duration: CLOSE_DOCKED_DURATION_MS, fill: "both" },
+            );
+          }
+          dockEl.style.overflow = "hidden";
+          animation = dockEl.animate(
+            [{ height: `${fromDockHeight}px`, marginBottom: "12px", opacity: fromOpacity },
+             { height: "0px", marginBottom: "0px", opacity: 0 }],
+            { duration: CLOSE_DOCKED_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
+          );
+          dockAnimRef.current = animation;
         }
-
-        const fromH = dockEl.getBoundingClientRect().height || lastDockHeightRef.current || entry.height;
-        dockEl.style.overflow = "hidden";
-        const dockAnim = dockEl.animate(
-          [
-            { height: `${fromH}px`, marginBottom: "12px", opacity: 1 },
-            { height: "0px", marginBottom: "0px", opacity: 0 },
-          ],
-          { duration: CLOSE_DOCKED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
-        );
-        const cardAnim = cardEl.animate(
-          [{ transform: "translateY(0px)" }, { transform: "translateY(10px)" }],
-          { duration: CLOSE_DOCKED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
-        );
-        dockAnimRef.current = dockAnim;
-        cardAnimRef.current = cardAnim;
-        dockAnim.onfinish = () => {
-          if (dockAnimRef.current === dockAnim) dockAnimRef.current = null;
-          if (cardAnimRef.current === cardAnim) cardAnimRef.current = null;
-          onFinishClose(entry.key, entry.instanceId);
+        animation.onfinish = () => {
+          // Retain the final (hidden) frame until React commits display:none or
+          // unmounts the card. Cancelling first briefly restores its full size.
+          if (entry.closing) onFinishClose(entry.key, entry.instanceId);
+          else setMinimizeComplete(true);
         };
         return;
       }
 
-      // Yellow minimize button or composer toggle -> minimized.
-      if (entry.mode === "minimized") {
-        if (prev && prev.mode !== "minimized" && !reduced && typeof dockEl?.animate === "function") {
-          setExitingMinimizeFrom(prev.mode === "maximized" ? "maximized" : "docked");
-        } else {
-          cancelActiveAnimations();
-          setExitingMinimizeFrom(null);
-        }
-        return;
-      }
+      setMinimizeComplete(false);
+      const finish = () => {
+        cancelActiveAnimations();
+        setAnimating(false);
+        captureCurrentDimensions();
+        setFocusNonce(n => n + 1);
+      };
 
-      // Becoming visible again cancels any in-flight minimize collapse.
-      if (exitingMinimizeFrom !== null) {
-        setExitingMinimizeFrom(null);
-      }
-
-      // Open (fresh mount) or Restore from minimized -> docked.
       if (entry.mode === "open" && (!prev || prev.mode === "minimized")) {
-        const startH =
-          exitingMinimizeFrom === "docked" && dockEl
-            ? dockEl.getBoundingClientRect().height
-            : 0;
-        cancelActiveAnimations();
-        if (!reduced && dockEl && cardEl && typeof dockEl.animate === "function") {
-          dockEl.style.overflow = "hidden";
-          const dockAnim = dockEl.animate(
-            [
-              { height: `${startH}px`, marginBottom: startH > 0 ? "6px" : "0px", opacity: startH > 0 ? 0.6 : 0 },
-              { height: `${entry.height}px`, marginBottom: "12px", opacity: 1 },
-            ],
-            { duration: OPEN_DURATION_MS, easing: TERMINAL_EASE },
+        if (wasFadingCard) {
+          const targetHeight = cardEl.getBoundingClientRect().height;
+          dockEl.classList.add("is-restoring-from-max");
+          cardEl.style.flex = "0 0 auto";
+          setAnimating(true);
+          dockAnimRef.current = dockEl.animate(
+            [{ height: `${wasCollapsing ? fromDockHeight : 0}px`, opacity: fromOpacity },
+             { height: `${entry.height}px`, opacity: 1 }],
+            { duration: OPEN_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
           );
-          const cardAnim = cardEl.animate(
-            [{ transform: startH > 0 ? "translateY(4px)" : "translateY(10px)" }, { transform: "translateY(0px)" }],
-            { duration: OPEN_DURATION_MS, easing: TERMINAL_EASE },
+          const animation = cardEl.animate(
+            [{ height: `${fromCardHeight}px`, opacity: fromCardOpacity, transform: fromCardTransform },
+             { height: `${targetHeight}px`, opacity: 1, transform: "none" }],
+            { duration: OPEN_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
           );
-          dockAnimRef.current = dockAnim;
-          cardAnimRef.current = cardAnim;
-          const finishOpen = () => {
-            if (dockAnimRef.current === dockAnim) dockAnimRef.current = null;
-            if (cardAnimRef.current === cardAnim) cardAnimRef.current = null;
-            if (dockRef.current) dockRef.current.style.overflow = "";
-            captureCurrentDimensions();
-            setFocusNonce((n) => n + 1);
-          };
-          dockAnim.onfinish = finishOpen;
-          dockAnim.oncancel = () => {
-            if (dockAnimRef.current === dockAnim) dockAnimRef.current = null;
-            if (dockRef.current) dockRef.current.style.overflow = "";
-          };
-        } else {
-          setFocusNonce((n) => n + 1);
+          cardAnimRef.current = animation;
+          animation.onfinish = finish;
+          return;
         }
+        const startHeight = wasCollapsing ? fromDockHeight : 0;
+        dockEl.style.overflow = "hidden";
+        setAnimating(true);
+        const animation = dockEl.animate(
+          [{ height: `${startHeight}px`, marginBottom: wasCollapsing ? "12px" : "0px", opacity: wasCollapsing ? fromOpacity : 0 },
+           { height: `${entry.height}px`, marginBottom: "12px", opacity: 1 }],
+          { duration: OPEN_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
+        );
+        dockAnimRef.current = animation;
+        animation.onfinish = finish;
         return;
       }
 
-      // Maximize: docked -> full workbench size (grows smoothly upward from bottom edge).
-      if (entry.mode === "maximized" && prev && prev.mode === "open") {
-        cancelActiveAnimations();
-        if (!reduced && cardEl && typeof cardEl.animate === "function") {
-          const toHeight = cardEl.getBoundingClientRect().height;
-          const fromHeight = Math.max(120, lastCardHeightRef.current || entry.height - 10);
-          if (toHeight > fromHeight + 2) {
-            cardEl.style.flex = "0 0 auto";
-            const anim = cardEl.animate(
-              [{ height: `${fromHeight}px` }, { height: `${toHeight}px` }],
-              { duration: RESIZE_MODE_DURATION_MS, easing: TERMINAL_EASE },
-            );
-            cardAnimRef.current = anim;
-            const cleanup = () => {
-              if (cardAnimRef.current === anim) cardAnimRef.current = null;
-              if (cardRef.current) cardRef.current.style.flex = "";
-            };
-            anim.onfinish = () => {
-              cleanup();
-              captureCurrentDimensions();
-              setFocusNonce((n) => n + 1);
-            };
-            anim.oncancel = cleanup;
-            return;
-          }
+      if (prev && entry.mode !== prev.mode) {
+        const toHeight = cardEl.getBoundingClientRect().height;
+        if (Math.abs(toHeight - fromCardHeight) > 1) {
+          if (entry.mode === "open") dockEl.classList.add("is-restoring-from-max");
+          cardEl.style.flex = "0 0 auto";
+          setAnimating(true);
+          const animation = cardEl.animate(
+            [{ height: `${fromCardHeight}px` }, { height: `${toHeight}px` }],
+            { duration: RESIZE_MODE_DURATION_MS, easing: TERMINAL_EASE, fill: "both" },
+          );
+          cardAnimRef.current = animation;
+          animation.onfinish = finish;
+          return;
         }
-        setFocusNonce((n) => n + 1);
-        return;
       }
-
-      // Restore: maximized -> docked (shrinks smoothly downward back to bottom dock).
-      if (entry.mode === "open" && prev && prev.mode === "maximized") {
-        cancelActiveAnimations();
-        if (!reduced && dockEl && cardEl && typeof cardEl.animate === "function") {
-          const toHeight = cardEl.getBoundingClientRect().height || Math.max(150, entry.height - 10);
-          const fromHeight = Math.max(toHeight, lastCardHeightRef.current || toHeight);
-          if (fromHeight > toHeight + 2) {
-            dockEl.classList.add("is-restoring-from-max");
-            cardEl.style.flex = "0 0 auto";
-            const anim = cardEl.animate(
-              [{ height: `${fromHeight}px` }, { height: `${toHeight}px` }],
-              { duration: RESIZE_MODE_DURATION_MS, easing: TERMINAL_EASE },
-            );
-            cardAnimRef.current = anim;
-            const cleanup = () => {
-              if (cardAnimRef.current === anim) cardAnimRef.current = null;
-              if (dockRef.current) dockRef.current.classList.remove("is-restoring-from-max");
-              if (cardRef.current) cardRef.current.style.flex = "";
-            };
-            anim.onfinish = () => {
-              cleanup();
-              captureCurrentDimensions();
-              setFocusNonce((n) => n + 1);
-            };
-            anim.oncancel = cleanup;
-            return;
-          }
-        }
-        setFocusNonce((n) => n + 1);
-      }
+      setFocusNonce(n => n + 1);
+      // These transitions are driven by mode changes, not output/status updates.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isActiveWorkspace, entry.mode, entry.closing, entry.instanceId]);
 
-    // Run the minimize exit animation once the exit presentation class is committed.
+    // Only release a collapse animation after the hidden presentation commits.
     useLayoutEffect(() => {
-      if (!exitingMinimizeFrom || !isActiveWorkspace || entry.mode !== "minimized" || entry.closing) {
-        return;
+      if (entry.mode === "minimized" && minimizeComplete) {
+        cancelActiveAnimations();
+        setAnimating(false);
       }
-      const dockEl = dockRef.current;
-      const cardEl = cardRef.current;
-      if (!dockEl || !cardEl || typeof dockEl.animate !== "function") {
-        setExitingMinimizeFrom(null);
-        return;
-      }
+    }, [entry.mode, minimizeComplete, cancelActiveAnimations]);
 
-      cancelActiveAnimations();
-
-      if (exitingMinimizeFrom === "maximized") {
-        const anim = cardEl.animate(
-          [
-            { opacity: 1, transform: "scale(1) translateY(0px)" },
-            { opacity: 0, transform: "scale(0.985) translateY(14px)" },
-          ],
-          { duration: CLOSE_MAXIMIZED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
-        );
-        cardAnimRef.current = anim;
-        anim.onfinish = () => {
-          if (cardAnimRef.current === anim) cardAnimRef.current = null;
-          anim.cancel();
-          setExitingMinimizeFrom(null);
-        };
-        return;
-      }
-
-      const fromH = lastDockHeightRef.current || entry.height;
-      dockEl.style.overflow = "hidden";
-      const dockAnim = dockEl.animate(
-        [
-          { height: `${fromH}px`, marginBottom: "12px", opacity: 1 },
-          { height: "0px", marginBottom: "0px", opacity: 0 },
-        ],
-        { duration: CLOSE_DOCKED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
-      );
-      const cardAnim = cardEl.animate(
-        [{ transform: "translateY(0px)" }, { transform: "translateY(10px)" }],
-        { duration: CLOSE_DOCKED_DURATION_MS, easing: TERMINAL_EASE, fill: "forwards" },
-      );
-      dockAnimRef.current = dockAnim;
-      cardAnimRef.current = cardAnim;
-      dockAnim.onfinish = () => {
-        if (dockAnimRef.current === dockAnim) dockAnimRef.current = null;
-        if (cardAnimRef.current === cardAnim) cardAnimRef.current = null;
-        dockAnim.cancel();
-        cardAnim.cancel();
-        if (dockRef.current) dockRef.current.style.overflow = "";
-        setExitingMinimizeFrom(null);
-      };
-    }, [exitingMinimizeFrom, isActiveWorkspace, entry.mode, entry.closing, entry.height, cancelActiveAnimations]);
-
-    const isMinimizingOut = isActiveWorkspace && entry.mode === "minimized" && exitingMinimizeFrom !== null;
-    const isVisible = isActiveWorkspace && (entry.mode !== "minimized" || isMinimizingOut);
-    const isMaximized =
-      isActiveWorkspace && (entry.mode === "maximized" || exitingMinimizeFrom === "maximized");
-    const isDocked =
-      isActiveWorkspace &&
-      ((entry.mode === "open" && !isMaximized) || exitingMinimizeFrom === "docked");
+    const isVisible = isActiveWorkspace && (entry.mode !== "minimized" || !minimizeComplete);
+    const isMaximized = isActiveWorkspace && (entry.mode === "maximized" ||
+      (entry.mode === "minimized" && lastVisibleModeRef.current === "maximized"));
+    const isDocked = isActiveWorkspace && !isMaximized;
     const isInteractive = isActiveWorkspace && entry.mode !== "minimized" && !entry.closing;
     const folderName = workspaceDisplayName(entry.workspacePath);
 
@@ -428,7 +306,7 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
         data-terminal-mode={entry.mode}
         data-terminal-status={entry.status}
         data-terminal-closing={entry.closing ? "true" : undefined}
-        className={`workspace-terminal-dock${isMaximized ? " is-maximized" : ""}${isDocked ? " is-docked" : ""}${!isVisible ? " is-hidden" : ""}${isResizing ? " is-resizing" : ""}${entry.closing || isMinimizingOut ? " is-exiting" : ""}`}
+        className={`workspace-terminal-dock${isMaximized ? " is-maximized" : ""}${isDocked ? " is-docked" : ""}${!isVisible ? " is-hidden" : ""}${isResizing ? " is-resizing" : ""}${entry.closing || entry.mode === "minimized" ? " is-exiting" : ""}`}
         style={isDocked ? { height: `${entry.height}px` } : undefined}
       >
         {isDocked && (
@@ -523,7 +401,9 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
               <LazyXtermSurface
                 key={entry.instanceId}
                 instanceId={entry.instanceId}
+                ptyBackend={entry.ptyBackend}
                 visible={isInteractive}
+                animating={animating}
                 focusNonce={focusNonce}
                 onData={(data) => onWriteInput(entry.key, data)}
                 onResize={(cols, rows) => onResize(entry.key, cols, rows)}
