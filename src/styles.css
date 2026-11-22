@@ -1185,14 +1185,14 @@ h3 {
 
 .sidebar-archive-btn.is-active {
   background: var(--brand-subtle);
-  color: var(--brand-default);
+  color: var(--text-primary);
   border-color: var(--brand-border);
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
 }
 
 .sidebar-archive-btn.is-active:hover {
   background: var(--brand-subtle);
-  color: var(--brand-default);
+  color: var(--text-primary);
   border-color: var(--brand-border);
 }
 

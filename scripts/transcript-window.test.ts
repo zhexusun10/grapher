@@ -430,6 +430,44 @@ test("summarizeActivityGroup formats Codex-style summaries in Chinese and Englis
     { id: "r3", type: "tool_call", toolName: "read", toolPhase: "executing", args: { path: "src/c.ts" }, status: "running" },
   ], zh);
   assert.equal(finalizedNew.text, "已浏览 3 个文件");
+
+  // While a live group is still open or running, keep single-tool summaries in
+  // the compact aggregate form so the bar never stretches horizontally with a
+  // full command/path and then abruptly snaps back when a second tool arrives.
+  const longBashCmd = "rg -n 'handleExpandableContentChange' src/components/views/GraphWorkbench.tsx src/components/ActivitySummaryRow.tsx";
+  const liveSingleBashRunning = summarizeActivityGroup([
+    { id: "b1", type: "tool_call", toolName: "bash", toolPhase: "executing", args: { command: longBashCmd }, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(liveSingleBashRunning.text, "正在运行 1 条命令");
+  assert.equal(liveSingleBashRunning.isRunning, true);
+
+  const liveSingleBashGap = summarizeActivityGroup([
+    { id: "b1", type: "tool_call", toolName: "bash", toolPhase: "executing", args: { command: longBashCmd }, status: "success" },
+  ], zh, { isOpen: true });
+  assert.equal(liveSingleBashGap.text, "已运行 1 条命令");
+
+  const liveSingleRead = summarizeActivityGroup([
+    { id: "r1", type: "tool_call", toolName: "read", toolPhase: "executing", args: { path: "src/components/views/GraphWorkbench.tsx" }, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(liveSingleRead.text, "已浏览 1 个文件");
+
+  // Live transcript projection marks only the trailing open group as summaryOpen.
+  const liveProjected = visibleTranscriptRows([
+    { id: "t0", type: "tool_call", toolCallId: "c0", toolName: "bash", args: { command: "pwd" }, status: "success" },
+    { id: "txt0", type: "text", role: "assistant", content: "Checked cwd." },
+    { id: "t1", type: "tool_call", toolCallId: "c1", toolName: "bash", args: { command: longBashCmd }, status: "success" },
+  ], undefined, { collapseCards: true, live: true });
+  assert.equal(liveProjected.rows.length, 3);
+  assert.equal(liveProjected.rows[0].summaryOpen, undefined);
+  assert.equal(liveProjected.rows[2].summaryOpen, true);
+  assert.equal(
+    summarizeActivityGroup(liveProjected.rows[0].summaryItems!, zh, { isOpen: liveProjected.rows[0].summaryOpen }).text,
+    "已运行 pwd",
+  );
+  assert.equal(
+    summarizeActivityGroup(liveProjected.rows[2].summaryItems!, zh, { isOpen: liveProjected.rows[2].summaryOpen }).text,
+    "已运行 1 条命令",
+  );
 });
 
 test("card-shell projections validate byte cursors, enforce LRU string sizing, and hydrate omitted cards cleanly", () => {

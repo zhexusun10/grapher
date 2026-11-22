@@ -7,7 +7,7 @@ export function isCollapsibleTranscriptCard(item: TranscriptItem): boolean {
     Boolean(item.isError || item.status === "error");
 }
 
-function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, number>) {
+function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, number>, live = false) {
   const boundaries = new Set(starts.values());
   const collapsed: TranscriptItem[] = [];
   const collapsedRanges: Array<{ start: number; end: number }> = [];
@@ -23,6 +23,7 @@ function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, num
     const last = group[group.length - 1];
     const hasRunning = group.some(item => item.status === "running");
     const hasError = group.some(item => Boolean(item.errorItems?.length || item.isError || item.status === "error"));
+    const summaryOpen = end === rows.length && (live || hasRunning);
     // Only the leading settled group (`index === 0`) can grow at the front when
     // older history pages prepend, so only it needs to anchor on its trailing
     // item. Every other group (and an actively running tail) anchors on its
@@ -42,6 +43,7 @@ function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, num
       status: hasRunning ? "running" : hasError ? "error" : "success",
       timestamp: first.timestamp,
       summaryItems: group,
+      ...(summaryOpen ? { summaryOpen: true } : {}),
     });
     if (end - index > 1) collapsedRanges.push({ start: index, end });
     index = end;
@@ -59,7 +61,7 @@ function collapseTranscriptCards(rows: TranscriptItem[], starts: Map<string, num
 export function visibleTranscriptRows(
   rows: TranscriptItem[],
   starts = new Map<string, number>(),
-  options?: { collapseCards?: boolean },
+  options?: { collapseCards?: boolean; live?: boolean },
 ) {
   const blank = (item: TranscriptItem) => item.type === "text" && item.role === "assistant" &&
     !item.content?.trim() && !item.images?.length && !item.files?.length;
@@ -103,7 +105,7 @@ export function visibleTranscriptRows(
         starts: new Map([...visibleStarts].map(([source, index]) => [source,
           index - collapsedRanges.reduce((removed, range) => removed + (range.end <= index ? range.end - range.start - 1 : 0), 0)])),
       };
-  return options?.collapseCards ? collapseTranscriptCards(base.rows, base.starts) : base;
+  return options?.collapseCards ? collapseTranscriptCards(base.rows, base.starts, Boolean(options.live)) : base;
 }
 
 export function estimateTranscriptRowHeight(id: string): number {

@@ -378,6 +378,8 @@ export interface TranscriptItem {
   errorItems?: TranscriptItem[];
   /** Collapsible cards folded into this summary row in compact card-collapse mode. */
   summaryItems?: TranscriptItem[];
+  /** True while this trailing summary group can still accumulate more cards. */
+  summaryOpen?: boolean;
   status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
   /** Tool-reported result truncation, never the bounded UI display preview. */

@@ -721,3 +721,338 @@ fn get_file_diff_returns_unified_hunks_untracked_files_and_rejects_traversal() {
     )
     .is_err());
 }
+
+#[test]
+fn get_file_diff_falls_back_to_transcript_when_serial_changes_are_committed_or_non_git() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    crate::workspace::git(&repo, &["init", "-q"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.name", "Tester"]).unwrap();
+    fs::write(repo.join("src/main.rs"), "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+    crate::workspace::git(&repo, &["add", "."]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-qm", "initial"]).unwrap();
+
+    // Simulate a serial/source-direct execution that edited src/main.rs and then committed it.
+    fs::write(repo.join("src/main.rs"), "fn main() {\n    println!(\"new\");\n}\n").unwrap();
+    crate::workspace::git(&repo, &["add", "."]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-qm", "agent commit"]).unwrap();
+
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run = Uuid::new_v4().to_string();
+    runtime.state.run_id = run.clone();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "serial committed diff".into(),
+                nodes: vec![Node {
+                    id: "task".into(),
+                    task: "update main".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": repo, "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: Execution {
+                id: "serial-exec".into(),
+                node: "task".into(),
+                revision: 1,
+                attempt: 1,
+                session_id: "s1".into(),
+                worktree: repo.to_string_lossy().into_owned(),
+                before: String::new(),
+                workspace_lineage: vec![],
+                after: None,
+                input: None,
+                result: None,
+                status: "running".into(),
+                output: String::new(),
+                output_bytes: 0,
+                pid: None,
+                started_at: now(),
+                completed_at: None,
+                metrics: None,
+            },
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    let transcript = [
+        serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": "e1",
+            "toolName": "edit",
+            "args": {
+                "path": "src/main.rs",
+                "edits": [{
+                    "oldText": "    println!(\"old\");",
+                    "newText": "    println!(\"new\");"
+                }]
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "e1",
+            "toolName": "edit",
+            "isError": false
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "serial-exec".into(),
+            text: transcript,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: "serial-exec".into(),
+            head: String::new(),
+            output: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+
+    let diff = get_file_diff(
+        &serde_json::json!({
+            "runId": run,
+            "path": "src/main.rs",
+            "status": "modified",
+            "nodes": ["task"]
+        }),
+        &service,
+    )
+    .unwrap();
+    let lines = diff["lines"].as_array().unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["kind"] == "removed" && line["text"] == "    println!(\"old\");"),
+        "expected removed line from transcript fallback, got: {diff:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["kind"] == "added" && line["text"] == "    println!(\"new\");"),
+        "expected added line from transcript fallback, got: {diff:?}"
+    );
+
+    // Also verify a plain non-git folder modified file returns the targeted edit
+    // diff from transcript instead of dumping the whole file as added lines.
+    let plain_temp = tempfile::tempdir().unwrap();
+    let plain = plain_temp.path().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("notes.txt"), "unchanged 1\nchanged\nunchanged 2\n").unwrap();
+    let mut plain_runtime = Runtime::open(plain_temp.path()).unwrap();
+    let plain_run = Uuid::new_v4().to_string();
+    plain_runtime.state.run_id = plain_run.clone();
+    plain_runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "plain folder edit".into(),
+                nodes: vec![Node {
+                    id: "task".into(),
+                    task: "edit notes".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": plain, "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    plain_runtime
+        .emit(EventKind::Started {
+            execution: Execution {
+                id: "plain-exec".into(),
+                node: "task".into(),
+                revision: 1,
+                attempt: 1,
+                session_id: "s1".into(),
+                worktree: plain.to_string_lossy().into_owned(),
+                before: String::new(),
+                workspace_lineage: vec![],
+                after: None,
+                input: None,
+                result: None,
+                status: "running".into(),
+                output: String::new(),
+                output_bytes: 0,
+                pid: None,
+                started_at: now(),
+                completed_at: None,
+                metrics: None,
+            },
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    let plain_log = [
+        serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": "p1",
+            "toolName": "edit",
+            "args": {
+                "path": "notes.txt",
+                "edits": [{ "oldText": "original", "newText": "changed" }]
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "p1",
+            "toolName": "edit",
+            "isError": false
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+    plain_runtime
+        .emit(EventKind::Output {
+            execution_id: "plain-exec".into(),
+            text: plain_log,
+        })
+        .unwrap();
+    plain_runtime
+        .emit(EventKind::Finished {
+            execution_id: "plain-exec".into(),
+            head: String::new(),
+            output: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    let plain_service = Arc::new(Service {
+        runtime: Mutex::new(plain_runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+    let plain_diff = get_file_diff(
+        &serde_json::json!({
+            "runId": plain_run,
+            "path": "notes.txt",
+            "status": "modified",
+            "nodes": ["task"]
+        }),
+        &plain_service,
+    )
+    .unwrap();
+    let plain_lines = plain_diff["lines"].as_array().unwrap();
+    assert!(plain_lines
+        .iter()
+        .any(|line| line["kind"] == "removed" && line["text"] == "original"));
+    assert!(plain_lines
+        .iter()
+        .any(|line| line["kind"] == "added" && line["text"] == "changed"));
+    assert!(!plain_lines
+        .iter()
+        .any(|line| line["text"] == "unchanged 1"));
+}
+
+#[test]
+fn get_file_diff_reads_live_worktree_for_failed_execution_without_after_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    crate::workspace::git(&repo, &["init", "-q"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
+    crate::workspace::git(&repo, &["config", "user.name", "Tester"]).unwrap();
+    fs::write(repo.join("item.txt"), "before\n").unwrap();
+    crate::workspace::git(&repo, &["add", "."]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-qm", "base"]).unwrap();
+    let before = crate::workspace::git(&repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    fs::write(repo.join("item.txt"), "partial edit\n").unwrap();
+
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run = Uuid::new_v4().to_string();
+    runtime.state.run_id = run.clone();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "failed worktree diff".into(),
+                nodes: vec![Node {
+                    id: "worker".into(),
+                    task: "edit item".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": repo, "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime.state.executions.push(Execution {
+        id: "failed-exec".into(),
+        node: "worker".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "s1".into(),
+        worktree: repo.to_string_lossy().into_owned(),
+        before,
+        after: None,
+        workspace_lineage: vec![],
+        input: None,
+        result: None,
+        status: "failed".into(),
+        started_at: 1,
+        completed_at: Some(2),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        metrics: None,
+    });
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+
+    let diff = get_file_diff(
+        &serde_json::json!({ "runId": run, "path": "item.txt", "executionIds": ["failed-exec"] }),
+        &service,
+    )
+    .unwrap();
+    let lines = diff["lines"].as_array().unwrap();
+    assert!(lines
+        .iter()
+        .any(|line| line["kind"] == "removed" && line["text"] == "before"));
+    assert!(lines
+        .iter()
+        .any(|line| line["kind"] == "added" && line["text"] == "partial edit"));
+}

@@ -1698,3 +1698,342 @@ test("fast upward scrolling and older-page prepends in expanded mode have zero b
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("clicking a collapsed card summary strip always expands downward without shifting upward", { timeout: 30_000 }, async () => {
+  const fullLog = Array.from({ length: 16 }, (_, index) => [
+    JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: `Reasoning step ${index}` },
+          { type: "toolCall", id: `down-a-${index}`, name: "read", arguments: { path: `src/file_${index}.ts` } },
+          { type: "toolCall", id: `down-b-${index}`, name: "bash", arguments: { command: `npm test -- step-${index}` } },
+        ],
+      },
+    }),
+    JSON.stringify({ type: "tool_execution_end", toolCallId: `down-a-${index}`, toolName: "read", isError: false }),
+    JSON.stringify({ type: "tool_execution_end", toolCallId: `down-b-${index}`, toolName: "bash", isError: false }),
+    JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `Completed step ${index}.\n\nDetails for step ${index}.` }] },
+    }),
+  ].join("\n")).join("\n") + "\n";
+  const logBytes = Buffer.from(fullLog);
+
+  const context = await browser.newContext({ viewport: { width: 1280, height: 760 }, locale: "en-US", reducedMotion: "no-preference" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "get_execution_output") {
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: fullLog, startOffset: 0, nextOffset: logBytes.length, totalBytes: logBytes.length,
+        complete: true, status: "completed", ...(body.summaryOnly ? { summaryOnly: true } : {}),
+      } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null, executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=node&settled=1&bytes=${logBytes.length}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    const scroller = page.locator(".initial-query-scroll");
+
+    const clickAndSampleDownward = async (rowId) => {
+      const trigger = page.locator(`[data-transcript-id="${rowId}"] [data-testid="activity-summary-trigger"]`);
+      const before = await trigger.evaluate(el => {
+        const row = el.closest('[data-testid="activity-summary-row"]');
+        const trigRect = el.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return { top: trigRect.top, width: trigRect.width, rowBottom: rowRect.bottom, rowHeight: rowRect.height };
+      });
+      await page.evaluate((id) => {
+        window.__expandSamples = [];
+        const start = performance.now();
+        function tick() {
+          const el = document.querySelector(`[data-transcript-id="${id}"] [data-testid="activity-summary-trigger"]`);
+          const row = el?.closest('[data-testid="activity-summary-row"]');
+          if (el && row) {
+            const tr = el.getBoundingClientRect();
+            const rr = row.getBoundingClientRect();
+            window.__expandSamples.push({ top: +tr.top.toFixed(1), width: +tr.width.toFixed(1), bottom: +rr.bottom.toFixed(1), height: +rr.height.toFixed(1) });
+          }
+          if (performance.now() - start < 420) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      }, rowId);
+      await trigger.click();
+      await page.waitForTimeout(450);
+      const samples = await page.evaluate(() => window.__expandSamples);
+      const after = await trigger.evaluate(el => {
+        const row = el.closest('[data-testid="activity-summary-row"]');
+        const trigRect = el.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return { top: trigRect.top, width: trigRect.width, rowBottom: rowRect.bottom, rowHeight: rowRect.height };
+      });
+      return { before, after, samples };
+    };
+
+    // Case 1: At the very bottom (following output), clicking a visible summary strip
+    // must keep its top stationary and grow strictly downward (never pin to bottom).
+    await scroller.evaluate(el => { el.scrollTop = el.scrollHeight; });
+    await page.waitForTimeout(150);
+    const bottomRowId = await scroller.evaluate(el => {
+      const bounds = el.getBoundingClientRect();
+      const rows = [...el.querySelectorAll('[data-transcript-id^="summary_"]')].filter(row => {
+        const r = row.getBoundingClientRect();
+        return r.top >= bounds.top + 80 && r.bottom <= bounds.bottom - 140;
+      });
+      return rows.at(-1)?.dataset.transcriptId ?? null;
+    });
+    assert.ok(bottomRowId, "expected a visible summary strip while scrolled at bottom");
+    const followExpand = await clickAndSampleDownward(bottomRowId);
+    assert.ok(followExpand.after.rowHeight > followExpand.before.rowHeight + 60, `summary must expand: ${JSON.stringify(followExpand)}`);
+    assert.ok(Math.abs(followExpand.after.top - followExpand.before.top) <= 1.5,
+      `bottom-following summary strip moved vertically instead of expanding downward: ${JSON.stringify({ before: followExpand.before, after: followExpand.after, samples: followExpand.samples })}`);
+    assert.ok(followExpand.samples.every(s => Math.abs(s.top - followExpand.before.top) <= 1.5),
+      `bottom-following summary strip shifted mid-animation: ${JSON.stringify(followExpand.samples)}`);
+    assert.ok(followExpand.after.rowBottom > followExpand.before.rowBottom + 60,
+      `summary row bottom must grow downward: ${JSON.stringify({ before: followExpand.before, after: followExpand.after })}`);
+
+    // Collapse it back; header stays anchored in place too.
+    const collapseResult = await clickAndSampleDownward(bottomRowId);
+    assert.ok(Math.abs(collapseResult.after.top - collapseResult.before.top) <= 1.5,
+      `collapsing summary strip shifted header: ${JSON.stringify({ before: collapseResult.before, after: collapseResult.after })}`);
+
+    // Case 2: Scrolled up with a summary strip positioned near the lower edge of the
+    // visible viewport (where card-reveal delta would otherwise shift the strip upward).
+    const lowerRowId = await scroller.evaluate(el => {
+      el.dispatchEvent(new WheelEvent("wheel", { deltaY: -320, bubbles: true }));
+      el.scrollTop = Math.max(0, el.scrollTop - 320);
+      const composer = el.closest(".initial-query-view")?.querySelector(".pane-bottom-chat");
+      const visibleBottom = Math.min(el.getBoundingClientRect().bottom, composer?.getBoundingClientRect().top ?? el.getBoundingClientRect().bottom);
+      const candidate = [...el.querySelectorAll('[data-transcript-id^="summary_"]')].find(row => {
+        const r = row.getBoundingClientRect();
+        return r.top > el.getBoundingClientRect().top + 120 && r.bottom < visibleBottom - 20;
+      });
+      if (!candidate) return null;
+      // Place this strip 60px above the composer so its expanded cards extend past visibleBottom.
+      const r = candidate.getBoundingClientRect();
+      el.scrollTop += r.top - (visibleBottom - 60);
+      return candidate.dataset.transcriptId;
+    });
+    await page.waitForTimeout(150);
+    assert.ok(lowerRowId, "expected a lower-viewport summary strip while scrolled up");
+    const scrolledExpand = await clickAndSampleDownward(lowerRowId);
+    assert.ok(scrolledExpand.after.rowHeight > scrolledExpand.before.rowHeight + 60, `scrolled summary must expand: ${JSON.stringify(scrolledExpand)}`);
+    assert.ok(Math.abs(scrolledExpand.after.top - scrolledExpand.before.top) <= 1.5,
+      `lower-viewport summary strip shifted upward instead of expanding downward: ${JSON.stringify({ before: scrolledExpand.before, after: scrolledExpand.after, samples: scrolledExpand.samples })}`);
+    assert.ok(scrolledExpand.samples.every(s => Math.abs(s.top - scrolledExpand.before.top) <= 1.5),
+      `lower-viewport summary strip shifted mid-animation: ${JSON.stringify(scrolledExpand.samples)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("live collapsed summary strip stays compact without stretching horizontally and snapping back", { timeout: 30_000 }, async () => {
+  const step1 = JSON.stringify({
+    type: "message_update",
+    assistantMessageEvent: {
+      type: "toolcall_start",
+      contentIndex: 0,
+      id: "live-c1",
+      toolName: "bash",
+      arguments: {},
+    },
+  }) + "\n";
+  const step2 = step1 + JSON.stringify({
+    type: "tool_execution_start",
+    toolCallId: "live-c1",
+    toolName: "bash",
+    args: {
+      command: "rg -n 'handleExpandableContentChange|summarizeActivityGroup' src/components/views/GraphWorkbench.tsx src/components/ActivitySummaryRow.tsx src/services/activitySummary.ts",
+    },
+  }) + "\n";
+  const step3 = step2 + JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "live-c1",
+    toolName: "bash",
+    isError: false,
+    result: { content: [{ type: "text", text: "ok" }], details: { exitCode: 0 } },
+  }) + "\n";
+  const step4 = step3 + JSON.stringify({
+    type: "tool_execution_start",
+    toolCallId: "live-c2",
+    toolName: "bash",
+    args: { command: "npm test" },
+  }) + "\n";
+
+  const context = await browser.newContext({ viewport: { width: 1280, height: 760 }, locale: "en-US" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  let currentLog = step1;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "get_execution_output") {
+      const bytes = Buffer.from(currentLog);
+      const startOffset = body.tail ? 0 : Math.min(body.offset ?? 0, bytes.length);
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: bytes.subarray(startOffset).toString(),
+        startOffset, nextOffset: bytes.length, totalBytes: bytes.length,
+        complete: true, status: "running",
+      } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null, executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=serial&settled=0&bytes=${Buffer.byteLength(step1)}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    const trigger = page.getByTestId("activity-summary-trigger").first();
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toContainText("Running 1 command");
+    const w1 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+
+    currentLog = step2;
+    await page.evaluate(() => window.changesAudit.update());
+    await page.waitForTimeout(450);
+    await expect(trigger).toContainText("Running 1 command");
+    const w2 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+
+    currentLog = step3;
+    await page.evaluate(() => window.changesAudit.update());
+    await expect(trigger).toContainText("Ran 1 command");
+    const w3 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+
+    currentLog = step4;
+    await page.evaluate(() => window.changesAudit.update());
+    await expect(trigger).toContainText("Ran 2 commands");
+    const w4 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+
+    assert.ok(w2 <= w1 + 20, `single running tool stretched strip horizontally: ${JSON.stringify({ w1, w2, w3, w4 })}`);
+    assert.ok(w3 <= w1 + 20, `single completed tool in open live group stretched strip horizontally: ${JSON.stringify({ w1, w2, w3, w4 })}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("expanding all cards does not replay the expand animation for already-opened summary rows", { timeout: 30_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, locale: "en-US", reducedMotion: "no-preference" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_execution_output") {
+      const body = route.request().postDataJSON();
+      const current = await page.evaluate(() => ({ outputText: window.changesAudit.outputText, running: window.changesAudit.running }));
+      const bytes = Buffer.from(current.outputText);
+      const startOffset = body.tail ? 0 : Math.min(body.offset ?? 0, bytes.length);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        content: bytes.subarray(startOffset).toString(), startOffset, nextOffset: bytes.length,
+        totalBytes: bytes.length, complete: true, status: current.running ? "running" : "completed" } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const body = route.request().postDataJSON();
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null,
+        executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
+    await route.fulfill({ json: { result: { list_files: { files: [] }, list_skills: { skills: [] } }[command] ?? {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=serial&cards=1&settled=1`, { waitUntil: "networkidle" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+
+    const triggers = page.getByTestId("activity-summary-trigger");
+    await expect(triggers).toHaveCount(2);
+
+    // Expand only the second summary strip and open one of its nested tool cards.
+    await triggers.nth(1).click();
+    await page.waitForTimeout(350);
+    const nestedToolHeader = page.getByTestId("activity-summary-cards").getByTestId("tool-call-card").first().locator(".tool-call-header");
+    await nestedToolHeader.click();
+    await page.waitForTimeout(300);
+    await expect(nestedToolHeader).toHaveAttribute("aria-expanded", "true");
+
+    const beforeOpenedCardsHeight = await page.evaluate(() => {
+      const rows = document.querySelectorAll('[data-testid="activity-summary-row"]');
+      const cards = rows[1]?.querySelector('[data-testid="activity-summary-cards"]');
+      if (!cards) return 0;
+      const paddingTop = parseFloat(getComputedStyle(cards).paddingTop) || 0;
+      return Math.round(cards.getBoundingClientRect().height - paddingTop);
+    });
+    assert.ok(beforeOpenedCardsHeight > 80, `expected opened cards height, got ${beforeOpenedCardsHeight}`);
+
+    // Click "Expand cards" and sample both summary rows across every rAF frame.
+    await page.evaluate(() => {
+      window.__globalExpandSamples = [];
+      const start = performance.now();
+      function tick() {
+        const rows = document.querySelectorAll('[data-testid="activity-summary-row"]');
+        if (rows.length === 2) {
+          const r0Body = rows[0].querySelector(".activity-summary-body-track");
+          const r1Body = rows[1].querySelector(".activity-summary-body-track");
+          const r1Header = rows[1].querySelector(".activity-summary-header-track");
+          if (r0Body && r1Body && r1Header) {
+            window.__globalExpandSamples.push({
+              r0BodyH: Math.round(r0Body.getBoundingClientRect().height),
+              r1BodyH: Math.round(r1Body.getBoundingClientRect().height),
+              r1BodyOpacity: parseFloat(getComputedStyle(r1Body).opacity),
+              r1HeaderH: Math.round(r1Header.getBoundingClientRect().height),
+            });
+          }
+        }
+        if (performance.now() - start < 380) requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    });
+    await page.getByTestId("collapse-cards-trigger").click();
+    await page.waitForTimeout(420);
+    await expect(page.getByTestId("activity-summary-row")).toHaveCount(0);
+
+    const samples = await page.evaluate(() => window.__globalExpandSamples);
+    assert.ok(samples.length > 0, "expected transition frames for expanding cards");
+    // The already-opened summary row's cards must NEVER collapse to 0 or fade out.
+    assert.ok(
+      samples.every(s => s.r1BodyH >= beforeOpenedCardsHeight - 2 && s.r1BodyOpacity >= 0.99),
+      `already-opened summary row replayed expand animation: before=${beforeOpenedCardsHeight} samples=${JSON.stringify(samples)}`,
+    );
+    // Its header strip still animates closed.
+    assert.ok(
+      samples.some(s => s.r1HeaderH > 10) && samples.some(s => s.r1HeaderH < samples[0].r1HeaderH),
+      `expected opened summary header to fold away smoothly: ${JSON.stringify(samples)}`,
+    );
+    // The nested tool card opened inside the summary row stays expanded after transition finishes.
+    await expect(page.getByTestId("tool-call-card").nth(1).locator(".tool-call-header")).toHaveAttribute("aria-expanded", "true");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});

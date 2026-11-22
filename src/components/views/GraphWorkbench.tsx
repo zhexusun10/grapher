@@ -1899,12 +1899,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [conversationViewKey, pinContentBottom, resumeFollowingAfterLayoutScroll, scheduleContentPin, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
-    // Expanding a card while the reader is already following the newest output
-    // must not turn that follow off; only a deliberately scrolled-up reader gets
-    // the in-place reveal. The follow state is read before suppression starts.
-    const followOutput = shouldFollowOutput();
+    const isActivitySummary = Boolean(card?.classList.contains("activity-summary-row"));
+    const insideActivitySummary = isActivitySummary || Boolean(card?.closest(".activity-summary-row"));
+    // Expanding a collapsed card summary strip must always open strictly downward
+    // from its clicked header position instead of pinning to the bottom or shifting
+    // the strip upward. Normal cards retain follow-output behavior when the reader
+    // is already following the newest output.
+    const followOutput = !insideActivitySummary && shouldFollowOutput();
     suppressAutoScrollRef.current = true;
-    if (!followOutput) setUserScrolledUp(true);
+    if (isActivitySummary) {
+      if (expanded) userScrolledAwayRef.current = true;
+      setUserScrolledUp(true);
+    } else if (!followOutput) {
+      setUserScrolledUp(true);
+    }
     expandedCardObserverRef.current?.disconnect();
     expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
@@ -1917,17 +1925,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (scroll) {
         if (followOutput && shouldFollowOutput()) {
           scroll.scrollTop = scroll.scrollHeight;
-          lastScrollTopRef.current = scroll.scrollTop;
         }
+        lastScrollTopRef.current = scroll.scrollTop;
         prevScrollHeightRef.current = scroll.scrollHeight;
       }
       suppressAutoScrollRef.current = false;
+      if (isActivitySummary && expanded && scroll) {
+        const distanceFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+        if (distanceFromBottom > 1) {
+          setScrollBottomVisible(!isUnrunNode && distanceFromBottom > scroll.clientHeight / 2);
+          return;
+        }
+      }
       handleChatScroll();
     };
 
     // Follow the card during its opening animation without pulling a tall
     // card's already-visible header to the top of a short conversation pane.
-    if (expanded && card) {
+    if (isActivitySummary) {
+      // Keep the clicked summary strip anchored in place so its cards always
+      // expand downward and collapse back up without pushing the strip upward.
+      expandedCardTimerRef.current = setTimeout(() => {
+        expandedCardTimerRef.current = null;
+        finishResize();
+      }, CARDS_TRANSITION_DURATION_MS + 40);
+    } else if (expanded && card) {
       const reveal = () => {
         const scroll = chatScrollRef.current;
         if (!scroll || !scroll.contains(card)) return;
@@ -1948,7 +1970,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         // while its grid row is still clipped. Use that target height so a card
         // that will end up taller than the viewport never scrolls partway while
         // it briefly looks short enough.
-        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body, .activity-summary-cards");
+        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body");
         const targetHeight = body
           ? Math.max(cardBounds.height, headerBounds.height + body.offsetHeight + (card.offsetHeight - card.clientHeight))
           : cardBounds.height;
@@ -1996,7 +2018,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         finishResize();
       }, 260);
     }
-  }, [handleChatScroll, setUserScrolledUp, shouldFollowOutput]);
+  }, [handleChatScroll, isUnrunNode, setScrollBottomVisible, setUserScrolledUp, shouldFollowOutput]);
 
   const followExecutionExpansion = useCallback((panelEl: HTMLElement, hasExpandedBelow: boolean) => {
     if (expandedCardObserverRef.current) {
@@ -3719,6 +3741,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   type: "activity_summary",
                                   role: "assistant",
                                   status: isPlanning && plannerStream.plannerThinkingActive ? "running" : "success",
+                                  summaryOpen: isPlanning,
                                   summaryItems: [{
                                     id: "live_planner_thinking",
                                     type: "thinking",

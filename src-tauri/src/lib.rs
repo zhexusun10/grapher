@@ -11,6 +11,8 @@ pub mod migration;
 pub mod paths;
 pub mod runtime_lock;
 pub mod sidecar;
+#[cfg(desktop)]
+pub mod terminal;
 
 use managed_git::{
     existing_managed_git, expected_managed_git_path, GitBootstrapManager, GitBootstrapStatus,
@@ -75,6 +77,19 @@ impl Resource for SidecarShutdownGuard {}
 impl Drop for SidecarShutdownGuard {
     fn drop(&mut self) {
         let _ = self.0.shutdown();
+    }
+}
+
+#[cfg(desktop)]
+struct TerminalShutdownGuard(Arc<terminal::TerminalManager>);
+
+#[cfg(desktop)]
+impl Resource for TerminalShutdownGuard {}
+
+#[cfg(desktop)]
+impl Drop for TerminalShutdownGuard {
+    fn drop(&mut self) {
+        self.0.kill_all();
     }
 }
 
@@ -453,6 +468,50 @@ fn open_desktop_notification_settings() -> Result<(), String> {
     {
         Ok(())
     }
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn terminal_create(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<terminal::TerminalManager>>,
+    workspace_path: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<terminal::TerminalSessionInfo, String> {
+    let sink = Arc::new(terminal::TauriTerminalEventSink::new(app));
+    state.create_session(sink, &workspace_path, cols, rows)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn terminal_write(
+    state: tauri::State<'_, Arc<terminal::TerminalManager>>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    state.write_session(&session_id, &data)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn terminal_resize(
+    state: tauri::State<'_, Arc<terminal::TerminalManager>>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    state.resize_session(&session_id, cols, rows)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn terminal_kill(
+    state: tauri::State<'_, Arc<terminal::TerminalManager>>,
+    session_id: String,
+) -> Result<(), String> {
+    state.kill_session(&session_id);
+    Ok(())
 }
 
 fn decode_base64_std(input: &str) -> Result<Vec<u8>, &'static str> {
@@ -1141,6 +1200,13 @@ pub fn run() {
             if let Some(sidecar) = state.sidecar() {
                 app.resources_table().add(SidecarShutdownGuard(sidecar));
             }
+            #[cfg(desktop)]
+            {
+                let terminal_manager = Arc::new(terminal::TerminalManager::new());
+                app.resources_table()
+                    .add(TerminalShutdownGuard(Arc::clone(&terminal_manager)));
+                app.manage(terminal_manager);
+            }
             app.manage(state);
             app.manage(git_bootstrap);
             app.manage(PendingNotificationClickState::default());
@@ -1157,7 +1223,11 @@ pub fn run() {
             desktop_notification_permission_status,
             request_desktop_notification_permission,
             open_desktop_notification_settings,
-            take_pending_notification_click
+            take_pending_notification_click,
+            terminal_create,
+            terminal_write,
+            terminal_resize,
+            terminal_kill
         ])
         .build(tauri::generate_context!())
         .expect("error while building Grapher desktop application");
@@ -1173,6 +1243,10 @@ pub fn run() {
             }
         }
         RunEvent::Exit => {
+            #[cfg(desktop)]
+            if let Some(terminals) = app_handle.try_state::<Arc<terminal::TerminalManager>>() {
+                terminals.kill_all();
+            }
             if let Some(state) = app_handle.try_state::<BackendState>() {
                 state.shutdown();
             }

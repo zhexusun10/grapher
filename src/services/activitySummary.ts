@@ -64,6 +64,7 @@ function isErrorRow(item: TranscriptItem): boolean {
 export function summarizeActivityGroup(
   items: readonly TranscriptItem[],
   tr: TranslateFn = t,
+  options?: { isOpen?: boolean },
 ): ActivitySummary {
   let listCount = 0;
   let searchCount = 0;
@@ -143,8 +144,13 @@ export function summarizeActivityGroup(
   // tool calls (such as rg/grep/test returning exit code 1) stay neutral.
   const hasError = errorCount > 0;
 
-  // Single-tool group with no transcript error: surface the concrete command/path/query like Codex.
-  if (totalTools === 1 && errorCount === 0 && singleTool) {
+  // Single-tool group with no transcript error: surface the concrete
+  // command/path/query once the group is closed (not actively running or able
+  // to receive more tool calls). Expanding inline details while a live group
+  // can still append a second tool makes the summary bar stretch horizontally
+  // and then abruptly snap back to a short aggregate label.
+  const groupOpen = Boolean(options?.isOpen || isRunning);
+  if (!groupOpen && totalTools === 1 && errorCount === 0 && singleTool) {
     const toolName = (singleTool.toolName || "tool").trim();
     const normalizedToolName = toolName.toLowerCase();
     const args = singleTool.args || {};

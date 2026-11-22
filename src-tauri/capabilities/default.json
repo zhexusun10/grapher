@@ -8,6 +8,7 @@
     "allow-git-bootstrap",
     "allow-open-external-url",
     "allow-desktop-notification",
+    "allow-desktop-terminal",
     "core:app:allow-version",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

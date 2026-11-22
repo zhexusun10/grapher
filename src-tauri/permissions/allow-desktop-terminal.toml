@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-desktop-terminal"
+description = "Allows the main window to create, write to, resize, and terminate workspace-scoped desktop PTY terminal sessions."
+commands.allow = [
+  "terminal_create",
+  "terminal_write",
+  "terminal_resize",
+  "terminal_kill",
+]

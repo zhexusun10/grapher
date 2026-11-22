@@ -4411,3 +4411,124 @@ test("entering an ongoing execution skips card entrance on existing running card
     await context.close();
   }
 });
+
+for (const cardsCollapsed of [false, true]) {
+  test(`upward scrollback through mixed-height virtualized history (${cardsCollapsed ? "collapsed" : "expanded"}) stays free of jumps and blank frames`, { timeout: 45_000 }, async () => {
+    const rows = Array.from({ length: 160 }, (_, index) => {
+      if (index >= 130) return startTool(`scroll-t-${index}`, `echo ${index}`) + endTool(`scroll-t-${index}`, "ok") + assistant(`SHORT_RECENT_${index}`);
+      if (index % 3 === 0) {
+        return startTool(`scroll-t-${index}`, `step ${index}`) + endTool(`scroll-t-${index}`, "ok") +
+          assistant(`TALL_ANSWER_${index}\n\n` + Array.from({ length: 8 }, (__, p) => `Paragraph ${p} of ${index}: ` + "detailed explanation content ".repeat(14)).join("\n\n"));
+      }
+      return startTool(`scroll-t-${index}`, `check ${index}`) + endTool(`scroll-t-${index}`, "ok") + assistant(`MEDIUM_ROW_${index}: ` + "some medium text ".repeat(8));
+    });
+    const rowOffsets = [0];
+    for (const row of rows) rowOffsets.push(rowOffsets.at(-1) + Buffer.byteLength(row));
+    const fullBuf = Buffer.from(rows.join(""));
+    let olderPages = 0;
+
+    const { context, page, errors } = await newPage(async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      if (command !== "get_execution_output") return route.fulfill({ json: { result: {} } });
+      let start, end;
+      if (body.before !== undefined) {
+        olderPages++;
+        await new Promise(resolve => setTimeout(resolve, 15));
+        const endIdx = rowOffsets.indexOf(body.before);
+        start = rowOffsets[Math.max(0, endIdx - 25)];
+        end = body.before;
+      } else if (body.tail) {
+        start = rowOffsets[rows.length - 35];
+        end = fullBuf.length;
+      } else {
+        start = Math.min(body.offset ?? 0, fullBuf.length);
+        end = fullBuf.length;
+      }
+      return route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: fullBuf.subarray(start, end).toString(),
+        startOffset: start, nextOffset: end, totalBytes: fullBuf.length,
+        complete: end === fullBuf.length, status: "completed",
+      } } });
+    });
+    try {
+      if (cardsCollapsed) {
+        await context.addInitScript(() => localStorage.setItem("grapher_cards_collapsed_v1", "1"));
+      }
+      await page.goto(`${origin}/__workspace-footer?mode=serial`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setExecutions);
+      await page.evaluate(bytes => {
+        window.audit.startExecution();
+        window.audit.setExecutions([{ id: "current", node: "task", status: "completed", output: "", outputBytes: bytes,
+          revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s", worktree: "/mock", before: "", after: "" }]);
+        window.audit.finish();
+      }, fullBuf.length);
+      await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+      await page.waitForTimeout(200);
+
+      const scroller = page.locator(".initial-query-scroll");
+      const box = await scroller.boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+
+      await scroller.evaluate(el => {
+        window.__upwardScrollMonitor = { anomalies: [], prev: null, running: true, frames: 0 };
+        function tick() {
+          if (!window.__upwardScrollMonitor.running) return;
+          window.__upwardScrollMonitor.frames++;
+          const rect = el.getBoundingClientRect();
+          const visible = [...el.querySelectorAll("[data-transcript-id]")].map(r => {
+            const b = r.getBoundingClientRect();
+            return { id: r.dataset.transcriptId, top: b.top, bottom: b.bottom };
+          }).filter(r => r.bottom > rect.top + 2 && r.top < rect.bottom - 2);
+          const cur = { scrollTop: el.scrollTop, count: visible.length, rows: visible, map: new Map(visible.map(r => [r.id, r])) };
+          const prev = window.__upwardScrollMonitor.prev;
+          if (cur.count === 0 && prev && prev.count > 0 && cur.scrollTop > 200) {
+            window.__upwardScrollMonitor.anomalies.push({ kind: "BLANK_FRAME", scrollTop: Math.round(cur.scrollTop) });
+          }
+          if (prev && prev.rows.length > 0 && cur.rows.length > 0) {
+            for (const pr of prev.rows) {
+              const cr = cur.map.get(pr.id);
+              if (!cr) continue;
+              const dy = cr.top - pr.top;
+              if (dy < -10 || dy > 700) {
+                window.__upwardScrollMonitor.anomalies.push({ kind: "FRAME_JUMP", id: pr.id, dy: Math.round(dy), prevTop: Math.round(pr.top), curTop: Math.round(cr.top), scrollTop: Math.round(cur.scrollTop) });
+                break;
+              }
+            }
+            const overlap = prev.rows.some(pr => cur.map.has(pr.id));
+            if (!overlap) {
+              window.__upwardScrollMonitor.anomalies.push({ kind: "COMPLETE_SWAP", prevFirst: prev.rows[0].id, curFirst: cur.rows[0].id, prevScrollTop: Math.round(prev.scrollTop), curScrollTop: Math.round(cur.scrollTop) });
+            }
+          }
+          window.__upwardScrollMonitor.prev = cur;
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
+
+      let reachedTop = false;
+      for (let step = 0; step < 260; step++) {
+        await page.mouse.wheel(0, -260);
+        await page.waitForTimeout(16);
+        const state = await scroller.evaluate(el => ({ st: el.scrollTop, hasFirst: el.textContent.includes("TALL_ANSWER_0") }));
+        if (state.st <= 2 && state.hasFirst) {
+          reachedTop = true;
+          break;
+        }
+      }
+      await page.waitForTimeout(150);
+      const result = await scroller.evaluate(() => {
+        window.__upwardScrollMonitor.running = false;
+        return { frames: window.__upwardScrollMonitor.frames, anomalies: window.__upwardScrollMonitor.anomalies };
+      });
+      assert.equal(reachedTop, true, "upward scrollback must reach the earliest row");
+      assert.ok(olderPages >= 4, `expected multiple older-page prepends, got ${olderPages}`);
+      assert.ok(result.frames > 30, `expected continuous frame sampling, got ${result.frames}`);
+      assert.deepEqual(result.anomalies, [], `unexpected upward-scroll flicker/jumps: ${JSON.stringify(result.anomalies.slice(0, 5))}`);
+      assert.deepEqual(errors, []);
+    } finally {
+      await context.close();
+    }
+  });
+}

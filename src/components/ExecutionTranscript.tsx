@@ -153,12 +153,16 @@ function ViewportExecutionHistory(props: Props) {
     if (!startedDeferredRef.current) return;
     const element = ref.current;
     if (!element) return;
-    let prevHeight = Math.round(element.offsetHeight || element.getBoundingClientRect().height);
+    const readHeight = () => {
+      const rectHeight = element.getBoundingClientRect().height;
+      return rectHeight > 0 ? rectHeight : element.offsetHeight;
+    };
+    let prevHeight = readHeight();
     return observeElementResize(element, () => {
-      const nextHeight = Math.round(element.offsetHeight || element.getBoundingClientRect().height);
+      const nextHeight = readHeight();
       const delta = nextHeight - prevHeight;
       prevHeight = nextHeight;
-      if (Math.abs(delta) < 1) return;
+      if (Math.abs(delta) < 0.5) return;
       const scroller = transcriptScrollParent(element);
       if (!scroller || scroller.scrollTop <= 0) return;
       if (
@@ -179,7 +183,8 @@ function ViewportExecutionHistory(props: Props) {
     });
   }, []);
 
-  return <div ref={ref} data-deferred-execution-id={!active ? props.execution.id : undefined}>
+  return <div ref={ref} data-deferred-execution-id={!active ? props.execution.id : undefined}
+    data-deferred-height-compensated={startedDeferredRef.current ? "true" : undefined}>
     {active ? <ExecutionHistory {...props} deferredReveal={startedDeferredRef.current} /> : <div className="transcript-loading" style={{ minHeight: 120 }}>
       <button type="button" onClick={() => setActivated(true)}>{t("加载历史记录")}</button>
     </div>}

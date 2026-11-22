@@ -1,15 +1,20 @@
 use super::{argument, open_file_context, open_file_roots, OpenFileContext, Service};
 use crate::{
     file_changes::file_diff::{
-        compute_git_file_diff, compute_head_file_diff, read_added_file_diff,
-        validate_relative_diff_path, FileDiffResult, ParsedFileDiff,
+        compute_git_file_diff, compute_head_file_diff, has_working_tree_git,
+        path_exists_in_working_tree_head, read_added_file_diff, validate_relative_diff_path,
+        FileDiffResult, ParsedFileDiff, TranscriptDiffAccumulator, MAX_DIFF_LINES_PER_FILE,
     },
     model::Snapshot,
 };
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+const MAX_TRANSCRIPT_DIFF_LOG_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INLINE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 struct DiffExecution {
@@ -21,6 +26,8 @@ struct DiffExecution {
     status: String,
     started_at: u64,
     superseded: bool,
+    output: String,
+    output_bytes: usize,
 }
 
 struct FileDiffContext {
@@ -28,11 +35,14 @@ struct FileDiffContext {
     base: String,
     repository: PathBuf,
     publication: Option<(PathBuf, String)>,
+    planning_id: Option<String>,
+    planning_worktree: Option<PathBuf>,
     executions: Vec<DiffExecution>,
     open_file: OpenFileContext,
+    store_root: PathBuf,
 }
 
-fn build_diff_context(state: &Snapshot) -> FileDiffContext {
+fn build_diff_context(state: &Snapshot, store_root: PathBuf) -> FileDiffContext {
     let repository = state
         .config
         .as_ref()
@@ -47,11 +57,19 @@ fn build_diff_context(state: &Snapshot) -> FileDiffContext {
         };
         (!repo.as_os_str().is_empty()).then_some((repo, head.clone()))
     });
+    let planning_worktree = state
+        .planning
+        .as_ref()
+        .and_then(|planning| planning.worktree.as_ref())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
     FileDiffContext {
         run_id: state.run_id.clone(),
         base: state.base.clone(),
         repository,
         publication,
+        planning_id: state.planning_id.clone(),
+        planning_worktree,
         executions: state
             .executions
             .iter()
@@ -65,9 +83,16 @@ fn build_diff_context(state: &Snapshot) -> FileDiffContext {
                 status: exec.status.clone(),
                 started_at: exec.started_at,
                 superseded: state.superseded_execution_ids.contains(&exec.id),
+                output: if exec.output.len() <= MAX_INLINE_OUTPUT_BYTES {
+                    exec.output.clone()
+                } else {
+                    String::new()
+                },
+                output_bytes: exec.output_bytes,
             })
             .collect(),
         open_file: open_file_context(state),
+        store_root,
     }
 }
 
@@ -90,7 +115,8 @@ fn try_execution_diff(
     if exec.before.is_empty() {
         return None;
     }
-    if exec.status == "running" && exec.worktree.exists() {
+    let has_after = exec.after.as_deref().is_some_and(|sha| !sha.is_empty());
+    if (exec.status == "running" || !has_after) && exec.worktree.exists() {
         if let Some(diff) =
             compute_git_file_diff(&exec.worktree, &exec.before, None, path, old_path)
         {
@@ -119,6 +145,151 @@ fn try_execution_diff(
         }
     }
     None
+}
+
+fn read_execution_transcript(
+    store: Option<&crate::store::Store>,
+    run_id: &str,
+    exec: &DiffExecution,
+) -> Option<String> {
+    let mut from_store = None;
+    if let Some(reader) = store {
+        if !run_id.is_empty() {
+            let requested = if exec.output_bytes > 0 {
+                exec.output_bytes.min(MAX_TRANSCRIPT_DIFF_LOG_BYTES)
+            } else {
+                MAX_TRANSCRIPT_DIFF_LOG_BYTES
+            };
+            if let Ok(page) = reader.execution_log_page(run_id, &exec.id, 0, requested) {
+                if !page.content.is_empty() {
+                    from_store = Some(page.content);
+                }
+            }
+        }
+    }
+    match from_store {
+        Some(stored) if stored.len() >= exec.output.len() => Some(stored),
+        _ if !exec.output.is_empty() => Some(exec.output.clone()),
+        other => other,
+    }
+}
+
+fn read_planner_transcript(context: &FileDiffContext) -> Option<String> {
+    let planning_id = context.planning_id.as_deref()?;
+    if planning_id.is_empty()
+        || !planning_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return None;
+    }
+    let log = context
+        .store_root
+        .join("planning")
+        .join(planning_id)
+        .join("planner.jsonl");
+    let meta = fs::metadata(&log).ok()?;
+    if meta.len() == 0 || meta.len() as usize > MAX_TRANSCRIPT_DIFF_LOG_BYTES {
+        return None;
+    }
+    fs::read_to_string(&log).ok()
+}
+
+fn extract_transcript_diff_for_target(
+    context: &FileDiffContext,
+    reader: Option<&crate::store::Store>,
+    executions: &[&DiffExecution],
+    include_planner: bool,
+    target_path: &str,
+) -> Option<ParsedFileDiff> {
+    let repo_str = context.repository.to_string_lossy();
+    let mut acc = TranscriptDiffAccumulator::new(target_path);
+
+    if include_planner {
+        if let Some(jsonl) = read_planner_transcript(context) {
+            let worktree = context
+                .planning_worktree
+                .as_deref()
+                .unwrap_or(context.repository.as_path())
+                .to_string_lossy();
+            acc.feed_jsonl(&jsonl, &worktree, &repo_str, false);
+        }
+    }
+
+    for exec in executions {
+        let Some(jsonl) = read_execution_transcript(reader, &context.run_id, exec) else {
+            continue;
+        };
+        let worktree = exec.worktree.to_string_lossy();
+        acc.feed_jsonl(&jsonl, &worktree, &repo_str, exec.status == "running");
+    }
+
+    acc.finish(MAX_DIFF_LINES_PER_FILE)
+}
+
+fn resolve_transcript_diff(
+    context: &FileDiffContext,
+    scope: Option<&[String]>,
+    nodes: &[String],
+    path: &str,
+    old_path: Option<&str>,
+) -> Option<ParsedFileDiff> {
+    let db_path = context.store_root.join("events.sqlite");
+    let reader = db_path
+        .is_file()
+        .then(|| crate::store::Store::open_reader(&db_path).ok())
+        .flatten();
+
+    let try_target = |target: &str| -> Option<ParsedFileDiff> {
+        if let Some(ids) = scope {
+            let mut selected: Vec<&DiffExecution> = context
+                .executions
+                .iter()
+                .filter(|exec| ids.contains(&exec.id))
+                .collect();
+            selected.sort_by_key(|exec| exec.started_at);
+            return extract_transcript_diff_for_target(
+                context,
+                reader.as_ref(),
+                &selected,
+                false,
+                target,
+            );
+        }
+
+        let mut active: Vec<&DiffExecution> = context
+            .executions
+            .iter()
+            .filter(|exec| !exec.superseded)
+            .collect();
+        active.sort_by_key(|exec| exec.started_at);
+
+        if !nodes.is_empty() {
+            let include_planner = nodes.iter().any(|node| node == "planner");
+            let owned: Vec<&DiffExecution> = active
+                .iter()
+                .copied()
+                .filter(|exec| nodes.contains(&exec.node))
+                .collect();
+            if let Some(diff) = extract_transcript_diff_for_target(
+                context,
+                reader.as_ref(),
+                &owned,
+                include_planner,
+                target,
+            ) {
+                return Some(diff);
+            }
+        }
+
+        extract_transcript_diff_for_target(context, reader.as_ref(), &active, true, target)
+    };
+
+    try_target(path).or_else(|| {
+        old_path
+            .filter(|old| !old.is_empty() && *old != path)
+            .and_then(try_target)
+    })
 }
 
 fn resolve_file_diff(
@@ -176,23 +347,33 @@ fn resolve_file_diff(
             }
         }
     } else {
-        // Published runs compare the authoritative base..publication.head span first.
-        if let Some((pub_repo, head)) = &context.publication {
-            if !context.base.is_empty() {
-                if let Some(diff) =
-                    compute_git_file_diff(pub_repo, &context.base, Some(head), path, old_path)
-                {
-                    return Ok(diff);
-                }
-            }
-        }
-
         let mut active: Vec<&DiffExecution> = context
             .executions
             .iter()
             .filter(|exec| !exec.superseded)
             .collect();
         active.sort_by_key(|exec| exec.started_at);
+
+        // Published runs compare the authoritative base..publication.head span first.
+        // Adaptive batch runs leave `state.base` empty, so fall back to the
+        // earliest active execution's `before` commit when present.
+        if let Some((pub_repo, head)) = &context.publication {
+            let pub_base = if !context.base.is_empty() {
+                Some(context.base.as_str())
+            } else {
+                active
+                    .iter()
+                    .find(|exec| !exec.before.is_empty() && (nodes.is_empty() || nodes.contains(&exec.node)))
+                    .or_else(|| active.iter().find(|exec| !exec.before.is_empty()))
+                    .map(|exec| exec.before.as_str())
+            };
+            if let Some(base) = pub_base {
+                if let Some(diff) = compute_git_file_diff(pub_repo, base, Some(head), path, old_path)
+                {
+                    return Ok(diff);
+                }
+            }
+        }
 
         // Try executions belonging to the file's owning nodes first, then any active execution.
         if !nodes.is_empty() {
@@ -211,8 +392,9 @@ fn resolve_file_diff(
 
     // Fallback to safe workspace/repository roots (handles direct edits,
     // follow-up runs without snapshots, and planner writes).
-    if let Ok(roots) = open_file_roots(&context.open_file, scope, nodes) {
-        for root in &roots {
+    let roots = open_file_roots(&context.open_file, scope, nodes).ok();
+    if let Some(roots) = &roots {
+        for root in roots {
             if !context.base.is_empty() {
                 if let Some(diff) =
                     compute_git_file_diff(root, &context.base, None, path, old_path)
@@ -224,13 +406,22 @@ fn resolve_file_diff(
                 return Ok(diff);
             }
         }
-        for root in &roots {
-            if status == Some("added") || !path_exists_in_commit(root, "HEAD", path) {
+        for root in roots {
+            if status == Some("added")
+                || (has_working_tree_git(root) && !path_exists_in_working_tree_head(root, path))
+            {
                 if let Some(added) = read_added_file_diff(root, path) {
                     return Ok(added);
                 }
             }
         }
+    }
+
+    // Reconstruct edits/writes from the execution/planning JSONL transcripts
+    // when Git diff is empty or unavailable (serial/source-direct runs whose
+    // changes were committed, plain folders, planner writes, or reclaimed slots).
+    if let Some(diff) = resolve_transcript_diff(context, scope, nodes, path, old_path) {
+        return Ok(diff);
     }
 
     Ok(ParsedFileDiff::default())
@@ -286,7 +477,7 @@ pub(super) fn get_file_diff(
         } else {
             runtime.store.load(&requested_run_id)?
         };
-        build_diff_context(&state)
+        build_diff_context(&state, runtime.root.clone())
     };
 
     let parsed = resolve_file_diff(

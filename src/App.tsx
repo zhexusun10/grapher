@@ -87,6 +87,8 @@ import {
 import { STORAGE_KEYS, readStorageJson, readStorageString, writeStorageJson, writeStorageString } from "./services/appStorage";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
+import { WorkspaceTerminalHost } from "./components/terminal/WorkspaceTerminalHost";
+import { WorkspaceTerminalContext, useWorkspaceTerminals } from "./hooks/useWorkspaceTerminals";
 import type { ConfirmModalState } from "./components/modals/ConfirmModal";
 
 const ApprovalModal = lazy(() => import("./components/modals/ApprovalModal"));
@@ -294,6 +296,7 @@ export default function App() {
   const pendingToolArgsRef = useRef<Map<string, any>>(new Map());
 
   const currentRepoPath = useMemo(() => workspaceKey(config.repository), [config.repository]);
+  const workspaceTerminals = useWorkspaceTerminals(config.repository);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
   const latestSnapshotsRef = useRef(new Map<string, Snapshot>());
@@ -1508,6 +1511,7 @@ export default function App() {
         });
         clearLandingDraft(pathToRemove);
         landingComposerDraftsRef.current.clearAttachment(landingDraftKey(pathToRemove));
+        workspaceTerminals.closeTerminalForPath(pathToRemove);
         setRunCardKeys((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id))));
         setProjects(prev => {
           const remaining = prev.filter(p => workspaceKey(p.path) !== key);
@@ -3647,6 +3651,7 @@ export default function App() {
 
   return (
     <ComposerModels.Provider value={{ config, snapshot: state, envOverrides, save: saveComposerModels, rename: renameComposerConversation }}>
+    <WorkspaceTerminalContext.Provider value={workspaceTerminals.control}>
     <div className={`app-background-root ${showLandingView ? "landing-active" : ""}${desktopTitlebar.visible ? " has-desktop-titlebar" : ""}`}>
       {desktopTitlebar.visible && desktopTitlebar.platform && (
         <DesktopTitlebar
@@ -3700,7 +3705,7 @@ export default function App() {
             }
           />
 
-          <main className="main">
+          <main className={`main${workspaceTerminals.hasDockedTerminal ? " has-docked-terminal" : ""}`}>
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
               {desktopBackend.isDesktop && modal !== "settings" && desktopBackend.phase === "error" && (
@@ -3908,6 +3913,21 @@ export default function App() {
             </AnimatePresence>
             </div>
             </LayoutGroup>
+            {workspaceTerminals.supported && (
+              <WorkspaceTerminalHost
+                entries={workspaceTerminals.entries}
+                activeWorkspaceKey={workspaceTerminals.activeWorkspaceKey}
+                onMinimize={workspaceTerminals.minimizeTerminal}
+                onToggleMaximize={workspaceTerminals.toggleMaximizeTerminal}
+                onClose={workspaceTerminals.closeTerminal}
+                onFinishClose={workspaceTerminals.finishCloseTerminal}
+                onRestart={workspaceTerminals.restartTerminal}
+                onSetHeight={workspaceTerminals.setTerminalHeight}
+                onWriteInput={workspaceTerminals.writeTerminalInput}
+                onResize={workspaceTerminals.resizeTerminal}
+                attachOutputListener={workspaceTerminals.attachOutputListener}
+              />
+            )}
           </main>
 
           {/* Modals with Opening and Closing Animations */}
@@ -3976,6 +3996,7 @@ export default function App() {
         </div>
       </FloatingPathsBackground>
     </div>
+    </WorkspaceTerminalContext.Provider>
     </ComposerModels.Provider>
   );
 }

@@ -14,7 +14,9 @@ import {
   ChevronDown,
   CornerDownLeft,
   Play,
+  TerminalSquare,
 } from "lucide-react";
+import { useWorkspaceTerminalControl } from "../../hooks/useWorkspaceTerminals";
 import { runtimeService } from "../../services/runtime";
 import { startVisibilityPolling } from "../../services/visibilityPolling";
 import { ComposerDrafts, type RecalledMessage } from "../../services/composerDrafts";
@@ -260,6 +262,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const isBusy = busyProp || recall.pending;
     const reduceMotion = useReducedMotion();
     const hideAutoMode = useHideAutoMode();
+    const workspaceTerminal = useWorkspaceTerminalControl();
     const visiblePlanMode = hideAutoMode && planMode === "auto" ? "graph" : planMode;
     const isPresent = useIsPresent();
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1721,6 +1724,38 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               <Paperclip size={compact ? 15 : 18} />
             </button>
+            {workspaceTerminal?.supported && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  workspaceTerminal.onToggle();
+                }}
+                className={`prompt-box-icon-btn prompt-box-terminal-btn${workspaceTerminal.active ? " is-active" : ""}${workspaceTerminal.running ? " has-session" : ""}`}
+                aria-label={
+                  workspaceTerminal.active
+                    ? t("最小化终端")
+                    : workspaceTerminal.running
+                      ? t("恢复终端")
+                      : t("打开终端")
+                }
+                aria-pressed={workspaceTerminal.active}
+                title={
+                  workspaceTerminal.active
+                    ? t("最小化终端")
+                    : workspaceTerminal.running
+                      ? t("恢复终端")
+                      : t("打开终端")
+                }
+                data-testid="composer-terminal-toggle"
+                disabled={workspaceTerminal.disabled}
+              >
+                <TerminalSquare size={compact ? 14 : 17} />
+                {workspaceTerminal.running && (
+                  <span className="prompt-box-terminal-dot" aria-hidden="true" />
+                )}
+              </button>
+            )}
           </div>
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { CONVERSATION_BOTTOM_THRESHOLD } from "../services/conversationScroll";
-import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, olderInsertionTop, transcriptScrollParent } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture, olderInsertionTop, transcriptScrollParent } from "../services/transcriptScroll";
 import { transcriptAutoFillBudget, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
 
@@ -60,6 +60,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       // back into bottom-following and lose their visible-row anchor.
       if (parent.scrollTop + overshoot > parent.scrollHeight - parent.clientHeight + 1) return;
       parent.scrollTop += overshoot;
+      parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
       if (!busy && !holdingOlder) load(true);
     };
     parent.addEventListener("scroll", containMissingHistory, { passive: true });

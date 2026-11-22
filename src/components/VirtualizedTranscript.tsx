@@ -928,7 +928,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       for (const insertion of insertions.reverse()) rows.splice(insertion.index, 0, ...insertion.rows);
     }
     rows = applyHydratedCardPatches(rows, hydratedCards, hydratingKeys);
-    return visibleTranscriptRows(rows, starts, { collapseCards: cardsCollapsed });
+    return visibleTranscriptRows(rows, starts, { collapseCards: cardsCollapsed, live: !settled });
   }, [parsedItems, settled, sourceUserFallbacks, output, cardsCollapsed, hydratedCards, hydratingKeys]);
   const hasRangeSupportRef = useRef(false);
   hasRangeSupportRef.current = parsedItems.some(
@@ -1145,6 +1145,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   }, [onExpandSummary, onHydrateItems, onUserResize, syncScrollState]);
 
   const handleChildExpandedChange = useCallback((child: TranscriptItem, expanded: boolean) => {
+    expandedRows.current.set(child.id, expanded);
     if (!expanded || !child.bodyOmitted) return;
     if (onHydrateItems && itemHydrationRanges(child).length > 0) {
       onHydrateItems([child]);
@@ -1154,7 +1155,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   }, [onExpandSummary, onHydrateItems]);
 
   useEffect(() => {
-    if (cardsCollapsed) return;
+    if (cardsCollapsed && cardsTransition !== "collapsing") return;
     let removed = false;
     expandedSummaryMetaRef.current.clear();
     for (const id of [...expandedRows.current.keys()]) {
@@ -1164,7 +1165,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       }
     }
     if (removed) setExpansionVersion(value => value + 1);
-  }, [cardsCollapsed]);
+  }, [cardsCollapsed, cardsTransition]);
 
   useEffect(() => () => {
     if (resumeAutoFollowFrameRef.current !== null) {

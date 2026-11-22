@@ -28,6 +28,7 @@ export default defineConfig({
           if (/\/node_modules\/(?:motion|motion-dom|motion-utils|framer-motion)\//.test(path)) return "motion";
           if (/\/node_modules\/marked\//.test(path)) return "marked";
           if (/\/node_modules\/katex\//.test(path)) return "katex";
+          if (/\/node_modules\/@xterm\//.test(path)) return "xterm";
         },
       },
     },

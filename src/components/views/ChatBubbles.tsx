@@ -6,7 +6,7 @@ import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
 import { ImagePreviewModal, type PreviewImageItem } from "../modals/ImagePreviewModal";
-import { notifyTranscriptContentGrowth, notifyTranscriptFinalOutput } from "../../services/transcriptScroll";
+import { notifyTranscriptContentGrowth, notifyTranscriptFinalOutput, transcriptScrollParent } from "../../services/transcriptScroll";
 
 function copyFallback(text: string, onSuccess: () => void) {
   try {
@@ -44,7 +44,12 @@ export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: 
       // Treat those actual changes as output, but not the initial mount of an
       // old row when the user scrolls through virtualized history.
       if (isStreaming || textChanged) notifyTranscriptFinalOutput(bubbleRef.current);
-      else notifyTranscriptContentGrowth(bubbleRef.current);
+      else {
+        const scroller = transcriptScrollParent(bubbleRef.current);
+        if (scroller && (scroller.dataset.transcriptFollowing === "true" || scroller.dataset.transcriptPreparing === "true")) {
+          notifyTranscriptContentGrowth(bubbleRef.current);
+        }
+      }
     }, [smoothText, isStreaming]);
     return <div ref={bubbleRef} style={{ display: "contents" }}>
       <MarkdownRenderer content={smoothText} isStreaming={stillTyping} />

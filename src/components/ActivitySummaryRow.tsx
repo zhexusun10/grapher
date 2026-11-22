@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { TRANSCRIPT_SCROLL_ADJUSTED_EVENT } from "../services/transcriptScroll";
 import {
@@ -258,8 +258,16 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
   const isExpanded = expanded ?? localExpanded;
 
   const items = item.summaryItems ?? [];
-  const summary = useMemo(() => summarizeActivityGroup(items), [items]);
+  const summary = useMemo(
+    () => summarizeActivityGroup(items, undefined, { isOpen: item.summaryOpen }),
+    [items, item.summaryOpen],
+  );
   const isGlobalTransition = !reduceMotion && (transitionPhase === "collapsing" || transitionPhase === "expanding");
+  const keepBodyExpanded = !reduceMotion && transitionPhase === "expanding" && isExpanded;
+
+  useEffect(() => {
+    if (transitionPhase === "collapsing") setLocalExpanded(false);
+  }, [transitionPhase]);
 
   useLayoutEffect(() => {
     if (!isGlobalTransition) return;
@@ -272,26 +280,35 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
     const headerHeight = Math.round(headerInner.offsetHeight || headerInner.getBoundingClientRect().height);
     const bodyHeight = Math.round(bodyInner.offsetHeight || bodyInner.getBoundingClientRect().height);
     const collapsing = transitionPhase === "collapsing";
+    const keepBodyOpen = !collapsing && isExpanded;
+
+    if (keepBodyOpen) {
+      bodyTrack.style.height = "";
+      bodyTrack.style.opacity = "1";
+    }
 
     const apply = (eased: number) => {
       const headerRatio = collapsing ? eased : 1 - eased;
-      const bodyRatio = collapsing ? 1 - eased : eased;
       headerTrack.style.height = `${Math.round(headerHeight * headerRatio)}px`;
       headerTrack.style.opacity = `${headerRatio}`;
-      bodyTrack.style.height = `${Math.round(bodyHeight * bodyRatio)}px`;
-      bodyTrack.style.opacity = `${bodyRatio}`;
+      if (!keepBodyOpen) {
+        const bodyRatio = collapsing ? 1 - eased : eased;
+        bodyTrack.style.height = `${Math.round(bodyHeight * bodyRatio)}px`;
+        bodyTrack.style.opacity = `${bodyRatio}`;
+      }
     };
 
     apply(0);
     syncTransitionAnchorScroll();
     return registerCardsTransitionRow(apply);
-  }, [isGlobalTransition, transitionPhase]);
+  }, [isGlobalTransition, transitionPhase, isExpanded]);
 
   const toggleExpanded = useCallback(() => {
+    if (isGlobalTransition) return;
     const next = !isExpanded;
     setLocalExpanded(next);
     onExpandedChange?.(next, rowRef.current ?? undefined);
-  }, [isExpanded, onExpandedChange]);
+  }, [isExpanded, isGlobalTransition, onExpandedChange]);
 
   const handleChildExpanded = useCallback((id: string, next: boolean, card?: HTMLElement) => {
     setChildExpanded(previous => {
@@ -357,9 +374,17 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
           <div
             ref={headerTrackRef}
             className="activity-summary-header-track"
-            style={{ width: "100%", minWidth: 0, overflow: "hidden" }}
+            style={{ width: "100%", minWidth: 0, overflow: "hidden", pointerEvents: "none" }}
           >
-            <div ref={headerInnerRef} style={{ width: "100%", minWidth: 0, display: "flex" }}>
+            <div
+              ref={headerInnerRef}
+              style={{
+                width: "100%",
+                minWidth: 0,
+                display: "flex",
+                ...(keepBodyExpanded ? { paddingBottom: 8 } : {}),
+              }}
+            >
               {headerButton}
             </div>
           </div>

@@ -1,0 +1,379 @@
+/* =============================================================================
+   Workspace-Scoped Desktop Terminal (Docked & Maximized)
+   ============================================================================= */
+
+/* When a docked terminal is open, keep a crisp 10px splitter gap below the
+   workbench and bring the landing composer right above the terminal card. */
+.main .workbench {
+  transition: margin-bottom 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.main .landing-screen {
+  transition: padding-bottom 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.main.has-docked-terminal .workbench {
+  margin-bottom: 0;
+}
+
+.main.has-docked-terminal .landing-screen {
+  padding-bottom: 14px;
+}
+
+.workspace-terminal-dock {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+.workspace-terminal-dock.is-hidden {
+  display: none !important;
+}
+
+.workspace-terminal-dock.is-exiting {
+  pointer-events: none;
+}
+
+.workspace-terminal-dock.is-docked {
+  flex: 0 0 auto;
+  width: 100%;
+  margin: 0 0 12px 0;
+  z-index: 25;
+}
+
+/* During maximized -> docked restore animation, pin the card to the bottom edge
+   of the dock so it shrinks smoothly downward from full workbench height. */
+.workspace-terminal-dock.is-restoring-from-max {
+  overflow: visible !important;
+  z-index: 30;
+}
+
+.workspace-terminal-dock.is-restoring-from-max .workspace-terminal-resizer {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-terminal-dock.is-restoring-from-max .workspace-terminal-card {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+}
+
+/* Maximized mode matches .workbench's exact bounding box and 18px radius on
+   both Windows (top: 12px) and macOS with overlay titlebar (top: 0).
+   justify-content: flex-end pins the bottom edge during expand animations. */
+.workspace-terminal-dock.is-maximized {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  width: auto;
+  height: auto;
+  margin: 0;
+  justify-content: flex-end;
+  z-index: 30;
+}
+
+.has-desktop-titlebar .app-shell.is-tauri-macos .workspace-terminal-dock.is-maximized {
+  top: 0;
+}
+
+.workspace-terminal-dock.is-resizing {
+  user-select: none;
+}
+
+.workspace-terminal-resizer {
+  flex: 0 0 10px;
+  height: 10px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.workspace-terminal-resizer-pill {
+  width: 36px;
+  height: 3px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 0.15s ease, width 0.15s ease;
+}
+
+.workspace-terminal-resizer:hover .workspace-terminal-resizer-pill,
+.workspace-terminal-dock.is-resizing .workspace-terminal-resizer-pill {
+  width: 48px;
+  background: var(--border-hover);
+}
+
+/* Override shadcn Terminal's demo max-w-lg / max-h-100 / rounded-xl so the
+   card fills the dock/workbench cleanly and aligns its 18px corner radius
+   with .workbench. Avoid !important on height so Web Animations FLIP runs cleanly. */
+.workspace-terminal-card {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-surface, 18px);
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  box-shadow: var(--surface-card-shadow);
+  overflow: hidden;
+}
+
+.workspace-terminal-header {
+  flex: 0 0 auto;
+  padding: 9px 14px !important;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default) !important;
+  user-select: none;
+}
+
+.terminal-traffic-lights {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.terminal-traffic-btn {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+  padding: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+
+.terminal-traffic-btn:hover:not(:disabled) {
+  filter: none;
+}
+
+.terminal-traffic-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.terminal-traffic-btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.terminal-traffic-btn.is-close {
+  background: #ff5f56;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.14);
+  color: rgba(77, 0, 0, 0.78);
+}
+
+.terminal-traffic-btn.is-minimize {
+  background: #ffbd2e;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.14);
+  color: rgba(110, 68, 0, 0.8);
+}
+
+.terminal-traffic-btn.is-maximize {
+  background: #27c93f;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.14);
+  color: rgba(0, 82, 18, 0.82);
+}
+
+.terminal-traffic-btn svg {
+  width: 10px;
+  height: 10px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.terminal-traffic-lights:hover .terminal-traffic-btn svg,
+.terminal-traffic-lights:focus-within .terminal-traffic-btn svg {
+  opacity: 1;
+}
+
+.workspace-terminal-header-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-terminal-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.workspace-terminal-title-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.workspace-terminal-title-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-terminal-title-sep {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.workspace-terminal-title-shell {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.workspace-terminal-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.workspace-terminal-status-pill {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+}
+
+.workspace-terminal-status-pill.is-exited {
+  background: var(--status-warning-subtle);
+  border-color: var(--status-warning-border);
+  color: var(--status-warning-text);
+}
+
+.workspace-terminal-restart-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.workspace-terminal-restart-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
+  filter: none;
+}
+
+.workspace-terminal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  padding: 6px 10px 8px 12px;
+  overflow: hidden;
+}
+
+.workspace-terminal-xterm {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workspace-terminal-xterm .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.workspace-terminal-xterm .xterm-viewport {
+  background-color: var(--bg-canvas) !important;
+  overscroll-behavior: contain;
+}
+
+.workspace-terminal-loading,
+.workspace-terminal-error {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.workspace-terminal-error-title {
+  font-weight: 600;
+  color: var(--status-danger-text);
+}
+
+.workspace-terminal-error-detail {
+  max-width: 480px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+/* Composer toolbar button (placed directly to the right of Paperclip) */
+.prompt-box-terminal-btn {
+  position: relative;
+}
+
+.prompt-box-terminal-btn.is-active {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.prompt-box-terminal-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--status-success);
+  box-shadow: 0 0 0 1.5px var(--bg-canvas);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main .workbench,
+  .main .landing-screen,
+  .workspace-terminal-resizer-pill,
+  .terminal-traffic-btn,
+  .terminal-traffic-btn svg {
+    transition: none;
+  }
+}

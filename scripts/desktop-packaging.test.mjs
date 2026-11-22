@@ -130,6 +130,7 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
     'allow-git-bootstrap',
     'allow-open-external-url',
     'allow-desktop-notification',
+    'allow-desktop-terminal',
     'core:app:allow-version',
     'core:event:allow-listen',
     'core:event:allow-unlisten',
@@ -167,6 +168,16 @@ test('Tauri v2 capability grants least-privilege backend_url, autostart, updater
   assert.match(
     openExternalPermission,
     /commands\.allow\s*=\s*\["open_external_url"\]/,
+  );
+
+  const terminalPermission = readFileSync(
+    join(root, 'src-tauri', 'permissions', 'allow-desktop-terminal.toml'),
+    'utf8',
+  );
+  assert.match(terminalPermission, /identifier\s*=\s*"allow-desktop-terminal"/);
+  assert.match(
+    terminalPermission,
+    /commands\.allow\s*=\s*\[\s*"terminal_create",\s*"terminal_write",\s*"terminal_resize",\s*"terminal_kill",?\s*\]/,
   );
 
   const notificationPermission = readFileSync(

@@ -22,12 +22,13 @@ type Props = {
   onUserResize: (expanded?: boolean, card?: HTMLElement) => void;
 };
 
-const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, draft, expanded, cardsTransition, onExpandedChange, onChildResize,
+const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, draft, expanded, cardsTransition, onExpandedChange, onChildResize, onChildExpandedChange,
   onDraftChange, onEditMessage, onCancelEdit, onEditSubmit, onSendMessage }: Omit<Props, "items" | "isPlanning" | "editingMessage" | "onUserResize"> & {
   item: TranscriptItem; streaming: boolean; editing: boolean; expanded?: boolean;
   cardsTransition?: CardsTransitionPhase;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
   onChildResize: (expanded: boolean, card?: HTMLElement) => void;
+  onChildExpandedChange?: (child: TranscriptItem, expanded: boolean, card?: HTMLElement) => void;
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
@@ -39,7 +40,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
       disabled={locked} />
   </AnimatedUserTurn>;
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
-  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} onExpandedChange={expand} onChildResize={onChildResize} />;
+  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.errorItems || (item.type === "system" && (item.isError || item.status === "error")) ||
       (item.type === "text" && item.role === "assistant" && (item.isError || item.status === "error"))) {
@@ -72,8 +73,8 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
 const noop = () => {};
 export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
   const items = useMemo(
-    () => visibleTranscriptRows(props.items, undefined, { collapseCards: props.cardsCollapsed }).rows,
-    [props.items, props.cardsCollapsed],
+    () => visibleTranscriptRows(props.items, undefined, { collapseCards: props.cardsCollapsed, live: props.isPlanning }).rows,
+    [props.items, props.cardsCollapsed, props.isPlanning],
   );
   const expanded = useRef(new Map<string, boolean>());
   const expandedSummaryMeta = useRef(new Map<string, { toolCallIds: string[]; ordinalFromEnd: number }>());
@@ -105,7 +106,7 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
   }
   const [, bump] = useState(0);
   useEffect(() => {
-    if (props.cardsCollapsed) return;
+    if (props.cardsCollapsed && props.cardsTransition !== "collapsing") return;
     let removed = false;
     expandedSummaryMeta.current.clear();
     for (const id of [...expanded.current.keys()]) {
@@ -115,7 +116,7 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
       }
     }
     if (removed) bump(version => version + 1);
-  }, [props.cardsCollapsed]);
+  }, [props.cardsCollapsed, props.cardsTransition]);
   const expand = useCallback((id: string, value: boolean, card?: HTMLElement) => {
     expanded.current.set(id, value);
     if (id.startsWith("summary_")) {
@@ -138,11 +139,15 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
     bump(version => version + 1);
     props.onUserResize(value, card);
   }, [props.onUserResize]);
+  const handleChildExpandedChange = useCallback((child: TranscriptItem, value: boolean) => {
+    expanded.current.set(child.id, value);
+  }, []);
   const renderRow = (item: TranscriptItem, index: number, allowTransition = true) => <PlannerRow item={item}
     streaming={props.isPlanning && item.status === "running" && (item.type === "thinking" || index === items.length - 1)}
     locked={props.locked && !props.isPlanning} editing={props.editingMessage?.id === item.id}
     draft={props.editingMessage?.id === item.id ? props.draft : ""}
     expanded={expanded.current.get(item.id)} cardsTransition={allowTransition ? props.cardsTransition : "idle"} onExpandedChange={expand} onChildResize={props.onUserResize}
+    onChildExpandedChange={handleChildExpandedChange}
     onDraftChange={props.onDraftChange || noop} onEditMessage={props.onEditMessage} onCancelEdit={props.onCancelEdit}
     onEditSubmit={props.onEditSubmit} onSendMessage={props.onSendMessage} />;
   return <div className="planner-transcript"><VirtualizedList items={items} renderRow={renderRow} gap={10} overscan={props.cardsCollapsed ? 36 : 16} transitionPhase={props.cardsTransition} /></div>;
