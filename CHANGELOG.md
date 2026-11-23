@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the Windows desktop titlebar background to match the sidebar surface color (`--bg-surface`), leaving the macOS overlay titlebar unchanged.
+- Initialized a default empty `models.json` (`{ "providers": {} }`) in Grapher's Pi agent directory without overwriting existing configurations, and skipped unnecessary model overlay merges and backups when the local file is empty.
+
 ### Security
 
 - Updated the desktop `url` dependency to 2.5.9 to fix RUSTSEC-2026-0592 (stack overflow while resolving deeply nested `blob:` origins), and extended RustSec CI coverage to both backend and desktop lockfiles.

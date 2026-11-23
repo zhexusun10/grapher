@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, lstatSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { reuseManagedTools } from '../engine/agent-dir.mjs';
 import { prepareModelOverlay, overlayRuntimeOptions } from '../engine/model-config-overlay.mjs';
 
-test('configuring the agent directory does not copy or link a host model catalog', () => {
+test('configuring the agent directory creates an empty models.json without copying or linking a host model catalog', () => {
   const root = mkdtempSync(join(tmpdir(), 'grapher-model-isolation-'));
   try {
     mkdirSync(join(root, '.pi/agent'), { recursive: true });
@@ -23,7 +23,23 @@ test('configuring the agent directory does not copy or link a host model catalog
         encoding: 'utf8',
       });
       assert.equal(child.status, 0, child.stderr);
-      assert.equal(existsSync(join(target, 'models.json')), false);
+      const modelsPath = join(target, 'models.json');
+      assert.equal(existsSync(modelsPath), true);
+      assert.equal(lstatSync(modelsPath).isSymbolicLink(), false);
+      assert.deepEqual(JSON.parse(readFileSync(modelsPath, 'utf8')), { providers: {} });
+
+      // Re-configuring must never overwrite an existing models.json.
+      const custom = { providers: { local: { models: [{ id: 'custom-model' }] } } };
+      writeFileSync(modelsPath, JSON.stringify(custom));
+      const rerun = spawnSync(process.execPath, ['--input-type=module', '-e',
+        "import {configureAgentDir} from './engine/agent-dir.mjs'; configureAgentDir();"], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: target,
+          GRAPHER_ISOLATED_PI_MODELS: isolated },
+        encoding: 'utf8',
+      });
+      assert.equal(rerun.status, 0, rerun.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(modelsPath, 'utf8')), custom);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -60,6 +76,9 @@ test('model overlay refreshes Pi models, preserves dedicated entries and backs u
     const empty = join(root, 'empty-agent');
     mkdirSync(empty);
     assert.equal(await prepareModelOverlay(empty, JSON.parse, { source }), source, 'source alone is loaded directly');
+    writeFileSync(join(empty, 'models.json'), '{\n  "providers": {}\n}\n');
+    assert.equal(await prepareModelOverlay(empty, JSON.parse, { source }), source, 'default empty target does not trigger merge or backup');
+    assert.equal(existsSync(join(empty, 'models.json.grapher-backup')), false);
     assert.deepEqual(await overlayRuntimeOptions({ modelsPath: join(root, 'explicit.json') }, agent, JSON.parse),
       { modelsPath: join(root, 'explicit.json') }, 'explicit model paths must not be replaced');
     upstream.providers.shared.models[0].name = 'refreshed';

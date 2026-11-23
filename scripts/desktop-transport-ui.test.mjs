@@ -745,16 +745,23 @@ test("macOS and Windows Tauri render an independent desktop titlebar above backg
     assert.equal(await win.page.locator(".desktop-window-control").count(), 3);
 
     const winLayout = await win.page.evaluate(() => {
+      const bar = document.querySelector(".desktop-titlebar");
       const sidebar = document.querySelector(".sidebar");
+      const barCs = bar ? getComputedStyle(bar) : null;
+      const sidebarCs = sidebar ? getComputedStyle(sidebar) : null;
       return {
-        barHeight: getComputedStyle(document.querySelector(".desktop-titlebar")).height,
+        barHeight: barCs?.height,
+        barBackgroundColor: barCs?.backgroundColor,
+        sidebarBackgroundColor: sidebarCs?.backgroundColor,
         bgStageTop: document.querySelector(".app-background-root > .relative")?.getBoundingClientRect().top,
         sidebarTop: sidebar?.getBoundingClientRect().top,
-        sidebarMarginTop: sidebar ? getComputedStyle(sidebar).marginTop : null,
+        sidebarMarginTop: sidebarCs?.marginTop ?? null,
         insetVar: getComputedStyle(document.documentElement).getPropertyValue("--desktop-titlebar-inset").trim(),
       };
     });
     assert.equal(winLayout.barHeight, "32px");
+    assert.equal(winLayout.barBackgroundColor, winLayout.sidebarBackgroundColor, "Windows titlebar matches the sidebar surface color");
+    assert.equal(winLayout.barBackgroundColor, "rgb(249, 249, 250)");
     assert.equal(winLayout.bgStageTop, 32);
     assert.equal(winLayout.sidebarTop, 44, "Windows keeps the 12px sidebar top margin below its bordered titlebar");
     assert.equal(winLayout.sidebarMarginTop, "12px");

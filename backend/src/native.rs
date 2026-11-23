@@ -1323,6 +1323,27 @@ pub fn fixture_execution_command(cwd: &Path) -> Result<Command, String> {
     unsandboxed_command(&prepared_runtime()?, cwd)
 }
 
+fn ensure_default_models_file(agent_dir: &Path) -> Result<(), String> {
+    const EMPTY_MODELS_CONFIG: &str = "{\n  \"providers\": {}\n}\n";
+    let path = agent_dir.join("models.json");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(EMPTY_MODELS_CONFIG.as_bytes())
+                .map_err(|e| e.to_string())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Shared upstream-owned credentials/config; this is not a directory mapping.
 pub fn agent_dir() -> Result<PathBuf, String> {
     let home = home_dir().ok_or("HOME or USERPROFILE is required")?;
@@ -1332,6 +1353,7 @@ pub fn agent_dir() -> Result<PathBuf, String> {
         home.join(".grapher/pi-agent")
     };
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    ensure_default_models_file(&path)?;
     path.canonicalize().map_err(|e| e.to_string())
 }
 
@@ -2299,5 +2321,20 @@ export default async function () {
         fs::write(&record, "1").unwrap();
         assert!(check_retired_leases(temp.path()).is_err());
         assert_eq!(fs::read_to_string(record).unwrap(), "1");
+    }
+
+    #[test]
+    fn ensure_default_models_file_creates_empty_config_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let models_path = temp.path().join("models.json");
+        ensure_default_models_file(temp.path()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "providers": {} }));
+
+        let custom = r#"{"providers":{"custom":{"models":[{"id":"m1"}]}}}"#;
+        fs::write(&models_path, custom).unwrap();
+        ensure_default_models_file(temp.path()).unwrap();
+        assert_eq!(fs::read_to_string(&models_path).unwrap(), custom);
     }
 }

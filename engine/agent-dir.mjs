@@ -1,7 +1,9 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { toHostInput } from './path-identity.mjs';
-import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, readFileSync, constants } from 'node:fs';
+import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, readFileSync, writeFileSync, constants } from 'node:fs';
+
+const EMPTY_MODELS_CONFIG = '{\n  "providers": {}\n}\n';
 
 const KNOWN_PROVIDER_ENV_VARS = {
   anthropic: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'],
@@ -58,6 +60,15 @@ export function reuseManagedTools(directory, upstreamDirectory) {
   }
 }
 
+export function ensureDefaultModelsFile(directory) {
+  const path = join(directory, 'models.json');
+  try {
+    writeFileSync(path, EMPTY_MODELS_CONFIG, { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  }
+}
+
 // Provider/Auth, local login and native executions use the same dedicated
 // upstream-owned configuration directory.
 export function configureAgentDir() {
@@ -65,6 +76,7 @@ export function configureAgentDir() {
   if (directory === '~' || /^~[\\/]/.test(directory)) directory = homedir() + directory.slice(1);
   directory = resolve(directory);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  ensureDefaultModelsFile(directory);
   process.env.PI_CODING_AGENT_DIR = directory;
 
   reuseManagedTools(directory, join(homedir(), '.pi', 'agent'));

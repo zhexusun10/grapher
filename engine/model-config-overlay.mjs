@@ -38,6 +38,14 @@ function merge(base, preferred, key = '') {
   return preferred;
 }
 
+function isEmptyModelsConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (!Object.keys(value).every(key => key === 'providers' || key === '$schema')) return false;
+  const providers = value.providers;
+  return !!providers && typeof providers === 'object' && !Array.isArray(providers)
+    && Object.keys(providers).length === 0;
+}
+
 /** Prepare a private, process-local model overlay. The source files are never modified. */
 export async function prepareModelOverlay(agentDir, parse, options = {}) {
   if (process.env.GRAPHER_ISOLATED_PI_MODELS === '1') return undefined;
@@ -60,6 +68,8 @@ export async function prepareModelOverlay(agentDir, parse, options = {}) {
   // built-ins. Never let a valid file mask errors in the other file.
   let local, upstream;
   try { local = parse(targetContent); } catch { return target; }
+  // A default empty Grapher models.json has nothing to merge or back up.
+  if (isEmptyModelsConfig(local)) return source;
   try { upstream = parse(sourceContent); } catch { return source; }
   // Pi must validate both layers separately: merging first could hide an
   // invalid field or a missing required property behind the other layer.
