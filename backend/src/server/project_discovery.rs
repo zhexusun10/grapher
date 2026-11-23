@@ -17,6 +17,11 @@ pub(super) struct SkillItem {
 }
 
 pub(super) fn parse_skill_markdown(path: &Path) -> Option<(String, String)> {
+    // Skill paths may be user-provided links, but pipes/devices are not documents.
+    // In particular, opening a FIFO for reading can wait forever for a writer.
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let content = fs::read_to_string(path).ok()?;
     let mut name = None;
     let mut description = None;
@@ -387,6 +392,49 @@ pub(super) fn list_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_discovery_does_not_read_named_pipes() {
+        use std::{
+            os::unix::ffi::OsStrExt,
+            process::Command,
+            time::{Duration, Instant},
+        };
+
+        const FIXTURE_PATH: &str = "GRAPHER_TEST_SKILL_FIFO";
+        if let Some(path) = std::env::var_os(FIXTURE_PATH) {
+            assert!(parse_skill_markdown(Path::new(&path)).is_none());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // Isolate the blocking-open regression so a failure cannot hang the suite.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::project_discovery::tests::skill_discovery_does_not_read_named_pipes",
+            ])
+            .env(FIXTURE_PATH, &path)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "skill parser failed on a non-regular file");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("skill discovery blocked on a named pipe");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn file_discovery_skips_ancestor_links_without_hiding_noncyclic_aliases() {

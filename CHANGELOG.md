@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept desktop backend reconnections isolated from older in-flight requests: late responses cannot replace the current operation epoch, stale failures reuse the replacement connection, and superseded URL lookups follow the current backend. Closed SSE streams no longer deliver queued notifications to new subscribers.
+- Skipped non-regular skill documents during discovery so a `SKILL.md` named pipe cannot block the skills request waiting for a writer.
 - Prevented high-frequency terminal/API writes from filling the operation-receipt table and blocking unrelated mutations. Completed receipts are reclaimed under pressure while an issuance watermark prevents forgotten requests from executing again; pending operations remain protected.
 - Enforced the conversation-search cache budget across Run, execution and Planner entries, retained oversized results for the current query, and shared immutable cached data to avoid copying whole histories on each search. Unicode matching now handles contextual Greek casing without a per-byte offset map; long ASCII queries avoid repeated-prefix quadratic scans.
 

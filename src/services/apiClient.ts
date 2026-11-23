@@ -1,6 +1,6 @@
 import { t } from '../i18n';
 import { createUuid } from '../lib/uuid';
-import { DesktopBackendError, fetchApi, getApiTransportGeneration, isTauriDesktop } from './apiBase';
+import { DesktopBackendError, fetchApi, getApiTransportGeneration, isCurrentApiResponse, isTauriDesktop } from './apiBase';
 import { READ_COMMANDS, READ_OPERATIONS, type ApiErrorInfo, type OperationStatus } from './apiContract.generated';
 import { enableRuntimeEvents } from './runtimeEvents';
 import { withRequestTimeout } from './requestTimeout';
@@ -45,6 +45,7 @@ export interface ApiRequestOptions<T> {
 }
 
 export function observeApiResponse(response: Response): void {
+  if (!isCurrentApiResponse(response)) return;
   const instance = response.headers.get('x-grapher-instance');
   if (instance && /^[0-9a-f-]{36}$/i.test(instance)) {
     const generation = getApiTransportGeneration();

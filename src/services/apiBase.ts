@@ -216,6 +216,7 @@ function classifyBackendUrlError(error: unknown): DesktopBackendError {
 let cachedBaseUrl: string | null = null;
 let inFlightResolution: Promise<string> | null = null;
 let resolutionGeneration = 0;
+const responseGenerations = new WeakMap<Response, number>();
 let desktopState: DesktopBackendState = BROWSER_STATE;
 const stateListeners = new Set<() => void>();
 
@@ -314,30 +315,28 @@ export function resolveBackendBaseUrl(options?: {
     });
     const task = invokeBackendUrl().then(
       baseUrl => {
-        if (generation === resolutionGeneration) {
-          cachedBaseUrl = baseUrl;
-          publishDesktopState({
-            isDesktop: true,
-            phase: "ready",
-            baseUrl,
-            error: null,
-            closed: false,
-          });
-        }
+        if (generation !== resolutionGeneration) return resolveBackendBaseUrl();
+        cachedBaseUrl = baseUrl;
+        publishDesktopState({
+          isDesktop: true,
+          phase: "ready",
+          baseUrl,
+          error: null,
+          closed: false,
+        });
         return baseUrl;
       },
       error => {
+        if (generation !== resolutionGeneration) return resolveBackendBaseUrl();
         const classified = classifyBackendUrlError(error);
-        if (generation === resolutionGeneration) {
-          cachedBaseUrl = null;
-          publishDesktopState({
-            isDesktop: true,
-            phase: "error",
-            baseUrl: null,
-            error: classified.message,
-            closed: classified.kind === "closed",
-          });
-        }
+        cachedBaseUrl = null;
+        publishDesktopState({
+          isDesktop: true,
+          phase: "error",
+          baseUrl: null,
+          error: classified.message,
+          closed: classified.kind === "closed",
+        });
         throw classified;
       },
     ).finally(() => {
@@ -389,22 +388,26 @@ async function handleFetchFailure(
   path: string,
   init: RequestInit | undefined,
   usedBaseUrl: string | null,
+  usedGeneration: number,
   error: unknown,
   retrySafe = false,
 ): Promise<Response> {
   const signal = init?.signal ?? undefined;
   if (signal?.aborted || !isTauriDesktop()) throw error;
-  invalidateBackendBaseUrl();
+  // A request from an older sidecar must not tear down a newer connection.
+  if (usedGeneration === resolutionGeneration) invalidateBackendBaseUrl();
   let freshBaseUrl: string;
   try {
-    freshBaseUrl = await resolveBackendBaseUrl({ signal });
+    do {
+      freshBaseUrl = await resolveBackendBaseUrl({ signal });
+    } while (isTauriDesktop() && freshBaseUrl !== cachedBaseUrl);
   } catch (backendError) {
     if (signal?.aborted) throw error;
     throw backendError;
   }
   if (retrySafe && freshBaseUrl && usedBaseUrl && freshBaseUrl !== usedBaseUrl) {
     try {
-      return await fetch(joinApiUrl(freshBaseUrl, path), init);
+      return await fetchWithGeneration(joinApiUrl(freshBaseUrl, path), init, resolutionGeneration);
     } catch (retryError) {
       if (signal?.aborted) throw retryError;
       throw new DesktopBackendError(
@@ -423,13 +426,16 @@ async function handleFetchFailure(
 
 async function resolveAndFetchApi(path: string, init?: RequestInit, retrySafe = false): Promise<Response> {
   const signal = init?.signal ?? undefined;
-  const baseUrl = await resolveBackendBaseUrl({ signal });
-  const url = joinApiUrl(baseUrl, path);
-  try {
-    return await fetch(url, init);
-  } catch (error) {
-    return handleFetchFailure(path, init, baseUrl, error, retrySafe);
-  }
+  await resolveBackendBaseUrl({ signal });
+  // Recheck the cache after the await: another caller may have invalidated it.
+  return fetchApi(path, init, { retrySafe });
+}
+
+function fetchWithGeneration(url: string, init: RequestInit | undefined, generation: number): Promise<Response> {
+  return fetch(url, init).then(response => {
+    responseGenerations.set(response, generation);
+    return response;
+  });
 }
 
 /** Centralized `/api/...` fetch transport. Retains synchronous relative URLs
@@ -442,19 +448,26 @@ export function fetchApi(path: string, init?: RequestInit, options: { retrySafe?
       return Promise.reject(abortReason(signal));
     }
     const usedBaseUrl = cachedBaseUrl;
+    const usedGeneration = resolutionGeneration;
     let responsePromise: Promise<Response>;
     try {
-      responsePromise = fetch(syncUrl, init);
+      responsePromise = fetchWithGeneration(syncUrl, init, usedGeneration);
     } catch (error) {
-      return handleFetchFailure(path, init, usedBaseUrl, error, options.retrySafe);
+      return handleFetchFailure(path, init, usedBaseUrl, usedGeneration, error, options.retrySafe);
     }
     if (!isTauriDesktop()) return responsePromise;
-    return responsePromise.catch(error => handleFetchFailure(path, init, usedBaseUrl, error, options.retrySafe));
+    return responsePromise.catch(error => handleFetchFailure(path, init, usedBaseUrl, usedGeneration, error, options.retrySafe));
   }
   return resolveAndFetchApi(path, init, options.retrySafe);
 }
 
 export function getApiTransportGeneration(): number { return resolutionGeneration; }
+
+/** A late response may still satisfy its caller, but cannot identify the current backend. */
+export function isCurrentApiResponse(response: Response): boolean {
+  const generation = responseGenerations.get(response);
+  return generation === undefined || generation === resolutionGeneration;
+}
 
 export function resetApiBaseForTest(): void {
   cachedBaseUrl = null;

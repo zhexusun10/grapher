@@ -623,8 +623,12 @@ read it and the backend instance/receipt headers through the explicit CORS list.
 
 After bootstrap advertises `X-Grapher-Instance`, writes carry
 `X-Grapher-Operation: <instance>:<issued-ms>:<uuid>`. The HTTP boundary reserves the
-receipt before Run/service creation. A matching duplicate receives its original
-response or `OPERATION_IN_PROGRESS`; reusing a token for another command/body is
+receipt before Run/service creation. The desktop client tracks each response's
+dispatch generation: an older connection cannot replace the current instance
+or invalidate a newer connection, and superseded URL lookups follow the current
+backend. Queued SSE notifications are discarded when their source closes.
+A matching duplicate receives its original response or `OPERATION_IN_PROGRESS`;
+reusing a token for another command/body is
 `IDEMPOTENCY_CONFLICT`. Request fingerprints, not credential bodies, are retained.
 `operation_status` is a read and reports `pending`, `completed` or `unknown`, with
 the original response when available. After a transport/JSON-body failure the
