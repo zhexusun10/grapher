@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.17] - 2026-11-23
+
 ### Changed
 
 - Removed the redundant full Windows backend library run from CI; Linux runs the full fixture suite on every event, macOS retains it for PR/scheduled/manual checks, and Windows keeps focused ACL/path checks and native acceptance.
