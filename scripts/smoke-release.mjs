@@ -21,6 +21,10 @@ Object.assign(env, {
   HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: join(directory, 'agent'),
   GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global'), GRAPHER_ISOLATED_PI_MODELS: '1',
   GRAPHER_DATA_DIR: join(directory, 'data'), GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtimes'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
+  // All relocated smoke children share one verified baseline and V8 compile
+  // cache. Without this, every Pi subprocess rescans the bundled runtime and
+  // recompiles the TypeScript source graph on Intel macOS.
+  GRAPHER_BASELINE_CONTEXT: 'release-smoke', GRAPHER_RUNTIME_CACHE_DIR: join(directory, 'runtime-cache'),
   PI_OFFLINE: '1',
 });
 let child;

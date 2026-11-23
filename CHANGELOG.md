@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bounded relocatable macOS release smoke tests to the relocated CLI/provider contracts and the packaged backend smoke path, avoiding development-only continuation and extension matrices that can exceed Intel runner timeouts.
+- Bounded relocatable macOS release smoke tests to the relocated CLI/provider contracts and the packaged backend smoke path, avoiding development-only continuation and extension matrices that can exceed Intel runner timeouts. Shared baseline and V8 compile caches now also prevent each child process from rescanning and recompiling the bundled Pi source graph.
 - Made Rust/browser API binding parity checks insensitive to Windows CRLF checkout conversion and aligned workspace directory inspection coverage with the normalized host display path, avoiding false failures on Windows.
 - Bounded skill-discovery previews to the first 64 KiB of each regular document, avoiding whole-body allocation for completion metadata while handling a UTF-8 character split at the boundary. Literal `---` text inside descriptions no longer truncates the frontmatter.
 - Released Blob URLs and cancelled pending workspace-image requests when their Markdown references disappear, while preserving resources shared by remaining mounted images. Reintroducing a removed path now loads it again, including after a failed request.
