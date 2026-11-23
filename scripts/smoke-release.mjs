@@ -72,10 +72,17 @@ try {
   assert.equal(run('engine/entrypoint.mjs', ['--version']).trim(), lock.packageVersion);
   // Real CLI/IPC and bounded local-provider tests, not just a --version check.
   cpSync(join(root, 'scripts/pi-process-contract.test.mjs'), join(installation, 'scripts/pi-process-contract.test.mjs'));
-  const contracts = execFileSync(process.execPath, ['--test', join(installation, 'scripts/pi-process-contract.test.mjs')], {
-    // The individual contracts retain their own timeouts. On the slower Intel
-    // macOS runner the full, sequential suite can exceed three minutes.
-    cwd: directory, env, encoding: 'utf8', timeout: 420000, maxBuffer: 8 * 1024 * 1024,
+  const contracts = execFileSync(process.execPath, [
+    '--test',
+    '--test-name-pattern',
+    'production Pi CLI reports the pinned version|Provider/Auth private readiness loads code only and preserves authentication bytes|Provider/Auth Codex browser login exposes method and callback prompts and can restart after cancellation',
+    join(installation, 'scripts/pi-process-contract.test.mjs'),
+  ], {
+    // Release smoke must remain bounded on Intel macOS. The full development
+    // contract file includes slow continuation and extension matrix tests; the
+    // archive smoke keeps the cheap relocated CLI/provider probes here and
+    // exercises the packaged backend below.
+    cwd: directory, env, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024,
   });
   process.stdout.write(contracts);
   rmSync(join(installation, 'scripts/pi-process-contract.test.mjs'));
