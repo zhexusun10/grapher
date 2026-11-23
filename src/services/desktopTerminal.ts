@@ -97,9 +97,14 @@ export async function writeDesktopTerminal(sessionId: string, data: string): Pro
   // Preserve key/paste order across async IPC and HTTP calls, and split on
   // Unicode code points so a large paste cannot break UTF-8 surrogate pairs.
   const task = (inputQueues.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(async () => {
-    const characters = Array.from(data);
-    for (let offset = 0; offset < characters.length; offset += 8192) {
-      const chunk = characters.slice(offset, offset + 8192).join("");
+    // Slice the original string: expanding the entire paste into a character
+    // array retains many times its size until the last asynchronous write.
+    for (let offset = 0; offset < data.length;) {
+      let end = Math.min(offset + 8192, data.length);
+      if (end < data.length && data.charCodeAt(end - 1) >= 0xd800 && data.charCodeAt(end - 1) <= 0xdbff &&
+          data.charCodeAt(end) >= 0xdc00 && data.charCodeAt(end) <= 0xdfff) end--;
+      const chunk = data.slice(offset, end);
+      offset = end;
       if (!isTauriDesktop()) await writeWebTerminal(sessionId, chunk);
       else {
         const invoke = getTauriInvoke();
@@ -113,15 +118,24 @@ export async function writeDesktopTerminal(sessionId: string, data: string): Pro
   finally { if (inputQueues.get(sessionId) === task) inputQueues.delete(sessionId); }
 }
 
+const resizeQueues = new Map<string, Promise<void>>();
 export async function resizeDesktopTerminal(
   sessionId: string,
   cols: number,
   rows: number,
 ): Promise<void> {
-  if (!isTauriDesktop()) return resizeWebTerminal(sessionId, cols, rows);
-  const invoke = getTauriInvoke();
-  if (!invoke || !sessionId) return;
-  await invoke("terminal_resize", { sessionId, cols, rows });
+  if (!sessionId) return;
+  // A late older resize must not leave the PTY at a different grid size from
+  // xterm. Keep independent terminals responsive while ordering each session.
+  const task = (resizeQueues.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    if (!isTauriDesktop()) return resizeWebTerminal(sessionId, cols, rows);
+    const invoke = getTauriInvoke();
+    if (!invoke) return;
+    await invoke("terminal_resize", { sessionId, cols, rows });
+  });
+  resizeQueues.set(sessionId, task);
+  try { await task; }
+  finally { if (resizeQueues.get(sessionId) === task) resizeQueues.delete(sessionId); }
 }
 
 export async function killDesktopTerminal(sessionId: string): Promise<void> {
