@@ -1392,6 +1392,14 @@ mod tests {
     }
 
     #[test]
+    fn url_origin_handles_deeply_nested_blob_urls_without_recursing() {
+        // RUSTSEC-2026-0592: url <= 2.5.8 exhausted a worker's stack here.
+        let input = format!("{}https://example.com/", "blob:".repeat(10_000));
+        let parsed = tauri::Url::parse(&input).unwrap();
+        assert_eq!(parsed.origin().ascii_serialization(), "null");
+    }
+
+    #[test]
     fn validate_external_url_allows_only_clean_http_and_https_urls() {
         assert_eq!(
             validate_external_url(" https://github.com/zhexusun10/grapher/releases ").unwrap(),

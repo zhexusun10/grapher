@@ -55,21 +55,29 @@ jobs:
           if-no-files-found: warn
 
   rust-audit:
-    name: Rust locked-dependency audit
+    name: Rust locked-dependency audit / ${{ matrix.scope }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: backend
+            lockfile: backend/Cargo.lock
+          - scope: desktop
+            lockfile: src-tauri/Cargo.lock
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install a pinned audit client
         run: cargo install cargo-audit --version 0.22.0 --locked
-      - name: Audit the backend lock against current RustSec advisories
+      - name: Audit the locked dependencies against current RustSec advisories
         shell: bash
-        run: cargo audit --file backend/Cargo.lock --json | tee rust-audit.json
+        run: cargo audit --file ${{ matrix.lockfile }} --json | tee rust-audit.json
       - name: Retain Rust audit evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: rust-audit
+          name: rust-audit-${{ matrix.scope }}
           path: rust-audit.json
           if-no-files-found: warn
