@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updated the desktop `url` dependency to 2.5.9 to fix RUSTSEC-2026-0592 (stack overflow while resolving deeply nested `blob:` origins), and extended RustSec CI coverage to both backend and desktop lockfiles.
+
+### Fixed
+
+- Bounded skill-discovery previews to the first 64 KiB of each regular document, avoiding whole-body allocation for completion metadata while handling a UTF-8 character split at the boundary. Literal `---` text inside descriptions no longer truncates the frontmatter.
+- Released Blob URLs and cancelled pending workspace-image requests when their Markdown references disappear, while preserving resources shared by remaining mounted images. Reintroducing a removed path now loads it again, including after a failed request.
+- Published attachments only after a complete, synced write so I/O failures cannot leave partial immutable files that block retries. Concurrent retries preserve the first complete upload, and existing-file comparison uses bounded chunks instead of copying another full attachment into memory.
+- Serialized terminal resize requests per session across desktop and browser transports so a delayed older resize cannot leave the PTY at the wrong grid size. Large pastes now slice the original string without a retained character array while preserving Unicode boundaries and input order.
+- Kept desktop backend reconnections isolated from older in-flight requests: late responses cannot replace the current operation epoch, stale failures reuse the replacement connection, and superseded URL lookups follow the current backend. Closed SSE streams no longer deliver queued notifications to new subscribers.
+- Skipped non-regular skill documents during discovery so a `SKILL.md` named pipe cannot block the skills request waiting for a writer.
+- Prevented high-frequency terminal/API writes from filling the operation-receipt table and blocking unrelated mutations. Completed receipts are reclaimed under pressure while an issuance watermark prevents forgotten requests from executing again; pending operations remain protected.
+- Enforced the conversation-search cache budget across Run, execution and Planner entries, retained oversized results for the current query, and shared immutable cached data to avoid copying whole histories on each search. Unicode matching now handles contextual Greek casing without a per-byte offset map; long ASCII queries avoid repeated-prefix quadratic scans.
+
 ## [1.9.16] - 2026-11-22
 
 ### Added

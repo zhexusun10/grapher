@@ -579,6 +579,46 @@ test("SSE in Tauri mode waits for backend_url, avoids orphaned streams on unsubs
   }
 });
 
+test("an old SSE connection cannot invalidate a replacement backend or deliver queued events to new subscribers", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalEventSource = globalThis.EventSource;
+  MockEventSource.instances = [];
+  (globalThis as unknown as { EventSource: unknown }).EventSource = MockEventSource;
+  let port = 43001;
+  let resolutions = 0;
+  installTauriInvoke(async () => { resolutions++; return `http://127.0.0.1:${port}`; });
+  let unsubscribe = () => {};
+  try {
+    await resolveBackendBaseUrl();
+    unsubscribe = subscribeSnapshotChanges(() => {});
+    enableRuntimeEvents();
+    const oldSource = MockEventSource.instances[0];
+    port = 43002;
+    invalidateBackendBaseUrl();
+    await resolveBackendBaseUrl();
+    oldSource.emitError();
+    assert.equal(getCachedApiUrl('/api/snapshot'), 'http://127.0.0.1:43002/api/snapshot');
+    context.mock.timers.tick(RUNTIME_EVENTS_RETRY_MS);
+    await flushMicrotasks();
+    assert.equal(resolutions, 2);
+    const source = MockEventSource.instances[1];
+    assert.equal(source.url, 'http://127.0.0.1:43002/api/events');
+    source.emitEvent('snapshot_changed', { runId: 'same-run', version: 'queued-before-close' });
+    unsubscribe();
+    const versions: string[] = [];
+    unsubscribe = subscribeSnapshotChanges(event => versions.push(event.version));
+    source.emitEvent('snapshot_changed', { runId: 'same-run', version: 'late-after-close' });
+    MockEventSource.instances[2].emitEvent('snapshot_changed', { runId: 'same-run', version: 'current' });
+    await flushMicrotasks();
+    assert.deepEqual(versions, ['current']);
+  } finally {
+    unsubscribe();
+    setRuntimeEventsConnectedForTest(false);
+    (globalThis as unknown as { EventSource: unknown }).EventSource = originalEventSource;
+    clearTauriGlobals();
+  }
+});
+
 test("isMacosTauriDesktop activates only for Tauri desktop on macOS and stays false in browser or Windows Tauri", () => {
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const setNavigator = (value: unknown) => {

@@ -223,6 +223,113 @@ test("Markdown workspace screenshots load through scoped POSTs, survive streamin
   } finally { nextScope.resolve(); await context.close(); }
 });
 
+async function trackWorkspaceImageResources(page) {
+  await page.evaluate(() => {
+    window.audit.createdImages = [];
+    window.audit.revokedImages = [];
+    window.audit.abortedImagePaths = [];
+    const create = URL.createObjectURL.bind(URL);
+    const revoke = URL.revokeObjectURL.bind(URL);
+    const originalFetch = window.fetch.bind(window);
+    URL.createObjectURL = blob => { const url = create(blob); window.audit.createdImages.push(url); return url; };
+    URL.revokeObjectURL = url => { window.audit.revokedImages.push(url); revoke(url); };
+    window.fetch = (input, init) => {
+      if (String(input).endsWith('/api/get_workspace_image')) {
+        const { path } = JSON.parse(init.body);
+        init.signal?.addEventListener('abort', () => window.audit.abortedImagePaths.push(path), { once: true });
+      }
+      return originalFetch(input, init);
+    };
+  });
+}
+
+test("Markdown releases removed workspace images while retaining displayed paths across streaming", { timeout: 30_000 }, async () => {
+  const calls = [];
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+  const { context, page, errors } = await fixture("markdownCopy", async (route, command, body) => {
+    if (command !== 'get_workspace_image') return false;
+    calls.push(body.path);
+    await route.fulfill({ contentType: 'image/png', body: png });
+    return true;
+  });
+  try {
+    await trackWorkspaceImageResources(page);
+    await page.evaluate(() => {
+      window.audit.setImageScope('resource-run', 'resource-execution');
+      window.audit.setMarkdown('![Keep](keep.png)\n\n![Duplicate](keep.png)\n\n![Remove](remove.png)', true);
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll('.markdown-content img')].filter(image => image.naturalWidth === 1).length === 3);
+    const keepUrl = await page.getByRole('img', { name: 'Keep', exact: true }).getAttribute('src');
+    const removedUrl = await page.getByRole('img', { name: 'Remove', exact: true }).getAttribute('src');
+    await page.evaluate(() => window.audit.setMarkdown('![Keep](keep.png)\n\nThe second image was removed.', true));
+    await page.waitForFunction(url => window.audit.revokedImages.includes(url), removedUrl, { timeout: 3000 });
+    assert.equal(await page.getByRole('img', { name: 'Keep', exact: true }).getAttribute('src'), keepUrl);
+    assert.equal(await page.evaluate(url => window.audit.revokedImages.includes(url), keepUrl), false);
+    assert.equal(calls.filter(path => path === 'keep.png').length, 1);
+    await page.evaluate(() => window.audit.setMarkdown('![Keep](keep.png)\n\n![Remove](remove.png)', true));
+    await page.waitForFunction(old => {
+      const image = document.querySelector('img[alt="Remove"]');
+      return image?.naturalWidth === 1 && image.src !== old;
+    }, removedUrl);
+    assert.equal(calls.filter(path => path === 'remove.png').length, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Markdown cancels removed workspace-image requests and can load the path again", { timeout: 30_000 }, async () => {
+  const release = deferred();
+  const calls = [];
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+  const { context, page, errors } = await fixture("markdownCopy", async (route, command, body) => {
+    if (command !== 'get_workspace_image') return false;
+    calls.push(body.path);
+    await release.promise;
+    await route.fulfill({ contentType: 'image/png', body: png });
+    return true;
+  });
+  try {
+    await trackWorkspaceImageResources(page);
+    await page.evaluate(() => {
+      window.audit.setImageScope('pending-image-run');
+      window.audit.setMarkdown('![Pending](pending.png)', true);
+    });
+    await waitFor(() => calls.length === 1);
+    await page.evaluate(() => window.audit.setMarkdown('The image was removed.', true));
+    await page.waitForFunction(() => window.audit.abortedImagePaths.includes('pending.png'), null, { timeout: 3000 });
+    release.resolve();
+    await page.waitForTimeout(100);
+    assert.deepEqual(await page.evaluate(() => window.audit.createdImages), []);
+    await page.evaluate(() => window.audit.setMarkdown('![Pending](pending.png)', true));
+    await page.waitForFunction(() => document.querySelector('img[alt="Pending"]')?.naturalWidth === 1);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(errors, []);
+  } finally { release.resolve(); await context.close(); }
+});
+
+test("Markdown retries a failed workspace image after its reference is removed and reintroduced", { timeout: 30_000 }, async () => {
+  let calls = 0;
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+  const { context, page, errors } = await fixture("markdownCopy", async (route, command) => {
+    if (command !== 'get_workspace_image') return false;
+    if (++calls === 1) await route.fulfill({ status: 400, json: { error: 'Unavailable' } });
+    else await route.fulfill({ contentType: 'image/png', body: png });
+    return true;
+  });
+  try {
+    await page.evaluate(() => {
+      window.audit.setImageScope('image-retry-run');
+      window.audit.setMarkdown('![Retry](retry.png)', true);
+    });
+    await page.getByRole('img', { name: 'Unable to load image · Retry', exact: true }).waitFor();
+    await page.evaluate(() => window.audit.setMarkdown('Removed.'));
+    await page.getByText('Removed.', { exact: true }).waitFor();
+    await page.evaluate(() => window.audit.setMarkdown('![Retry](retry.png)', true));
+    await page.waitForFunction(() => document.querySelector('img[alt="Retry"]')?.naturalWidth === 1);
+    assert.equal(calls, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("Markdown tables keep inline code unboxed without changing prose or fenced code", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("markdownCopy");
   try {

@@ -14,6 +14,8 @@ The composer terminal button opens one native shell per workspace in browser and
 
 Terminal mode animations preserve the same xterm surface and defer grid fitting/PTY resize until they settle; manual drag resizing remains live. Minimize retains its final animation frame until the hidden state commits, and reversing a transition starts from the current presentation. Reduced motion and workspace switches settle immediately. The terminal browser tests sample intermediate frames and resize calls to cover these boundaries.
 
+Input and resize requests preserve order within each session across desktop IPC and browser HTTP; a failed request does not block later requests. Large pastes slice the original string into bounded chunks without splitting surrogate pairs or retaining a per-character array. [Transport tests](../../scripts/terminal-transport.test.ts) cover reordered completion, independent sessions, failure recovery, Unicode and the backend input limit.
+
 The create response identifies the host `ptyBackend` (`conpty` or `unix`). xterm enables ConPTY resize compatibility from that value, independently of the browser OS, so Windows repaint sequences do not overwrite scrollback pulled into the viewport by Unix resize behavior. Native Windows clients also enable this before the create reply. xterm 6's custom scrollbar owns history scrolling; its empty legacy viewport must not add another native scrollbar on Windows.
 
 [The shared PTY core](../../backend/src/terminal.rs) is used by the Tauri adapter and [HTTP terminal handlers](../../backend/src/server/terminal.rs). Browser clients use JSON POSTs under the existing Host/Origin boundary. Output reads use replayable cursors with a 1 MiB per-session buffer and explicit truncation, drain output before reporting exit, and retry transient connection failures. Browser navigation sends an idempotent close; abandoned sessions expire after five minutes without a read/input/resize, and the backend admits at most sixteen browser sessions. Terminal input uses a bounded writer queue so a non-reading child cannot block the UI/HTTP worker. [Terminal browser tests](../../scripts/workspace-terminal-ui.test.mjs) cover both transports, creation/close races, UTF-8 output and recovery after a failed read; Rust tests cover native PTYs and HTTP origin enforcement.
@@ -50,7 +52,12 @@ its global Scoped models manager after all role controls. That manager has its o
 Save/Cancel and does not change the scope of the surrounding Settings form.
 
 Backend file/skill completion scans skip ancestor-directory link cycles while
-retaining separate noncyclic aliases. File uploads reject malformed Base64 before
+retaining separate noncyclic aliases. Skill discovery previews at most the first
+64 KiB of each regular document for its name/description, tolerating a UTF-8
+character cut at that boundary without allocating a large instruction body.
+Frontmatter closes only on an unindented delimiter line, preserving literal
+`---` text inside descriptions. This preview limit does not change Pi's actual
+skill loading. File uploads reject malformed Base64 before
 creating project or staged inputs; valid padded/unpadded encodings, Base64 data
 URLs and ASCII whitespace remain supported. See [discovery](../../backend/src/server/project_discovery.rs)
 and [attachment delivery](../../backend/src/workspace_attachments.rs).
@@ -65,7 +72,9 @@ The runtime's terminal `Final response` suffix is Markdown, not JSONL: preserve 
 
 Markdown tables render inline code as unboxed monospace text, without a background, border, rounded corners or extra padding inside cells. This applies to both answers and reasoning; prose inline code and fenced code blocks retain their existing styling and copy behavior.
 
-Markdown images fit the transcript width. Relative image targets stay inert through sanitization, then `WorkspaceImages.tsx` resolves them with a Run-scoped JSON POST to `get_workspace_image`; execution transcripts also supply their attempt ID. The backend reuses file-open workspace/source priority, rejects traversal, redirected children and internal metadata paths, and serves only raster signatures (PNG/JPEG/GIF/WebP/BMP), capped at 20 MiB. It never serves SVG/HTML or accepts arbitrary roots. Blob URLs belong to mounted Markdown, survive streamed text updates and are revoked on scope changes/unmount; neither URLs nor image bytes enter the Markdown cache. Missing/unsupported images show a readable fallback instead of a broken icon. Local previews read current files, not immutable historical captures; deleted unpublished files cannot be recovered by this preview API. [Markdown browser regressions](../../scripts/frontend-audit.test.mjs) cover scoped requests, streaming reuse, sizing, failure and resource cleanup.
+Markdown images fit the transcript width. Relative image targets stay inert through sanitization, then `WorkspaceImages.tsx` resolves them with a Run-scoped JSON POST to `get_workspace_image`; execution transcripts also supply their attempt ID. The backend reuses file-open workspace/source priority, rejects traversal, redirected children and internal metadata paths, and serves only raster signatures (PNG/JPEG/GIF/WebP/BMP), capped at 20 MiB. It never serves SVG/HTML or accepts arbitrary roots.
+
+Blob URLs belong to mounted Markdown and are shared by images using the same path. Streamed text updates retain resources for displayed paths; removing the last reference cancels its pending request and revokes its URL. Scope changes/unmount release everything, and a removed path can load again if reintroduced, including after failure. Neither URLs nor image bytes enter the Markdown cache. Missing/unsupported images show a readable fallback instead of a broken icon. Local previews read current files, not immutable historical captures; deleted unpublished files cannot be recovered by this preview API. [Markdown browser regressions](../../scripts/frontend-audit.test.mjs) cover scoped requests, streaming reuse, sizing, failure and resource cleanup.
 
 Tool cards and their headers do not change appearance on hover; click-to-expand, keyboard focus and copy-button feedback remain enabled.
 

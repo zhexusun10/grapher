@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { BoundedLruCache, utf8Bytes } from "../lib/BoundedLruCache";
 import { isManagedAttachmentPath } from "../utils/attachmentPath";
-import { DesktopBackendError, fetchApi, isTauriDesktop, probeDesktopBackendError } from "./apiBase";
+import { DesktopBackendError, fetchApi, isCurrentApiResponse, isTauriDesktop, probeDesktopBackendError } from "./apiBase";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { ApiRequestError, jsonRequest, observeApiResponse, requestHeaders, responseError, recoverOperationResponse } from "./apiClient";
 import type { SnapshotPollRequest, SnapshotPollResponse, ExecutionOutputPage, PlanningOutputPage, OperationStatus, ConversationSearchResponse } from "./apiContract.generated";
@@ -243,7 +243,7 @@ export const runtimeService = {
       const recovered = !signal?.aborted && operationId ? await recoverOperationResponse(operationId, signal) : null;
       if (signal?.aborted) throw signal.reason ?? error;
       if (recovered) return completeFromReceipt(recovered);
-      if (isTauriDesktop()) error = await probeDesktopBackendError(error, signal) ?? error;
+      if (isTauriDesktop() && isCurrentApiResponse(response)) error = await probeDesktopBackendError(error, signal) ?? error;
       if (error instanceof Error && Object.isExtensible(error)) Object.assign(error, { requestId, operationId, outcomeUnknown: true });
       throw error;
     };

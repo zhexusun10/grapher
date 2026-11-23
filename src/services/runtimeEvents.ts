@@ -1,4 +1,4 @@
-import { getCachedApiUrl, invalidateBackendBaseUrl, isTauriDesktop, resolveApiUrl } from "./apiBase";
+import { getApiTransportGeneration, getCachedApiUrl, invalidateBackendBaseUrl, isTauriDesktop, resolveApiUrl } from "./apiBase";
 
 export interface SnapshotChangedEvent {
   runId: string;
@@ -115,7 +115,13 @@ function closeConnection(): void {
 function openEventSource(url: string): void {
   try {
     const es = new EventSource(url);
+    const transportGeneration = getApiTransportGeneration();
     source = es;
+    const dispatch = (notify: () => void) => {
+      queueMicrotask(() => {
+        if (source === es) notify();
+      });
+    };
     es.onopen = () => {
       if (source !== es) return;
       const reconnected = hadConnectionOrError;
@@ -136,7 +142,7 @@ function openEventSource(url: string): void {
         // `backend_url` on retry rather than polling a dead port forever.
         source = null;
         es.close();
-        invalidateBackendBaseUrl();
+        if (transportGeneration === getApiTransportGeneration()) invalidateBackendBaseUrl();
         scheduleRetry();
       } else if (es.readyState === EventSource.CLOSED) {
         source = null;
@@ -147,7 +153,7 @@ function openEventSource(url: string): void {
       try {
         const data = JSON.parse(String(event.data)) as SnapshotChangedEvent;
         if (typeof data?.runId !== "string") return;
-        queueMicrotask(() => {
+        dispatch(() => {
           for (const listener of snapshotListeners) listener(data);
         });
       } catch {}
@@ -156,7 +162,7 @@ function openEventSource(url: string): void {
       try {
         const data = JSON.parse(String(event.data));
         if (!data?.runId || !data?.planningId) return;
-        queueMicrotask(() => { for (const listener of planningListeners) listener(data); });
+        dispatch(() => { for (const listener of planningListeners) listener(data); });
       } catch {}
     });
     es.addEventListener("output_available", (event: MessageEvent) => {
@@ -167,7 +173,7 @@ function openEventSource(url: string): void {
         const hasSpecific = outputListeners.has(key);
         const hasSettled = Boolean(data.settled) && settledOutputListeners.size > 0;
         if (!hasSpecific && !hasSettled) return;
-        queueMicrotask(() => {
+        dispatch(() => {
           if (hasSpecific) {
             const listeners = outputListeners.get(key);
             if (listeners) {

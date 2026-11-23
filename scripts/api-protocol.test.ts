@@ -3,7 +3,7 @@ import test from 'node:test';
 import { emptySnapshot } from '../src/types.ts';
 import { applySnapshotDelta, validateSnapshot } from '../src/services/snapshotDelta.ts';
 import { ApiRequestError, isReadRequest, jsonRequest } from '../src/services/apiClient.ts';
-import { resetApiBaseForTest } from '../src/services/apiBase.ts';
+import { invalidateBackendBaseUrl, resetApiBaseForTest } from '../src/services/apiBase.ts';
 import { runtimeService } from '../src/services/runtime.ts';
 import { piExtensions } from '../src/services/piExtensions.ts';
 import { RequestTimeoutError } from '../src/services/requestTimeout.ts';
@@ -167,6 +167,135 @@ test('a rotated desktop backend may retry reads but never replays a mutation or 
     calls.length = 0;
     await assert.rejects(runtimeService.planGoalStream('goal', {} as never, () => {}));
     assert.equal(calls.length, 1);
+  } finally { globalThis.fetch = original; host.__TAURI_INTERNALS__ = oldTauri; resetApiBaseForTest(); }
+});
+
+test('a late response from the previous desktop backend cannot replace the current operation epoch', async () => {
+  const original = globalThis.fetch;
+  const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: { invoke: () => Promise<string> } };
+  const oldTauri = host.__TAURI_INTERNALS__;
+  const oldInstance = '66666666-6666-4666-8666-666666666666';
+  const newInstance = '77777777-7777-4777-8777-777777777777';
+  let port = 1421;
+  host.__TAURI_INTERNALS__ = { invoke: async () => `http://127.0.0.1:${port}` };
+  resetApiBaseForTest();
+  const lateResponse = Promise.withResolvers<Response>();
+  const started = Promise.withResolvers<void>();
+  let operationId: string | null = null;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes(':1421/')) { started.resolve(); return lateResponse.promise; }
+    if (url.endsWith('/control')) operationId = new Headers(init?.headers).get('X-Grapher-Operation');
+    return response(null, { 'x-grapher-instance': newInstance });
+  };
+  try {
+    const oldRead = jsonRequest('snapshot');
+    await started.promise;
+    port = 1422;
+    invalidateBackendBaseUrl();
+    await jsonRequest('snapshot');
+    lateResponse.resolve(response(null, { 'x-grapher-instance': oldInstance }));
+    await oldRead;
+    await jsonRequest('control', { action: 'pause' });
+    assert.ok(operationId?.startsWith(newInstance + ':'), `write used stale epoch: ${operationId}`);
+  } finally { globalThis.fetch = original; host.__TAURI_INTERNALS__ = oldTauri; resetApiBaseForTest(); }
+});
+
+test('a late transport failure cannot invalidate an already connected replacement backend', async () => {
+  const original = globalThis.fetch;
+  const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: { invoke: () => Promise<string> } };
+  const oldTauri = host.__TAURI_INTERNALS__;
+  let resolutions = 0;
+  host.__TAURI_INTERNALS__ = { invoke: async () => {
+    assert.ok(++resolutions <= 2, 'a stale failure must reuse the replacement connection');
+    return `http://127.0.0.1:${1420 + resolutions}`;
+  } };
+  resetApiBaseForTest();
+  const lateFailure = Promise.withResolvers<Response>();
+  const started = Promise.withResolvers<void>();
+  globalThis.fetch = async input => {
+    if (String(input).includes(':1421/')) { started.resolve(); return lateFailure.promise; }
+    return response('replacement', { 'x-grapher-instance': '77777777-7777-4777-8777-777777777777' });
+  };
+  try {
+    const oldRead = jsonRequest('snapshot');
+    await started.promise;
+    invalidateBackendBaseUrl();
+    assert.equal(await jsonRequest('snapshot'), 'replacement');
+    lateFailure.reject(new TypeError('old sidecar disconnected'));
+    assert.equal(await oldRead, 'replacement');
+    assert.equal(resolutions, 2);
+  } finally { globalThis.fetch = original; host.__TAURI_INTERNALS__ = oldTauri; resetApiBaseForTest(); }
+});
+
+test('superseded desktop URL lookups follow the current backend instead of dispatching to an old port', async () => {
+  const original = globalThis.fetch;
+  const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: { invoke: () => Promise<string> } };
+  const oldTauri = host.__TAURI_INTERNALS__;
+  try {
+    for (const outcome of ['old-url', 'old-error']) {
+      const lookup = Promise.withResolvers<string>();
+      const started = Promise.withResolvers<void>();
+      let resolutions = 0;
+      host.__TAURI_INTERNALS__ = { invoke: () => {
+        if (++resolutions === 1) { started.resolve(); return lookup.promise; }
+        return Promise.resolve('http://127.0.0.1:1422');
+      } };
+      resetApiBaseForTest();
+      const urls: string[] = [];
+      globalThis.fetch = async input => { urls.push(String(input)); return response(null); };
+      const oldRead = jsonRequest('snapshot');
+      await started.promise;
+      invalidateBackendBaseUrl();
+      await jsonRequest('snapshot');
+      if (outcome === 'old-url') lookup.resolve('http://127.0.0.1:1421');
+      else lookup.reject(new Error('old sidecar closed'));
+      await oldRead;
+      assert.deepEqual(urls, ['http://127.0.0.1:1422/api/snapshot', 'http://127.0.0.1:1422/api/snapshot']);
+      assert.equal(resolutions, 2);
+    }
+  } finally { globalThis.fetch = original; host.__TAURI_INTERNALS__ = oldTauri; resetApiBaseForTest(); }
+});
+
+test('an interrupted stream from the old backend cannot tear down its replacement or replay the plan', async () => {
+  const original = globalThis.fetch;
+  const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: { invoke: () => Promise<string> } };
+  const oldTauri = host.__TAURI_INTERNALS__;
+  let resolutions = 0;
+  host.__TAURI_INTERNALS__ = { invoke: async () => `http://127.0.0.1:${1420 + ++resolutions}` };
+  resetApiBaseForTest();
+  const started = Promise.withResolvers<void>();
+  let streamController!: ReadableStreamDefaultController<Uint8Array>;
+  let plans = 0;
+  let operationId: string | null = null;
+  const oldInstance = '66666666-6666-4666-8666-666666666666';
+  const newInstance = '77777777-7777-4777-8777-777777777777';
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/plan_goal_stream')) {
+      plans++;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        streamController = controller; started.resolve();
+      } }), { headers: { 'Content-Type': 'text/event-stream', 'x-grapher-instance': oldInstance } });
+    }
+    if (url.endsWith('/control')) operationId = new Headers(init?.headers).get('X-Grapher-Operation');
+    return response(url.endsWith('/operation_status') ? { state: 'unknown', response: null } : null,
+      { 'x-grapher-instance': url.includes(':1421/') ? oldInstance : newInstance });
+  };
+  try {
+    await jsonRequest('snapshot');
+    const planning = runtimeService.planGoalStream('goal', {} as never, () => {});
+    await started.promise;
+    invalidateBackendBaseUrl();
+    await jsonRequest('snapshot');
+    const interrupted = assert.rejects(planning, error => error instanceof TypeError &&
+      error.message === 'old stream lost' && (error as TypeError & { outcomeUnknown?: boolean }).outcomeUnknown === true);
+    streamController.error(new TypeError('old stream lost'));
+    await interrupted;
+    assert.equal(resolutions, 2);
+    assert.equal(plans, 1);
+    await jsonRequest('control', { action: 'pause' });
+    assert.ok(operationId?.startsWith(newInstance + ':'));
   } finally { globalThis.fetch = original; host.__TAURI_INTERNALS__ = oldTauri; resetApiBaseForTest(); }
 });
 

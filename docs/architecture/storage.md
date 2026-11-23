@@ -29,6 +29,17 @@ effective data root reported in startup logs and bootstrap `dataPath`:
 
 Data-directory writer exclusion, the persisted-format boundary and startup recovery are specified in [Runtime](runtime.md#persisted-format-boundary).
 
+### Immutable attachment uploads
+
+Attachments are written and synced to a temporary sibling before their final
+path is published without overwriting an existing file. Handled write failures
+remove the staging file and leave the same attachment ID available for retry.
+Concurrent retries compare against the complete winning file: identical bytes
+succeed and different bytes fail. Comparison uses bounded chunks and never
+rewrites an existing attachment. Process termination can leave unreferenced
+staging files, which remain under the existing attachment directory's cleanup
+ownership.
+
 ### Derived file-change summaries
 
 `file-changes/` sidecars are versioned caches, not history. Saves replace each cached execution's complete summary (including an authoritative empty result), while retaining executions not loaded in the current process. Repeated saves do not accumulate the same edits again. In-flight tool overlays remain live UI state; only confirmed tool changes are persisted. Terminal cache settlement follows the successful event commit, for both single and batched writes. Incompatible cache versions are rebuilt from retained evidence without rewriting events or transcripts.

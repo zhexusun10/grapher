@@ -91,6 +91,7 @@ enum ReceiptState {
 struct Receipts {
     entries: HashMap<String, Receipt>,
     result_bytes: usize,
+    retired_through: Option<u64>,
 }
 
 fn token_time(token: &str) -> Option<u64> {
@@ -116,19 +117,9 @@ pub(super) struct ReceiptGuard {
 }
 impl ReceiptGuard {
     pub(super) fn finish(mut self, status: u16, body: &Value) {
+        let bytes = body.to_string().len();
         if let Ok(mut receipts) = RECEIPTS.get_or_init(Default::default).lock() {
-            let bytes = body.to_string().len();
-            let cached =
-                if bytes <= 1024 * 1024 && receipts.result_bytes + bytes <= MAX_RESULT_BYTES {
-                    receipts.result_bytes += bytes;
-                    Some((status, body.clone()))
-                } else {
-                    None
-                };
-            if let Some(receipt) = receipts.entries.get_mut(&self.token) {
-                receipt.cached_bytes = if cached.is_some() { bytes } else { 0 };
-                receipt.state = ReceiptState::Finished(cached);
-            }
+            receipts.finish(&self.token, status, body, bytes);
         }
         self.finished = true;
     }
@@ -179,65 +170,139 @@ pub(super) fn begin(
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut retained_bytes = 0;
-    receipts.entries.retain(|_, receipt| {
-        let retain = matches!(receipt.state, ReceiptState::Pending)
-            || now.saturating_sub(receipt.created) < RETENTION_MS;
-        if retain {
-            retained_bytes += receipt.cached_bytes;
-        }
-        retain
-    });
-    receipts.result_bytes = retained_bytes;
-    if let Some(receipt) = receipts.entries.get(token) {
-        let (status, body) = if receipt.fingerprint != &fingerprint[..] {
-            error(
-                ErrorCode::IdempotencyConflict,
-                "Operation ID was already used for a different request",
-                false,
-                request_id,
-            )
-        } else {
-            match &receipt.state {
-                ReceiptState::Finished(Some((status, body))) => (*status, body.clone()),
-                ReceiptState::Pending => error(
-                    ErrorCode::OperationInProgress,
-                    "Operation is still running; query operation_status",
-                    true,
-                    request_id,
-                ),
-                _ => error(
-                    ErrorCode::OperationOutcomeUnknown,
-                    "Operation result is unavailable; inspect current state before retrying",
+    match receipts.reserve(token, &fingerprint, created, now, request_id) {
+        Ok(()) => Begin::New(ReceiptGuard {
+            token: token.into(),
+            finished: false,
+        }),
+        Err((status, body)) => Begin::Reply(status, body),
+    }
+}
+
+impl Receipts {
+    fn reserve(
+        &mut self,
+        token: &str,
+        fingerprint: &[u8],
+        created: u64,
+        now: u64,
+        request_id: &str,
+    ) -> Result<(), (u16, Value)> {
+        let mut retained_bytes = 0;
+        self.entries.retain(|_, receipt| {
+            let retain = matches!(receipt.state, ReceiptState::Pending)
+                || now.saturating_sub(receipt.created) < RETENTION_MS;
+            if retain {
+                retained_bytes += receipt.cached_bytes;
+            }
+            retain
+        });
+        self.result_bytes = retained_bytes;
+        if let Some(receipt) = self.entries.get(token) {
+            let (status, body) = if receipt.fingerprint != &fingerprint[..] {
+                error(
+                    ErrorCode::IdempotencyConflict,
+                    "Operation ID was already used for a different request",
                     false,
                     request_id,
-                ),
-            }
+                )
+            } else {
+                match &receipt.state {
+                    ReceiptState::Finished(Some((status, body))) => (*status, body.clone()),
+                    ReceiptState::Pending => error(
+                        ErrorCode::OperationInProgress,
+                        "Operation is still running; query operation_status",
+                        true,
+                        request_id,
+                    ),
+                    _ => error(
+                        ErrorCode::OperationOutcomeUnknown,
+                        "Operation result is unavailable; inspect current state before retrying",
+                        false,
+                        request_id,
+                    ),
+                }
+            };
+            return Err((status, body));
+        }
+        let retired = || {
+            error(
+            ErrorCode::OperationOutcomeUnknown,
+            "Operation receipt was retired under capacity pressure; inspect current state before retrying",
+            false, request_id,
+        )
         };
-        return Begin::Reply(status, body);
-    }
-    if receipts.entries.len() >= MAX_RECEIPTS {
-        let (status, body) = error(
-            ErrorCode::CapacityExceeded,
-            "Too many operations; retry later",
-            true,
-            request_id,
+        if self.retired_through.is_some_and(|cutoff| created <= cutoff) {
+            return Err(retired());
+        }
+        if self.entries.len() >= MAX_RECEIPTS {
+            self.retire_completed();
+            if self.retired_through.is_some_and(|cutoff| created <= cutoff) {
+                return Err(retired());
+            }
+        }
+        if self.entries.len() >= MAX_RECEIPTS {
+            let (status, body) = error(
+                ErrorCode::CapacityExceeded,
+                "Too many operations; retry later",
+                true,
+                request_id,
+            );
+            return Err((status, body));
+        }
+        self.entries.insert(
+            token.into(),
+            Receipt {
+                fingerprint: fingerprint.to_vec(),
+                created,
+                cached_bytes: 0,
+                state: ReceiptState::Pending,
+            },
         );
-        return Begin::Reply(status, body);
+        Ok(())
     }
-    receipts.entries.insert(
-        token.into(),
-        Receipt {
-            fingerprint: fingerprint.to_vec(),
-            created,
-            cached_bytes: 0,
-            state: ReceiptState::Pending,
-        },
-    );
-    Begin::New(ReceiptGuard {
-        token: token.into(),
-        finished: false,
-    })
+
+    fn retire_completed(&mut self) {
+        let mut times: Vec<_> = self
+            .entries
+            .values()
+            .filter(|receipt| !matches!(receipt.state, ReceiptState::Pending))
+            .map(|receipt| receipt.created)
+            .collect();
+        if times.is_empty() {
+            return;
+        }
+        times.sort_unstable();
+        let cutoff = times[(MAX_RECEIPTS / 4).min(times.len()) - 1];
+        // Once a receipt is forgotten, missing tokens through this issuance
+        // time must remain unknown, never look like brand new operations.
+        // Keep pending receipts even below the watermark, and resolve retained
+        // entries before consulting it so a late completion remains replayable.
+        self.retired_through = Some(self.retired_through.unwrap_or(0).max(cutoff));
+        self.entries.retain(|_, receipt| {
+            matches!(receipt.state, ReceiptState::Pending) || receipt.created > cutoff
+        });
+        self.result_bytes = self
+            .entries
+            .values()
+            .map(|receipt| receipt.cached_bytes)
+            .sum();
+    }
+
+    fn finish(&mut self, token: &str, status: u16, body: &Value, bytes: usize) {
+        let Some(receipt) = self.entries.get_mut(token) else {
+            return;
+        };
+        self.result_bytes = self.result_bytes.saturating_sub(receipt.cached_bytes);
+        let cached = if bytes <= 1024 * 1024 && self.result_bytes + bytes <= MAX_RESULT_BYTES {
+            self.result_bytes += bytes;
+            Some((status, body.clone()))
+        } else {
+            None
+        };
+        receipt.cached_bytes = if cached.is_some() { bytes } else { 0 };
+        receipt.state = ReceiptState::Finished(cached);
+    }
 }
 
 pub(super) fn operation_status(token: &str) -> Value {
@@ -277,6 +342,83 @@ pub(super) fn operation_status(token: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receipt_capacity_reclaims_completed_operations_without_replaying_retired_tokens() {
+        let mut receipts = Receipts::default();
+        let body = json!({"result": "completed"});
+        let bytes = body.to_string().len();
+        receipts.reserve("pending", &[1], 1, 1, "pending").unwrap();
+        for i in 0..MAX_RECEIPTS + 16 {
+            let token = format!("finished-{i}");
+            let time = 2 + i as u64;
+            receipts.reserve(&token, &[2], time, time, "new").unwrap();
+            receipts.finish(&token, 200, &body, bytes);
+        }
+        let now = MAX_RECEIPTS as u64 + 100;
+        let rejected = receipts
+            .reserve("finished-0", &[2], 2, now, "retired")
+            .unwrap_err();
+        assert_eq!(rejected.1["errorInfo"]["code"], "OPERATION_OUTCOME_UNKNOWN");
+        assert_eq!(
+            receipts
+                .reserve("delayed-old-id", &[3], 2, now, "delayed")
+                .unwrap_err()
+                .1["errorInfo"]["code"],
+            "OPERATION_OUTCOME_UNKNOWN"
+        );
+        let pending = receipts
+            .reserve("pending", &[1], 1, now, "pending-again")
+            .unwrap_err();
+        assert_eq!(pending.1["errorInfo"]["code"], "OPERATION_IN_PROGRESS");
+        receipts.finish("pending", 200, &body, bytes);
+        assert_eq!(
+            receipts
+                .reserve("pending", &[1], 1, now, "late-completion")
+                .unwrap_err()
+                .0,
+            200
+        );
+        let last = format!("finished-{}", MAX_RECEIPTS + 15);
+        assert_eq!(
+            receipts
+                .reserve(&last, &[2], now - 83, now, "replay")
+                .unwrap_err()
+                .0,
+            200
+        );
+        assert!(receipts.entries.len() <= MAX_RECEIPTS);
+        assert_eq!(
+            receipts.result_bytes,
+            receipts
+                .entries
+                .values()
+                .map(|entry| entry.cached_bytes)
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn receipt_capacity_never_evicts_running_operations() {
+        let mut receipts = Receipts::default();
+        for i in 0..MAX_RECEIPTS {
+            receipts
+                .reserve(&i.to_string(), &[1], i as u64, i as u64, "pending")
+                .unwrap();
+        }
+        let reply = receipts
+            .reserve("overflow", &[1], 10000, 10000, "overflow")
+            .unwrap_err();
+        assert_eq!(reply.0, 429);
+        assert_eq!(
+            receipts
+                .reserve("0", &[1], 0, 10000, "retry")
+                .unwrap_err()
+                .1["errorInfo"]["code"],
+            "OPERATION_IN_PROGRESS"
+        );
+        assert_eq!(receipts.entries.len(), MAX_RECEIPTS);
+    }
+
     fn token() -> String {
         format!("{}:{}:{}", instance(), now_ms(), Uuid::new_v4())
     }
