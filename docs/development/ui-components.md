@@ -52,7 +52,12 @@ its global Scoped models manager after all role controls. That manager has its o
 Save/Cancel and does not change the scope of the surrounding Settings form.
 
 Backend file/skill completion scans skip ancestor-directory link cycles while
-retaining separate noncyclic aliases. File uploads reject malformed Base64 before
+retaining separate noncyclic aliases. Skill discovery previews at most the first
+64 KiB of each regular document for its name/description, tolerating a UTF-8
+character cut at that boundary without allocating a large instruction body.
+Frontmatter closes only on an unindented delimiter line, preserving literal
+`---` text inside descriptions. This preview limit does not change Pi's actual
+skill loading. File uploads reject malformed Base64 before
 creating project or staged inputs; valid padded/unpadded encodings, Base64 data
 URLs and ASCII whitespace remain supported. See [discovery](../../backend/src/server/project_discovery.rs)
 and [attachment delivery](../../backend/src/workspace_attachments.rs).

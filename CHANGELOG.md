@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bounded skill-discovery previews to the first 64 KiB of each regular document, avoiding whole-body allocation for completion metadata while handling a UTF-8 character split at the boundary. Literal `---` text inside descriptions no longer truncates the frontmatter.
 - Released Blob URLs and cancelled pending workspace-image requests when their Markdown references disappear, while preserving resources shared by remaining mounted images. Reintroducing a removed path now loads it again, including after a failed request.
 - Published attachments only after a complete, synced write so I/O failures cannot leave partial immutable files that block retries. Concurrent retries preserve the first complete upload, and existing-file comparison uses bounded chunks instead of copying another full attachment into memory.
 - Serialized terminal resize requests per session across desktop and browser transports so a delayed older resize cannot leave the PTY at the wrong grid size. Large pastes now slice the original string without a retained character array while preserving Unicode boundaries and input order.
