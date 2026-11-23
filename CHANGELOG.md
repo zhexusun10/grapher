@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updated the desktop `url` dependency to 2.5.9 to fix RUSTSEC-2026-0592 (stack overflow while resolving deeply nested `blob:` origins), and extended RustSec CI coverage to both backend and desktop lockfiles.
+
+### Fixed
+
+- Prevented high-frequency terminal/API writes from filling the operation-receipt table and blocking unrelated mutations. Completed receipts are reclaimed under pressure while an issuance watermark prevents forgotten requests from executing again; pending operations remain protected.
+- Enforced the conversation-search cache budget across Run, execution and Planner entries, retained oversized results for the current query, and shared immutable cached data to avoid copying whole histories on each search. Unicode matching now handles contextual Greek casing without a per-byte offset map; long ASCII queries avoid repeated-prefix quadratic scans.
+
 ## [1.9.16] - 2026-11-22
 
 ### Added

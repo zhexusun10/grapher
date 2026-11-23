@@ -637,8 +637,14 @@ receipt snapshot. Aborted/deadline-expired owners do not start recovery reads.
 
 Receipts are bounded process-local transport evidence: tokens expire after 15
 minutes, at most 4096 are retained, and cached responses use at most 8 MiB, with a
-1 MiB per-response ceiling. Pending entries are never evicted to make a duplicate
-look new. Large/completed uncached results and unwound requests remain explicit
+1 MiB per-response ceiling. At capacity, completed/unknown receipts are retired
+in batches so high-frequency terminal input does not block fresh operations.
+A monotonic issuance-time watermark rejects missing tokens at or below the
+retired cutoff as `OPERATION_OUTCOME_UNKNOWN`, including delayed tokens that
+have never arrived. Retained pending entries are checked first and never evicted;
+their late completions can still replay while retained. If every slot is pending,
+new operations receive 429 before dispatch. Large/completed uncached results and
+unwound requests remain explicit
 uncertain outcomes for replay purposes. A restart changes the instance ID and
 rejects old tokens before dispatch; it cannot prove whether an earlier write
 committed. Callers must inspect current state when the outcome is unknown, and
@@ -649,6 +655,13 @@ replay authority, bypassing this transport cache. Restoring a large image draft
 must still work after a restart or when its reply exceeds the transport budget.
 
 ### Paging and request coordination
+
+Conversation search shares immutable Run, execution and Planner text entries under
+a 64 MiB retained-cache budget, including string capacities and entry metadata.
+All three categories participate in LRU eviction. An entry too large to retain
+remains available to the current query, so memory pressure does not hide matches;
+cache hits do not copy whole conversation histories. Unicode match offsets are
+recovered by walking to the lowercase hit, without a per-byte offset table.
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.

@@ -51,7 +51,7 @@ fn db_file_id(path: &Path) -> Option<DbFileId> {
 
 struct CachedRunEntry {
     max_sequence: i64,
-    data: Option<RunSearchData>,
+    data: Option<Arc<RunSearchData>>,
     bytes: usize,
     last_used: u64,
 }
@@ -60,7 +60,7 @@ struct CachedExecutionTexts {
     run_id: String,
     end_offset: Option<usize>,
     log_bytes: usize,
-    texts: Vec<String>,
+    texts: Arc<[String]>,
     bytes: usize,
     last_used: u64,
 }
@@ -68,7 +68,7 @@ struct CachedExecutionTexts {
 struct CachedPlannerTexts {
     len: u64,
     modified: Option<SystemTime>,
-    texts: Vec<String>,
+    texts: Arc<[String]>,
     bytes: usize,
     last_used: u64,
 }
@@ -82,6 +82,7 @@ struct SearchIndex {
     executions: HashMap<String, CachedExecutionTexts>,
     planners: HashMap<String, CachedPlannerTexts>,
     cached_bytes: usize,
+    cache_budget: usize,
     clock: u64,
 }
 
@@ -101,6 +102,7 @@ impl SearchIndex {
             executions: HashMap::new(),
             planners: HashMap::new(),
             cached_bytes: 0,
+            cache_budget: MAX_INDEX_CACHE_BYTES,
             clock: 0,
         })
     }
@@ -161,7 +163,7 @@ impl SearchIndex {
         Ok(true)
     }
 
-    fn run_data(&mut self, run_id: &str) -> Result<Option<RunSearchData>, String> {
+    fn run_data(&mut self, run_id: &str) -> Result<Option<Arc<RunSearchData>>, String> {
         let Some(&max_seq) = self.max_seq_by_run.get(run_id) else {
             return Ok(None);
         };
@@ -172,8 +174,16 @@ impl SearchIndex {
                 return Ok(entry.data.clone());
             }
         }
-        let data = load_run_search_data(&self.connection, run_id)?;
-        let bytes = data.as_ref().map_or(0, RunSearchData::approx_bytes);
+        let data = load_run_search_data(&self.connection, run_id)?.map(Arc::new);
+        let bytes = data.as_ref().map_or(0, |data| data.approx_bytes())
+            + run_id.len()
+            + std::mem::size_of::<CachedRunEntry>();
+        if bytes > self.cache_budget {
+            if let Some(previous) = self.runs.remove(run_id) {
+                self.cached_bytes = self.cached_bytes.saturating_sub(previous.bytes);
+            }
+            return Ok(data);
+        }
         if let Some(prev) = self.runs.insert(
             run_id.to_string(),
             CachedRunEntry {
@@ -196,7 +206,7 @@ impl SearchIndex {
         execution_id: &str,
         end_offset: Option<usize>,
         db_changed: bool,
-    ) -> &[String] {
+    ) -> Arc<[String]> {
         let tick = self.next_tick();
         let fast_hit = !db_changed
             && self
@@ -210,8 +220,8 @@ impl SearchIndex {
             return self
                 .executions
                 .get(execution_id)
-                .map(|entry| entry.texts.as_slice())
-                .unwrap_or(&[]);
+                .map(|entry| Arc::clone(&entry.texts))
+                .unwrap_or_default();
         }
 
         let log_bytes = query_execution_log_bytes(&self.connection, run_id, execution_id);
@@ -227,11 +237,11 @@ impl SearchIndex {
             return self
                 .executions
                 .get(execution_id)
-                .map(|entry| entry.texts.as_slice())
-                .unwrap_or(&[]);
+                .map(|entry| Arc::clone(&entry.texts))
+                .unwrap_or_default();
         }
 
-        let texts = if log_bytes == 0 {
+        let texts: Vec<String> = if log_bytes == 0 {
             Vec::new()
         } else {
             extract_execution_assistant_texts(&self.connection, run_id, execution_id, end_offset)
@@ -240,7 +250,19 @@ impl SearchIndex {
                 .filter(|t| !t.is_empty())
                 .collect()
         };
-        let bytes: usize = texts.iter().map(String::len).sum();
+        let bytes = texts.iter().map(String::capacity).sum::<usize>()
+            + texts.len() * std::mem::size_of::<String>()
+            + execution_id.len()
+            + run_id.len()
+            + std::mem::size_of::<CachedExecutionTexts>();
+        let texts: Arc<[String]> = texts.into();
+        let result = Arc::clone(&texts);
+        if bytes > self.cache_budget {
+            if let Some(previous) = self.executions.remove(execution_id) {
+                self.cached_bytes = self.cached_bytes.saturating_sub(previous.bytes);
+            }
+            return result;
+        }
         if let Some(prev) = self.executions.insert(
             execution_id.to_string(),
             CachedExecutionTexts {
@@ -256,10 +278,7 @@ impl SearchIndex {
         }
         self.cached_bytes = self.cached_bytes.saturating_add(bytes);
         self.evict_if_needed();
-        self.executions
-            .get(execution_id)
-            .map(|entry| entry.texts.as_slice())
-            .unwrap_or(&[])
+        result
     }
 
     fn planner_texts(
@@ -267,7 +286,7 @@ impl SearchIndex {
         planning_root: &Path,
         planning_id: &str,
         check_disk: bool,
-    ) -> &[String] {
+    ) -> Arc<[String]> {
         let tick = self.next_tick();
         if !check_disk && self.planners.contains_key(planning_id) {
             if let Some(entry) = self.planners.get_mut(planning_id) {
@@ -276,20 +295,20 @@ impl SearchIndex {
             return self
                 .planners
                 .get(planning_id)
-                .map(|entry| entry.texts.as_slice())
-                .unwrap_or(&[]);
+                .map(|entry| Arc::clone(&entry.texts))
+                .unwrap_or_default();
         }
 
         if !is_valid_planning_id(planning_id) {
-            return &[];
+            return Arc::default();
         }
         let candidate = planning_root.join(planning_id).join("planner.jsonl");
         let Ok(Some(path)) = crate::path_safety::real_child_path(planning_root, &candidate, true)
         else {
-            return &[];
+            return Arc::default();
         };
         let Ok(meta) = fs::metadata(&path) else {
-            return &[];
+            return Arc::default();
         };
         let len = meta.len();
         let modified = meta.modified().ok();
@@ -304,11 +323,11 @@ impl SearchIndex {
             return self
                 .planners
                 .get(planning_id)
-                .map(|entry| entry.texts.as_slice())
-                .unwrap_or(&[]);
+                .map(|entry| Arc::clone(&entry.texts))
+                .unwrap_or_default();
         }
 
-        let texts = if len == 0 || len > MAX_LOG_FILE_BYTES {
+        let texts: Vec<String> = if len == 0 || len > MAX_LOG_FILE_BYTES {
             Vec::new()
         } else {
             extract_planner_assistant_texts_from_path(&path)
@@ -317,7 +336,18 @@ impl SearchIndex {
                 .filter(|t| !t.is_empty())
                 .collect()
         };
-        let bytes: usize = texts.iter().map(String::len).sum();
+        let bytes = texts.iter().map(String::capacity).sum::<usize>()
+            + texts.len() * std::mem::size_of::<String>()
+            + planning_id.len()
+            + std::mem::size_of::<CachedPlannerTexts>();
+        let texts: Arc<[String]> = texts.into();
+        let result = Arc::clone(&texts);
+        if bytes > self.cache_budget {
+            if let Some(previous) = self.planners.remove(planning_id) {
+                self.cached_bytes = self.cached_bytes.saturating_sub(previous.bytes);
+            }
+            return result;
+        }
         if let Some(prev) = self.planners.insert(
             planning_id.to_string(),
             CachedPlannerTexts {
@@ -332,44 +362,48 @@ impl SearchIndex {
         }
         self.cached_bytes = self.cached_bytes.saturating_add(bytes);
         self.evict_if_needed();
-        self.planners
-            .get(planning_id)
-            .map(|entry| entry.texts.as_slice())
-            .unwrap_or(&[])
+        result
     }
 
     fn evict_if_needed(&mut self) {
-        if self.cached_bytes <= MAX_INDEX_CACHE_BYTES {
+        if self.cached_bytes <= self.cache_budget {
             return;
         }
-        let target = MAX_INDEX_CACHE_BYTES / 2;
-        let mut exec_keys: Vec<(u64, String)> = self
-            .executions
-            .iter()
-            .map(|(k, v)| (v.last_used, k.clone()))
-            .collect();
-        exec_keys.sort_unstable_by_key(|(used, _)| *used);
-        for (_, key) in exec_keys {
-            if self.cached_bytes <= target {
-                break;
-            }
-            if let Some(removed) = self.executions.remove(&key) {
-                self.cached_bytes = self.cached_bytes.saturating_sub(removed.bytes);
-            }
+        let target = self.cache_budget / 2;
+        enum Key {
+            Run(String),
+            Execution(String),
+            Planner(String),
         }
-        let mut planner_keys: Vec<(u64, String)> = self
-            .planners
+        let mut entries: Vec<_> = self
+            .runs
             .iter()
-            .map(|(k, v)| (v.last_used, k.clone()))
+            .map(|(key, entry)| (entry.last_used, Key::Run(key.clone())))
+            .chain(
+                self.executions
+                    .iter()
+                    .map(|(key, entry)| (entry.last_used, Key::Execution(key.clone()))),
+            )
+            .chain(
+                self.planners
+                    .iter()
+                    .map(|(key, entry)| (entry.last_used, Key::Planner(key.clone()))),
+            )
             .collect();
-        planner_keys.sort_unstable_by_key(|(used, _)| *used);
-        for (_, key) in planner_keys {
-            if self.cached_bytes <= target {
+        entries.sort_unstable_by_key(|(used, _)| *used);
+        for (_, key) in entries {
+            // Hysteresis must not discard the final hot entry when it still
+            // fits the hard budget, even if it exceeds the half-budget target.
+            if self.cached_bytes <= target || (self.cached_bytes <= self.cache_budget
+                && self.runs.len() + self.executions.len() + self.planners.len() == 1) {
                 break;
             }
-            if let Some(removed) = self.planners.remove(&key) {
-                self.cached_bytes = self.cached_bytes.saturating_sub(removed.bytes);
-            }
+            let bytes = match key {
+                Key::Run(key) => self.runs.remove(&key).map(|entry| entry.bytes),
+                Key::Execution(key) => self.executions.remove(&key).map(|entry| entry.bytes),
+                Key::Planner(key) => self.planners.remove(&key).map(|entry| entry.bytes),
+            };
+            self.cached_bytes = self.cached_bytes.saturating_sub(bytes.unwrap_or(0));
         }
     }
 }
@@ -505,7 +539,9 @@ fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
     let workspace_runs: Vec<_> = catalog
         .conversations
         .into_iter()
-        .filter(|summary| crate::path_identity::same_repository_binding(&summary.repository, repository))
+        .filter(|summary| {
+            crate::path_identity::same_repository_binding(&summary.repository, repository)
+        })
         .collect();
     if workspace_runs.is_empty() {
         return Ok(());
@@ -519,7 +555,12 @@ fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
             continue;
         };
         for exec in &run_data.executions {
-            let _ = index.execution_texts(&summary.run_id, &exec.execution_id, exec.end_offset, db_changed);
+            let _ = index.execution_texts(
+                &summary.run_id,
+                &exec.execution_id,
+                exec.end_offset,
+                db_changed,
+            );
         }
         if let Some(planning_root) = planning_root.as_deref() {
             let check_disk = db_changed || summary.phase == "planning" || summary.has_active_executions;
@@ -553,7 +594,9 @@ fn search_workspace_root(
     let workspace_runs: Vec<_> = catalog
         .conversations
         .into_iter()
-        .filter(|summary| crate::path_identity::same_repository_binding(&summary.repository, repository))
+        .filter(|summary| {
+            crate::path_identity::same_repository_binding(&summary.repository, repository)
+        })
         .collect();
 
     if workspace_runs.is_empty() {
@@ -667,10 +710,25 @@ impl RunSearchData {
     fn approx_bytes(&self) -> usize {
         self.user_messages
             .iter()
-            .map(|m| m.text.len() + m.node.as_ref().map_or(0, String::len))
+            .map(|m| {
+                m.text.capacity()
+                    + m.node.as_ref().map_or(0, String::capacity)
+                    + m.execution_id.as_ref().map_or(0, String::capacity)
+            })
             .sum::<usize>()
-            + self.planning_ids.len() * 48
-            + self.executions.len() * 64
+            + self.user_messages.capacity() * std::mem::size_of::<UserMessageRecord>()
+            + self
+                .planning_ids
+                .iter()
+                .map(|(id, _)| id.capacity())
+                .sum::<usize>()
+            + self.planning_ids.capacity() * std::mem::size_of::<(String, Option<u64>)>()
+            + self
+                .executions
+                .iter()
+                .map(|e| e.execution_id.capacity() + e.node.as_ref().map_or(0, String::capacity))
+                .sum::<usize>()
+            + self.executions.capacity() * std::mem::size_of::<ExecSearchTarget>()
     }
 }
 
@@ -1041,7 +1099,11 @@ fn load_run_search_data(
         let steer_start = candidates
             .iter()
             .rev()
-            .find(|c| c.is_planner && c.sequence < pedit.sequence && clean_user_message(&c.text) == target_clean)
+            .find(|c| {
+                c.is_planner
+                    && c.sequence < pedit.sequence
+                    && clean_user_message(&c.text) == target_clean
+            })
             .map(|c| c.sequence);
         let start = match (goal_start, steer_start) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -1881,6 +1943,14 @@ fn find_case_insensitive_range(
     }
     // Fast path 2: pure ASCII queries scan UTF-8 bytes directly with zero allocations.
     if needle_lower.is_ascii() {
+        // Keep the allocation-free path bounded. A long repeated prefix with
+        // a mismatch at the end otherwise compares N * query_length bytes.
+        if needle_lower.len() > 32 {
+            return haystack
+                .to_ascii_lowercase()
+                .find(needle_lower)
+                .map(|start| (start, start + needle_lower.len()));
+        }
         let needle_bytes = needle_lower.as_bytes();
         let hay_bytes = haystack.as_bytes();
         if needle_bytes.len() > hay_bytes.len() {
@@ -1892,30 +1962,25 @@ fn find_case_insensitive_range(
             .map(|start| (start, start + needle_bytes.len()));
     }
 
-    // General Unicode path (e.g. mixed CJK + English): check lowercase hit
-    // first so non-matching messages avoid allocating the char-offset map.
-    let lower_quick = haystack.to_lowercase();
-    if !lower_quick.contains(needle_lower) {
-        return None;
-    }
-
-    let mut lower = String::with_capacity(haystack.len());
-    let mut map: Vec<(usize, usize)> = Vec::with_capacity(haystack.len());
-    for (orig_start, ch) in haystack.char_indices() {
-        let orig_end = orig_start + ch.len_utf8();
-        for lc in ch.to_lowercase() {
-            let mut buf = [0u8; 4];
-            let encoded = lc.encode_utf8(&mut buf);
-            lower.push_str(encoded);
-            for _ in 0..encoded.len() {
-                map.push((orig_start, orig_end));
-            }
-        }
-    }
+    // Whole-string lowercasing handles contextual forms such as Greek final
+    // sigma. Walk only to the hit to recover original UTF-8 boundaries; a map
+    // for every byte used to consume up to 16 times the message's memory.
+    let lower = haystack.to_lowercase();
     let pos = lower.find(needle_lower)?;
-    let orig_start = map[pos].0;
-    let orig_end = map[pos + needle_lower.len() - 1].1;
-    Some((orig_start, orig_end))
+    let end = pos + needle_lower.len();
+    let mut lowered_offset = 0;
+    let mut start = None;
+    for (orig_start, ch) in haystack.char_indices() {
+        let next = lowered_offset + ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if lowered_offset <= pos && pos < next {
+            start = Some(orig_start);
+        }
+        if next >= end {
+            return Some((start?, orig_start + ch.len_utf8()));
+        }
+        lowered_offset = next;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1978,7 +2043,12 @@ mod tests {
         .unwrap()
     }
 
-    fn test_execution(id: &str, node: &str, started_at: u64, completed_at: Option<u64>) -> Execution {
+    fn test_execution(
+        id: &str,
+        node: &str,
+        started_at: u64,
+        completed_at: Option<u64>,
+    ) -> Execution {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "node": node,
@@ -1993,6 +2063,107 @@ mod tests {
             "completedAt": completed_at
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn search_cache_budget_includes_run_messages_and_keeps_oversized_results_searchable() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("events.sqlite");
+        let store = Store::open(&db).unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let repo = repo.to_string_lossy().to_string();
+        let planning_id = "cache-budget-planner";
+        let mut state = Snapshot {
+            run_id: "cache-budget-run".into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: format!("userneedle {}", "x".repeat(4096)),
+                        nodes: vec![Node {
+                            id: "task".into(),
+                            task: "work".into(),
+                        }],
+                        edges: vec![],
+                    },
+                    config: test_config(&repo),
+                    planning_id: Some(planning_id.into()),
+                    planning: Some(PlanningSummary {
+                        planning_id: planning_id.into(),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+        store
+            .append(
+                &mut state,
+                EventKind::Started {
+                    execution: test_execution("cache-budget-exec", "task", 1, Some(2)),
+                    message_sequences: None,
+                    fresh_restart: false,
+                },
+            )
+            .unwrap();
+        let log = |needle: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":format!("{needle} {}", "x".repeat(4096))}]}})
+            )
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Output {
+                    execution_id: "cache-budget-exec".into(),
+                    text: log("executionneedle"),
+                },
+            )
+            .unwrap();
+        let planning = temp.path().join("planning").join(planning_id);
+        fs::create_dir_all(&planning).unwrap();
+        fs::write(planning.join("planner.jsonl"), log("plannerneedle")).unwrap();
+        let index = search_index_for(&db).unwrap();
+        index.lock().unwrap().cache_budget = 1024;
+        for needle in ["userneedle", "executionneedle", "plannerneedle"] {
+            let result =
+                search_workspace_root(temp.path(), &repo, needle, RoleFilter::All, 50).unwrap();
+            assert_eq!(
+                result.matches.len(),
+                1,
+                "eviction must not hide the current {needle} result"
+            );
+            assert!(
+                index.lock().unwrap().cached_bytes <= 1024,
+                "every retained cache category must obey the shared budget"
+            );
+        }
+        // Several individually cacheable Runs must participate in eviction too;
+        // rejecting only a single oversized entry does not bound this case.
+        index.lock().unwrap().cache_budget = 8192;
+        for i in 0..32 {
+            let mut small = Snapshot {
+                run_id: format!("small-cache-{i}"),
+                ..Default::default()
+            };
+            store.append(&mut small, EventKind::Created {
+                graph: Graph {
+                    original_goal: format!("smallneedle {}", "x".repeat(128)),
+                    nodes: vec![], edges: vec![],
+                },
+                config: test_config(&repo), planning_id: None, planning: None,
+            }).unwrap();
+        }
+        let small = search_workspace_root(temp.path(), &repo, "smallneedle", RoleFilter::User, 50).unwrap();
+        assert_eq!(small.matches.len(), 32);
+        let used = index.lock().unwrap().cached_bytes;
+        assert!(used > 0 && used <= 8192, "small entries must remain cached within budget");
+        forget_search_index(&db);
+        crate::store::forget_catalog(&db);
     }
 
     #[test]
@@ -2201,7 +2372,14 @@ mod tests {
         assert_eq!(node_reply_hit.matches[0].run_id, "run-a-1");
         assert_eq!(node_reply_hit.matches[0].role, "assistant");
 
-        let planner_reply_hit = search_workspace_root(root, &repo_a_str, "规划好数据库优化节点", RoleFilter::All, 50).unwrap();
+        let planner_reply_hit = search_workspace_root(
+            root,
+            &repo_a_str,
+            "规划好数据库优化节点",
+            RoleFilter::All,
+            50,
+        )
+        .unwrap();
         assert_eq!(planner_reply_hit.matches.len(), 1);
         assert_eq!(planner_reply_hit.matches[0].run_id, "run-a-1");
         assert_eq!(planner_reply_hit.matches[0].role, "assistant");
@@ -2311,7 +2489,14 @@ mod tests {
             )
             .unwrap();
 
-        let withdrawn = search_workspace_root(root, &repo_str, "withdrawn_secret_steer", RoleFilter::All, 50).unwrap();
+        let withdrawn = search_workspace_root(
+            root,
+            &repo_str,
+            "withdrawn_secret_steer",
+            RoleFilter::All,
+            50,
+        )
+        .unwrap();
         assert!(withdrawn.matches.is_empty());
 
         let serial = search_workspace_root(root, &repo_str, "登录按钮", RoleFilter::All, 50).unwrap();
@@ -2833,7 +3018,28 @@ mod tests {
 
     #[test]
     fn unicode_and_ascii_case_insensitive_snippets_preserve_original_case() {
-        let (before, matched, after) = find_match_snippet("Hello   İstanbul   WORLD!", "world").unwrap();
+        assert_eq!(
+            find_match_snippet("前文 ΟΣ τέλος", "ος").unwrap(),
+            ("前文 ".into(), "ΟΣ".into(), " τέλος".into())
+        );
+        assert_eq!(
+            find_match_snippet("字İSTANBUL后", "字i\u{307}stanbul")
+                .unwrap()
+                .1,
+            "字İSTANBUL"
+        );
+        let needle = format!("{}z", "a".repeat(4095));
+        let text = format!("{}{}", "A".repeat(100_000), needle.to_uppercase());
+        assert_eq!(
+            find_case_insensitive_range(&text, &needle, false),
+            Some((100_000, 104_096))
+        );
+        assert_eq!(
+            find_case_insensitive_range(&"A".repeat(100_000), &needle, false),
+            None
+        );
+        let (before, matched, after) =
+            find_match_snippet("Hello   İstanbul   WORLD!", "world").unwrap();
         assert_eq!(before, "Hello İstanbul ");
         assert_eq!(matched, "WORLD");
         assert_eq!(after, "!");
