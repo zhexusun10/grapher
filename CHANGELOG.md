@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Published attachments only after a complete, synced write so I/O failures cannot leave partial immutable files that block retries. Concurrent retries preserve the first complete upload, and existing-file comparison uses bounded chunks instead of copying another full attachment into memory.
 - Serialized terminal resize requests per session across desktop and browser transports so a delayed older resize cannot leave the PTY at the wrong grid size. Large pastes now slice the original string without a retained character array while preserving Unicode boundaries and input order.
 - Kept desktop backend reconnections isolated from older in-flight requests: late responses cannot replace the current operation epoch, stale failures reuse the replacement connection, and superseded URL lookups follow the current backend. Closed SSE streams no longer deliver queued notifications to new subscribers.
 - Skipped non-regular skill documents during discovery so a `SKILL.md` named pipe cannot block the skills request waiting for a writer.

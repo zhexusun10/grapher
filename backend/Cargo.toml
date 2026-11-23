@@ -50,8 +50,7 @@ tiny_http = "0.12"
 portable-pty = "0.9"
 signal-hook = "0.3"
 ts-rs = { version = "11", features = ["serde-json-impl"] }
-
-[dev-dependencies]
+# Stage immutable attachments before publishing without overwriting a winner.
 tempfile = "3"
 
 [[test]]

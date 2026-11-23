@@ -6,7 +6,7 @@ use crate::{cleanup::Target, path_safety::real_child_path, store::Store};
 use std::{
     collections::BTreeSet,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -44,25 +44,54 @@ fn ensure_directory(root: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn immutable_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    match fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-    {
-        Ok(mut file) => file
-            .write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| error.to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let actual = real_child_path(root, path, true)?.ok_or("Attachment disappeared")?;
-            if fs::read(actual).map_err(|error| error.to_string())? == bytes {
-                Ok(())
-            } else {
-                Err("Attachment contents changed; select the file again before sending".into())
-            }
+fn compare_existing(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    const CHANGED: &str = "Attachment contents changed; select the file again before sending";
+    let actual = real_child_path(root, path, true)?.ok_or("Attachment disappeared")?;
+    let mut file = fs::File::open(actual).map_err(|error| error.to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.len() != bytes.len() as u64 {
+        return Err(CHANGED.into());
+    }
+    let mut buffer = [0; 8192];
+    for expected in bytes.chunks(buffer.len()) {
+        let actual = &mut buffer[..expected.len()];
+        file.read_exact(actual).map_err(|error| error.to_string())?;
+        if actual != expected {
+            return Err(CHANGED.into());
         }
-        Err(error) => Err(error.to_string()),
+    }
+    // Also reject growth after the metadata check, without reading it all.
+    if file
+        .read(&mut buffer[..1])
+        .map_err(|error| error.to_string())?
+        != 0
+    {
+        return Err(CHANGED.into());
+    }
+    Ok(())
+}
+
+fn immutable_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if real_child_path(root, path, true)?.is_some() {
+        return compare_existing(root, path, bytes);
+    }
+    // Publish only a complete, synced file. A failed write removes its staging
+    // file, so a retry cannot mistake partial bytes for immutable evidence.
+    let mut staged = tempfile::Builder::new()
+        .prefix(".grapher-attachment-")
+        .tempfile_in(path.parent().ok_or("Missing attachment directory")?)
+        .map_err(|error| error.to_string())?;
+    staged.write_all(bytes).map_err(|error| error.to_string())?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    match staged.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        // A concurrent retry may have published first. Never overwrite it.
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            compare_existing(root, path, bytes)
+        }
+        Err(error) => Err(error.error.to_string()),
     }
 }
 
@@ -515,4 +544,136 @@ pub(crate) fn prune_orphaned_unscoped(
         crate::workspace_cleanup::remove_paths(stale)?;
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_retries_compare_all_bytes_and_accept_empty_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for bytes in [Vec::new(), vec![b'x'; 8193]] {
+            let id = Uuid::new_v4().to_string();
+            let stored = store(root, None, &id, "upload.bin", &bytes).unwrap();
+            assert_eq!(
+                store(root, None, &id, "upload.bin", &bytes).unwrap(),
+                stored
+            );
+            let mut longer = bytes.clone();
+            longer.push(b'x');
+            let mut changed = vec![longer];
+            if !bytes.is_empty() {
+                changed.push(bytes[..bytes.len() - 1].to_vec());
+                let mut last_byte = bytes.clone();
+                *last_byte.last_mut().unwrap() = b'y';
+                changed.push(last_byte);
+            }
+            for different in changed {
+                assert!(store(root, None, &id, "upload.bin", &different)
+                    .unwrap_err()
+                    .contains("contents changed"));
+                assert_eq!(
+                    fs::read(&stored).unwrap(),
+                    bytes,
+                    "retries must never overwrite the winner"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_attachment_write_does_not_publish_partial_data_and_retry_succeeds() {
+        const FIXTURE_ROOT: &str = "GRAPHER_TEST_ATTACHMENT_WRITE_ROOT";
+        if let Some(root) = std::env::var_os(FIXTURE_ROOT) {
+            let root = PathBuf::from(root);
+            let id = Uuid::new_v4().to_string();
+            let payload = vec![b'x'; 8192];
+            let mut original = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, original.as_mut_ptr()) },
+                0
+            );
+            let original = unsafe { original.assume_init() };
+            let limit = libc::rlimit {
+                rlim_cur: 1024,
+                rlim_max: original.rlim_max,
+            };
+            let signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+            assert_ne!(signal, libc::SIG_ERR);
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+            let failed = store(&root, None, &id, "upload.bin", &payload);
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &original) }, 0);
+            unsafe { libc::signal(libc::SIGXFSZ, signal) };
+
+            assert!(failed.is_err(), "the fixture must hit the OS write limit");
+            let directory = root.join(BUCKET).join(&id);
+            assert!(
+                !directory.join("upload.bin").exists(),
+                "a failed upload published partial bytes"
+            );
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                0,
+                "temporary bytes must be cleaned up"
+            );
+            let retried = store(&root, None, &id, "upload.bin", &payload).unwrap();
+            assert_eq!(fs::read(retried).unwrap(), payload);
+            return;
+        }
+
+        // Resource limits and signals are process-wide; never change the parent test runner.
+        let temp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "attachment_inputs::tests::failed_attachment_write_does_not_publish_partial_data_and_retry_succeeds",
+            ])
+            .env(FIXTURE_ROOT, temp.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "attachment write-failure fixture failed");
+    }
+
+    #[test]
+    fn concurrent_attachment_retries_publish_one_complete_immutable_file() {
+        use std::sync::{Arc, Barrier};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let id = Uuid::new_v4().to_string();
+        let start = Arc::new(Barrier::new(8));
+        let mut workers = Vec::new();
+        for i in 0..8 {
+            let (root, id, start) = (root.clone(), id.clone(), Arc::clone(&start));
+            workers.push(std::thread::spawn(move || {
+                let bytes = vec![if i % 2 == 0 { b'a' } else { b'b' }; 1024 * 1024];
+                start.wait();
+                let result = store(&root, None, &id, "upload.bin", &bytes);
+                (bytes, result)
+            }));
+        }
+        let outcomes: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        let directory = root.join(BUCKET).join(&id);
+        let published = fs::read(directory.join("upload.bin")).unwrap();
+        for (bytes, result) in outcomes {
+            if bytes == published {
+                assert!(
+                    result.is_ok(),
+                    "identical concurrent retry failed: {result:?}"
+                );
+            } else {
+                assert!(result.unwrap_err().contains("contents changed"));
+            }
+        }
+        assert_eq!(
+            fs::read_dir(directory).unwrap().count(),
+            1,
+            "only the published file remains"
+        );
+    }
 }
