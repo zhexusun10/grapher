@@ -21,8 +21,8 @@ fn directory_inspection_ignores_git_metadata_and_keeps_the_selected_path() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            Path::new(&info.path),
-            directory.canonicalize().unwrap().as_path()
+            info.path,
+            workspace::normalize_workspace_display_path(&directory.canonicalize().unwrap())
         );
         assert_eq!(info.name, directory.file_name().unwrap().to_string_lossy());
         assert_eq!(

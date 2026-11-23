@@ -447,33 +447,36 @@ This uses pinned Pi, native Git/Bash, a deterministic local provider and disposa
 [planner-source.yml](../../.github/workflows/planner-source.yml), [release.yml](../../.github/workflows/release.yml) and [security-audit.yml](../../.github/workflows/security-audit.yml) own CI coverage.
 
 Planner Source Contract runs on main pushes, pull requests, its weekly schedule
-and manual dispatch. Its dedicated macOS filesystem job runs `test:filesystem`
-on both Apple Silicon (`macos-15`) and Intel (`macos-15-intel`), first on the host
-volume and then with temporary fixtures on an explicitly mounted case-sensitive
-APFS sparse image. A real case probe must succeed before testing, so sensitive
-path branches cannot silently be skipped on a case-insensitive volume; the image
-is detached on success or failure. The ARM job also installs pinned Pi and
-Playwright Chromium and runs `test:macos-browser`; failure logs are retained for
-seven days as an artifact. Failures fail the workflow; no `continue-on-error`
-is used. Requiring these checks for merging remains a branch-protection setting.
+and manual dispatch. Linux runs the full fixture and frontend suites on every
+event; macOS runs the full fixture suite on pull requests, the weekly schedule
+and manual dispatch, while Linux remains the routine host-neutral gate for
+pushes. Windows uses focused platform-specific coverage rather than repeating
+the full host-neutral library suite. The dedicated macOS filesystem job runs
+`test:filesystem` on both Apple Silicon (`macos-15`) and Intel
+(`macos-15-intel`) host volumes, and runs the case-sensitive APFS sparse-image
+variant once on Apple Silicon. A real case probe must succeed before testing,
+so sensitive path branches cannot silently be skipped on a case-insensitive
+volume; the image is detached on success or failure. The ARM job also installs
+pinned Pi and Playwright Chromium and runs `test:macos-browser`; failure logs
+are retained for seven days as an artifact. Failures fail the workflow; no
+`continue-on-error` is used. Requiring these checks for merging remains a
+branch-protection setting.
+
+The frontend contract suite is host-neutral and runs once on Linux. Native
+launcher, production HTTP hardening, prewarm, filesystem, Bash and platform
+acceptance checks remain on the hosts where their process, path, sandbox or
+native API behavior can differ.
 
 A focused **Windows PTY lifecycle** job runs the shared native terminal tests,
-including ConPTY's startup cursor-position handshake and natural-exit drain,
-without waiting for the broad library suite. The full Windows library suite
-uses the same `fixture` feature as the Linux/macOS backend suites so synthetic
-execution completions retain their explicit test-only evidence.
-
-Windows pushes run the focused filesystem suite; PR/scheduled/manual runs retain
-the full Windows library suite. The Linux/macOS backend suites also execute the
-applicable POSIX-link and snapshot regressions. Weekly scheduled and manual CI runs also explicitly provision pinned uv and retain the model-free
-[dependency-cost report](environment-baselines.md) for seven days; this is a
-component measurement, not a replacement for its real native-boundary checks.
-Windows pushes additionally run focused `rooted_` capture/recovery regressions,
-including NTFS aliases/junctions and real W/S interpreters; other matrix/event
-paths cover them in their existing backend/environment suites. These component
-checks do not claim an OS sandbox on Windows. Windows pushes also run the
-trusted Node bootstrap-isolation check; other matrix/event paths cover it in
-the existing backend suites.
-Configuring a job is not evidence
-that it passed: inspect the corresponding CI run. Model-free checks do not
-establish provider quality or every sandbox boundary.
+including ConPTY's startup cursor-position handshake and natural-exit drain.
+The Windows Planner job runs its focused ACL/path checks on every event. Windows
+pushes additionally run focused `rooted_` capture/recovery regressions,
+including NTFS aliases/junctions and real W/S interpreters, plus runtime-evidence
+and trusted-bootstrap checks; Linux/macOS full fixture runs cover their
+host-neutral counterparts. These component checks do not claim an OS sandbox on
+Windows. Weekly scheduled and manual CI runs also explicitly provision pinned
+uv and retain the model-free [dependency-cost report](environment-baselines.md)
+for seven days; this is a component measurement, not a replacement for its real
+native-boundary checks. Configuring a job is not evidence that it passed:
+inspect the corresponding CI run. Model-free checks do not establish provider
+quality or every sandbox boundary.

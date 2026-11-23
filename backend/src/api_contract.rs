@@ -287,9 +287,11 @@ pub fn typescript() -> String {
 mod tests {
     #[test]
     fn browser_api_bindings_match_the_rust_dtos() {
+        let checked_in =
+            include_str!("../../src/services/apiContract.generated.ts").replace("\r\n", "\n");
         assert_eq!(
             super::typescript(),
-            include_str!("../../src/services/apiContract.generated.ts"),
+            checked_in,
             "Run npm run api:generate after changing browser DTOs"
         );
     }

@@ -24,16 +24,13 @@ jobs:
   planner-source:
     name: Planner source / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # ubuntu/macOS run the cross-platform backend/environment/merger/native
-    # suites; Windows skips the ones whose failures also surface on macOS (they
-    # cost ~1h there) and keeps its own library and Windows-native acceptance
-    # coverage. The host-neutral suites run on Linux for every push and on
-    # macOS/Windows only for pull requests, the schedule and dispatch, so a push
-    # does not pay three times for behavior that is not host-specific. Platform
-    # suites (native launchers, the seatbelt policy, Windows acceptance) keep
-    # running on their own host. Rust builds dominate the rest, so the job reuses
-    # one target cache per OS instead of recompiling, and the budgets below are
-    # sized to a warm run.
+    # Linux runs the host-neutral fixture and frontend suites on every event.
+    # macOS adds the full fixture suite on PRs/scheduled/manual runs plus its
+    # native filesystem and browser acceptance; Windows uses focused native
+    # coverage instead of duplicating the host-neutral fixture suite. Pushes
+    # avoid repeating expensive cross-platform suites on every OS. Platform
+    # suites (native launchers, Seatbelt, Windows acceptance) remain on their
+    # own hosts. Rust builds dominate the rest, so each OS reuses one target cache.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -91,13 +88,14 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run check
       - name: Verify frontend state, i18n and transcript contracts
+        if: runner.os == 'Linux'
         run: npm run test:frontend
       # Cwd and PATH behavior is host-specific; check these fast cases before
       # compiling Rust and running the full native environment acceptance.
       - name: Verify native launch bindings
         run: node --test scripts/environment-launch.test.mjs
       - name: Verify snapshot inheritance, failed revisions and event replay
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && github.event_name != 'push')
         run: npm run test:backend
       - name: Verify production HTTP paths and safe workspace cleanup
         run: npm run test:hardening
@@ -155,17 +153,17 @@ jobs:
             ${{ runner.temp }}/dependency-sealing.json
           if-no-files-found: warn
           retention-days: 7
-      # Other matrix/event paths already run these in backend/environment
-      # suites. Windows pushes skip those broad suites, but still need native
-      # NTFS root/alias/link and real-interpreter recovery regression coverage.
+      # Linux and non-push macOS cover root-qualified recovery through their
+      # fixture/environment suites. Keep expensive sequential Windows-native
+      # recovery cases on pushes; PRs retain focused ACL/path and native checks.
       - name: Verify Windows root-qualified environment capture and recovery
         if: runner.os == 'Windows' && github.event_name == 'push'
         # The real-interpreter cases can exceed four minutes on hosted NTFS;
         # retain the full sequential coverage with room for native tool I/O.
         timeout-minutes: 10
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_ -- --test-threads=1
-      # The broader library suites cover protocol/legacy/runtime-input units
-      # elsewhere. Windows pushes need them explicitly beside real W/S recovery.
+      # Linux and non-push macOS cover protocol, legacy and runtime-input cases
+      # in the full fixture suite. Windows adds focused runtime checks on pushes.
       - name: Verify native runtime recovery evidence on Windows
         if: runner.os == 'Windows' && github.event_name == 'push'
         timeout-minutes: 3
@@ -176,19 +174,16 @@ jobs:
         run: |
           node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime_project_code_proof -- --test-threads=1
           node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib streaming_git_blob -- --test-threads=1
-      # Linux/macOS and non-push Windows runs already cover these through the
-      # backend/environment suites. Keep Windows push coverage focused as well.
+      # Linux and non-push macOS cover these in the full fixture suite; Windows
+      # runs this trusted-bootstrap case on pushes with native recovery coverage.
       - name: Verify trusted Node bootstrap isolation on Windows
         if: runner.os == 'Windows' && github.event_name == 'push'
         timeout-minutes: 4
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib trusted_node_probe_never_loads -- --test-threads=1
-      # The three suites below are host-neutral behavior (native environment
-      # admission, Graph chain discovery, merger/publication) and Linux already
-      # runs them for every push on the same commit. macOS keeps them for pull
-      # requests, the weekly schedule and manual dispatch, where a host-specific
-      # drift would show up, instead of adding ~11 minutes to every push; Windows
-      # skips them because `test:backend` / Windows library + acceptance runs
-      # cover its native surface without hitting the 45-minute job limit.
+      # These suites cover native environment, Graph-chain and publication
+      # behavior on Linux (and on macOS outside pushes). Windows keeps its
+      # platform-native acceptance rather than adding local-model runs to the
+      # 45-minute job.
       # `test:backend` and `environment-launch.test.mjs` already cover the Rust
       # and launch-binding units, so CI invokes `test:environment:acceptance`.
       - name: Verify managed E/L with real native Python, editable package and lifecycle
@@ -203,18 +198,13 @@ jobs:
         if: runner.os == 'Linux' || (runner.os == 'macOS' && github.event_name != 'push')
         timeout-minutes: 10
         run: npm run test:merger
-      # The Windows library suite is the same host-neutral Rust suite Linux and
-      # macOS already run for a push; Windows keeps it for pull requests, the
-      # weekly schedule and manual dispatch, while its Windows-only surface stays
-      # covered on every push by the acceptance step below.
-      - name: Run the full backend library test suite on Windows
-        if: runner.os == 'Windows' && github.event_name != 'push'
-        timeout-minutes: 25
-        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib
-      # PR/scheduled Windows library runs already include these cases; pushes
-      # still need native ACL/identity coverage rather than only launcher tests.
+      # Linux runs the full host-neutral fixture suite; macOS also runs it on
+      # PR/scheduled/manual events. Windows keeps focused ACL/path checks and
+      # native acceptance instead of repeating that full suite.
+      # PR/scheduled Windows runs do not repeat the focused recovery cases that
+      # pushes run alongside the native acceptance tests.
       - name: Verify Windows native ACLs, path identity and snapshot integrity
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows'
         timeout-minutes: 8
         run: npm run test:filesystem
       - name: Verify Windows native Planner and production Graph acceptance (local model responses)
@@ -276,7 +266,11 @@ jobs:
       - name: Verify native ACLs, aliases, POSIX links and snapshot integrity on the host volume
         timeout-minutes: 12
         run: npm run test:filesystem
+      # APFS case behavior is volume-specific, not architecture-specific. Both
+      # architectures retain host-volume coverage; run the costly sparse-image
+      # variant once on Apple Silicon.
       - name: Verify the same regressions on case-sensitive APFS
+        if: matrix.os == 'macos-15'
         timeout-minutes: 8
         run: |
           set -euo pipefail
