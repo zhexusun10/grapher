@@ -345,3 +345,59 @@ fn clean_hydrated_runs_are_lru_bounded_without_dropping_dirty_runs_or_sidecars()
         invalidate_run(&run);
     }
 }
+
+#[test]
+fn persisting_new_execution_over_unloaded_sidecar_keeps_history_hydratable() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+
+    put(&run, "exec-old", "old.txt", 3);
+    persist(temp.path(), &run).unwrap();
+    // Simulate a restart or LRU eviction: sidecar remains on disk, cache is cold.
+    invalidate_run(&run);
+
+    put(&run, "exec-new", "new.txt", 5);
+    persist(temp.path(), &run).unwrap();
+    assert!(
+        !cache().lock().unwrap().hydrated_runs.contains(&run),
+        "persisting a partial delta over an unloaded sidecar must not mark the Run hydrated"
+    );
+
+    hydrate_run(temp.path(), &run);
+    let guard = cache().lock().unwrap();
+    assert!(guard.hydrated_runs.contains(&run));
+    assert!(
+        guard.log_changes.contains_key(&(run.clone(), "exec-old".into())),
+        "historical execution from disk sidecar must be restored by hydrate_run"
+    );
+    assert!(
+        guard.git_changes.contains_key(&(run.clone(), "exec-new".into())),
+        "new execution must remain cached"
+    );
+    drop(guard);
+    invalidate_run(&run);
+}
+
+#[test]
+fn invalidation_during_persist_does_not_resurrect_hydrated_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+
+    put(&run, "exec-1", "a.txt", 2);
+    persist_with(temp.path(), &run, || {
+        invalidate_run(&run);
+    })
+    .unwrap();
+
+    let guard = cache().lock().unwrap();
+    assert!(
+        !guard.hydrated_runs.contains(&run),
+        "concurrent invalidation must fence mark_persisted_if_unchanged"
+    );
+    assert!(
+        !guard.clean_persisted_seq.contains_key(&run),
+        "concurrent invalidation must not leave a stale clean_persisted_seq entry"
+    );
+    drop(guard);
+    invalidate_run(&run);
+}

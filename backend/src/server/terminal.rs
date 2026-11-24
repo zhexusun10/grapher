@@ -58,9 +58,30 @@ struct Session {
 }
 
 #[derive(Default)]
+struct SessionTable {
+    entries: HashMap<String, Session>,
+    pending_creates: usize,
+}
+
+#[derive(Default)]
 struct WebTerminals {
     pty: TerminalManager,
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<SessionTable>,
+}
+
+struct CreateReservation<'a> {
+    sessions: &'a Mutex<SessionTable>,
+    active: bool,
+}
+
+impl Drop for CreateReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            if let Ok(mut table) = self.sessions.lock() {
+                table.pending_creates = table.pending_creates.saturating_sub(1);
+            }
+        }
+    }
 }
 
 impl WebTerminals {
@@ -71,29 +92,50 @@ impl WebTerminals {
         let rows: Option<u16> =
             serde_json::from_value(body["rows"].clone()).map_err(|e| e.to_string())?;
         self.reap();
-        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-        if sessions.len() >= MAX_SESSIONS {
-            return Err("Too many open terminals; close an existing terminal first".into());
+        // Reserve a slot under the lock, then release it before spawning the
+        // PTY/shell so other terminals' reads, writes and resizes never stall
+        // behind process startup.
+        {
+            let mut table = self.sessions.lock().map_err(|e| e.to_string())?;
+            if table.entries.len() + table.pending_creates >= MAX_SESSIONS {
+                return Err("Too many open terminals; close an existing terminal first".into());
+            }
+            table.pending_creates += 1;
         }
+        let mut reservation = CreateReservation {
+            sessions: &self.sessions,
+            active: true,
+        };
         let sink = Arc::new(BufferedSink::default());
         let info = self
             .pty
             .create_session(Arc::clone(&sink), &workspace, cols, rows)?;
         // The sink exists before spawning, so even an immediate shell exit is
         // retained before the create response reaches the browser.
-        sessions.insert(
-            info.session_id.clone(),
-            Session {
-                sink,
-                touched: Instant::now(),
-            },
-        );
+        {
+            let mut table = self.sessions.lock().map_err(|e| {
+                self.pty.kill_session(&info.session_id);
+                e.to_string()
+            })?;
+            table.pending_creates = table.pending_creates.saturating_sub(1);
+            reservation.active = false;
+            table.entries.insert(
+                info.session_id.clone(),
+                Session {
+                    sink,
+                    touched: Instant::now(),
+                },
+            );
+        }
         serde_json::to_value(info).map_err(|e| e.to_string())
     }
 
     fn sink(&self, id: &str) -> Result<Arc<BufferedSink>, String> {
-        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-        let session = sessions.get_mut(id).ok_or("Terminal session not found")?;
+        let mut table = self.sessions.lock().map_err(|e| e.to_string())?;
+        let session = table
+            .entries
+            .get_mut(id)
+            .ok_or("Terminal session not found")?;
         session.touched = Instant::now();
         Ok(Arc::clone(&session.sink))
     }
@@ -137,8 +179,8 @@ impl WebTerminals {
     }
 
     fn kill(&self, id: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(id);
+        if let Ok(mut table) = self.sessions.lock() {
+            table.entries.remove(id);
         }
         self.pty.kill_session(id);
     }
@@ -147,8 +189,9 @@ impl WebTerminals {
         let expired: Vec<String> = self
             .sessions
             .lock()
-            .map(|mut sessions| {
-                let expired: Vec<_> = sessions
+            .map(|mut table| {
+                let expired: Vec<_> = table
+                    .entries
                     .iter()
                     .filter(|(_, session)| {
                         session.touched.elapsed() > IDLE_TIMEOUT
@@ -163,7 +206,7 @@ impl WebTerminals {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in &expired {
-                    sessions.remove(id);
+                    table.entries.remove(id);
                 }
                 expired
             })
@@ -220,8 +263,8 @@ pub(super) fn dispatch(command: &str, body: &Value) -> Result<Value, String> {
 pub(super) fn shutdown() {
     if let Some(manager) = TERMINALS.get() {
         manager.pty.kill_all();
-        if let Ok(mut sessions) = manager.sessions.lock() {
-            sessions.clear();
+        if let Ok(mut table) = manager.sessions.lock() {
+            table.entries.clear();
         }
     }
 }
@@ -244,7 +287,7 @@ mod tests {
             session_id: "test".into(),
             exit_code: Some(7),
         });
-        manager.sessions.lock().unwrap().insert(
+        manager.sessions.lock().unwrap().entries.insert(
             "test".into(),
             Session {
                 sink,
@@ -283,7 +326,7 @@ mod tests {
             });
         }
         assert!(sink.0.lock().unwrap().bytes <= MAX_BUFFER_BYTES);
-        manager.sessions.lock().unwrap().insert(
+        manager.sessions.lock().unwrap().entries.insert(
             "test".into(),
             Session {
                 sink,
@@ -298,10 +341,32 @@ mod tests {
             .sessions
             .lock()
             .unwrap()
+            .entries
             .get_mut("test")
             .unwrap()
             .touched = Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1);
         manager.reap();
         assert!(manager.read(&json!({"sessionId":"test"})).is_err());
+    }
+
+    #[test]
+    fn failed_terminal_create_releases_its_pending_capacity_slot() {
+        let manager = WebTerminals::default();
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        for _ in 0..MAX_SESSIONS + 2 {
+            let err = manager
+                .create(&json!({ "workspacePath": missing.to_string_lossy() }))
+                .unwrap_err();
+            assert!(!err.contains("Too many open terminals"), "{err}");
+        }
+        assert_eq!(manager.sessions.lock().unwrap().pending_creates, 0);
+        // An in-flight reservation counts toward MAX_SESSIONS until released.
+        manager.sessions.lock().unwrap().pending_creates = MAX_SESSIONS;
+        let err = manager
+            .create(&json!({ "workspacePath": temp.path().to_string_lossy() }))
+            .unwrap_err();
+        assert!(err.contains("Too many open terminals"), "{err}");
+        manager.sessions.lock().unwrap().pending_creates = 0;
     }
 }

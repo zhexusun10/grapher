@@ -351,8 +351,6 @@ export async function requestBrowserNotificationPermission(): Promise<Notificati
   }
 }
 
-export const requestNotificationPermission = requestBrowserNotificationPermission;
-
 export async function openDesktopNotificationSettings(): Promise<boolean> {
   if (!isTauriDesktop()) return false;
   const invoke = getTauriInvoke();

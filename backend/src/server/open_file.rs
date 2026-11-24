@@ -164,6 +164,12 @@ fn open_path_with_system(path: &Path) -> Result<(), String> {
         command
     };
     let mut child = command
+        // Do not inherit the backend's stdin/stdout/stderr pipes (important in
+        // `--desktop-sidecar` mode where stdin EOF signals shutdown and stdout
+        // carries the readiness handshake).
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("无法启动系统文件打开器：{error}"))?;
     // The opener is detached from the HTTP worker, but its child still needs a

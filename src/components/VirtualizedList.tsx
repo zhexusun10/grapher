@@ -171,18 +171,17 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       return;
     }
     const parentEl = parentRef.current;
-    const aboveViewport = Boolean(
-      parentEl && rect.top < parentEl.getBoundingClientRect().top + parentEl.clientTop - 1,
-    );
     const needsSync =
-      aboveViewport ||
       restoreRef.current !== null ||
       readingAnchor.current !== null ||
       stabilizingAnchorRef.current ||
       transitionAnchorRef.current !== null ||
       gestureRowAnchor.current !== null ||
       parentEl?.dataset.transcriptFollowing === "true" ||
-      parentEl?.dataset.transcriptPreparing === "true";
+      parentEl?.dataset.transcriptPreparing === "true" ||
+      Boolean(
+        parentEl && rect.top < parentEl.getBoundingClientRect().top + parentEl.clientTop - 1,
+      );
     measure(id, height, needsSync, !needsSync);
   }, [measure]);
   const previousIds = useRef<string[]>([]);

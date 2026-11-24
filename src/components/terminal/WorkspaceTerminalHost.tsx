@@ -323,7 +323,6 @@ const WorkspaceTerminalItem: React.FC<WorkspaceTerminalItemProps> = React.memo(
 
         <Terminal
           cardRef={cardRef}
-          sequence={false}
           rawBody
           data-testid={isActiveWorkspace ? "workspace-terminal-card" : undefined}
           className="workspace-terminal-card"
@@ -435,6 +434,10 @@ export const WorkspaceTerminalHost: React.FC<WorkspaceTerminalHostProps> = React
   }) => {
     const [resizingKey, setResizingKey] = useState<string | null>(null);
     const dragCleanupRef = useRef<(() => void) | null>(null);
+
+    useEffect(() => () => {
+      dragCleanupRef.current?.();
+    }, []);
 
     const startVerticalResize = useCallback(
       (key: string, initialHeight: number, event: React.PointerEvent<HTMLDivElement>) => {

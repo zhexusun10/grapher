@@ -459,7 +459,7 @@ fn linux_proc_visible(mounts: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_stat(bytes: &[u8]) -> std::io::Result<(u8, u32, u64)> {
+fn linux_process_stat(bytes: &[u8]) -> std::io::Result<(u8, Option<u32>, u64)> {
     let invalid = || {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -477,9 +477,15 @@ fn linux_process_stat(bytes: &[u8]) -> std::io::Result<(u8, u32, u64)> {
     if fields.len() < 20 || fields[0].len() != 1 {
         return Err(invalid());
     }
+    // Linux's do_task_stat initializes pgid to -1 when lock_task_sighand fails
+    // during task teardown, so exiting processes legitimately report -1.
+    let raw_pgid: i32 = fields[2].parse().map_err(|_| invalid())?;
+    if raw_pgid < -1 {
+        return Err(invalid());
+    }
     Ok((
         fields[0].as_bytes()[0],
-        fields[2].parse().map_err(|_| invalid())?,
+        u32::try_from(raw_pgid).ok(),
         fields[19].parse().map_err(|_| invalid())?,
     ))
 }
@@ -495,7 +501,7 @@ fn linux_zombie_members(group: u32) -> std::io::Result<Option<BTreeSet<(u32, u64
         let Some((state, pgid, started)) = linux_stat_at(&entry.path())? else {
             continue;
         };
-        if pgid == group {
+        if pgid == Some(group) {
             if !matches!(state, b'Z' | b'X' | b'x') {
                 return Ok(None);
             }
@@ -516,7 +522,7 @@ fn linux_zombie_members(group: u32) -> std::io::Result<Option<BTreeSet<(u32, u64
                     continue;
                 };
                 if let Some((state, pgid, started)) = linux_stat_at(&task.path())? {
-                    if pgid == group {
+                    if pgid == Some(group) {
                         observed_leader |= tid == pid;
                         if !matches!(state, b'Z' | b'X' | b'x') {
                             return Ok(None);
@@ -534,18 +540,36 @@ fn linux_zombie_members(group: u32) -> std::io::Result<Option<BTreeSet<(u32, u64
 }
 
 #[cfg(target_os = "linux")]
-fn linux_stat_at(directory: &std::path::Path) -> std::io::Result<Option<(u8, u32, u64)>> {
-    match std::fs::read(directory.join("stat")) {
-        Ok(bytes) => linux_process_stat(&bytes).map(Some),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(libc::ESRCH) =>
-        {
-            Ok(None)
+fn linux_stat_at(directory: &std::path::Path) -> std::io::Result<Option<(u8, Option<u32>, u64)>> {
+    let stat_path = directory.join("stat");
+    for delay_ms in [1u64, 2, 5, 0] {
+        match std::fs::read(&stat_path) {
+            Ok(bytes) if bytes.is_empty() => {
+                // On Linux procfs, a process exiting between open() and read()
+                // can yield an empty 0-byte read instead of ESRCH. Retry briefly
+                // so a genuinely vanished process resolves to Ok(None), while a
+                // persistently empty stat file still fails closed.
+                if delay_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    continue;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid /proc process stat",
+                ));
+            }
+            Ok(bytes) => return linux_process_stat(&bytes).map(Some),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return Ok(None);
+            }
+            // An unreadable process must not be assumed to have exited.
+            Err(error) => return Err(error),
         }
-        // An unreadable process must not be assumed to have exited.
-        Err(error) => Err(error),
     }
+    unreachable!()
 }
 
 fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
@@ -1028,14 +1052,29 @@ mod tests {
     fn proc_stat_names_cannot_forge_process_group_or_state() {
         let own = std::fs::read("/proc/self/stat").unwrap();
         let expected = linux_process_stat(&own).unwrap();
-        assert_eq!(expected.1, unsafe { libc::getpgrp() } as u32);
+        assert_eq!(expected.1, Some(unsafe { libc::getpgrp() } as u32));
         let end = own.iter().rposition(|byte| *byte == b')').unwrap();
         let mut unusual = b"123 (name ) Z 1 999\n\xff)".to_vec();
         unusual.extend_from_slice(&own[end + 1..]);
         assert_eq!(linux_process_stat(&unusual).unwrap(), expected);
-        for invalid in [b"".as_slice(), b"123 (missing suffix)", b"123 (name) Z 1"] {
+        // Exiting tasks whose sighand is detached legitimately report pgid = -1.
+        let exiting = b"456 (dying) Z 0 -1 -1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0";
+        assert_eq!(linux_process_stat(exiting).unwrap(), (b'Z', None, 98765));
+        for invalid in [
+            b"".as_slice(),
+            b"123 (missing suffix)",
+            b"123 (name) Z 1",
+            b"456 (bad) Z 0 -2 -1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 98765 0",
+        ] {
             assert!(linux_process_stat(invalid).is_err());
         }
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(linux_stat_at(temp.path()).unwrap(), None);
+        std::fs::write(temp.path().join("stat"), b"").unwrap();
+        assert_eq!(
+            linux_stat_at(temp.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[cfg(target_os = "linux")]

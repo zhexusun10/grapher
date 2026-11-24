@@ -247,9 +247,14 @@ async fn open_external_url(url: String) -> Result<(), String> {
                 command.arg(&validated);
                 command
             };
-            let mut child = command.spawn().map_err(|error| {
-                format!("Failed to open external URL in system browser: {error}")
-            })?;
+            let mut child = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|error| {
+                    format!("Failed to open external URL in system browser: {error}")
+                })?;
             std::thread::Builder::new()
                 .name("grapher-open-external-url".to_string())
                 .spawn(move || {
@@ -498,6 +503,9 @@ fn open_desktop_notification_settings() -> Result<(), String> {
     {
         let mut child = std::process::Command::new("explorer.exe")
             .arg("ms-settings:notifications")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| format!("Failed to open Windows notification settings: {error}"))?;
         std::thread::Builder::new()
@@ -518,15 +526,20 @@ fn open_desktop_notification_settings() -> Result<(), String> {
 
 #[cfg(desktop)]
 #[tauri::command]
-fn terminal_create(
+async fn terminal_create(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<terminal::TerminalManager>>,
     workspace_path: String,
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<terminal::TerminalSessionInfo, String> {
+    let manager = Arc::clone(state.inner());
     let sink = Arc::new(terminal::TauriTerminalEventSink::new(app));
-    state.create_session(sink, &workspace_path, cols, rows)
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.create_session(sink, &workspace_path, cols, rows)
+    })
+    .await
+    .map_err(|error| format!("Terminal startup task failed: {error}"))?
 }
 
 #[cfg(desktop)]

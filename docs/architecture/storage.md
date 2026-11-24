@@ -42,7 +42,7 @@ ownership.
 
 ### Derived file-change summaries
 
-`file-changes/` sidecars are versioned caches, not history. Saves replace each cached execution's complete summary (including an authoritative empty result), while retaining executions not loaded in the current process. Repeated saves do not accumulate the same edits again. In-flight tool overlays remain live UI state; only confirmed tool changes are persisted. Terminal cache settlement follows the successful event commit, for both single and batched writes. Incompatible cache versions are rebuilt from retained evidence without rewriting events or transcripts.
+`file-changes/` sidecars are versioned caches, not history. Saves replace each cached execution's complete summary (including an authoritative empty result), while retaining executions not loaded in the current process without falsely marking a partially loaded Run as hydrated. Clean persisted Runs in the in-memory cache are LRU-bounded, and concurrent invalidation fences both hydration and post-save clean marking via per-Run epochs. Repeated saves do not accumulate the same edits again. In-flight tool overlays remain live UI state; only confirmed tool changes are persisted. Terminal cache settlement follows the successful event commit, for both single and batched writes. Incompatible cache versions are rebuilt from retained evidence without rewriting events or transcripts.
 
 ## Workspace placement and lifetime
 

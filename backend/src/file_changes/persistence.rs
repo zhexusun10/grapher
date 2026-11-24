@@ -111,10 +111,14 @@ fn persist_with(root: &Path, run: &str, after_capture: impl FnOnce()) -> Result<
     let lock = write_lock(root, run)?;
     let _writer = lock.lock().map_err(|e| e.to_string())?;
     let previous = read_persisted(&path);
-    let (captured, captured_seq) = {
+    let previous_had_entries = !previous.executions.is_empty()
+        || !previous.planning.is_empty()
+        || previous.publication.is_some();
+    let (captured, captured_seq, captured_epoch) = {
         let guard = cache().lock().map_err(|e| e.to_string())?;
         let seq = guard.mutation_seq.get(run).copied().unwrap_or(0);
-        (CacheSnapshot::capture(&guard, run), seq)
+        let epoch = guard.run_epochs.get(run).copied().unwrap_or(0);
+        (CacheSnapshot::capture(&guard, run), seq, epoch)
     };
     after_capture();
     let persisted = captured.merge_into(previous);
@@ -133,7 +137,7 @@ fn persist_with(root: &Path, run: &str, after_capture: impl FnOnce()) -> Result<
     fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
     fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
     if let Ok(mut guard) = cache().lock() {
-        guard.mark_persisted_if_unchanged(run, captured_seq);
+        guard.mark_persisted_if_unchanged(run, captured_seq, captured_epoch, previous_had_entries);
     }
     Ok(())
 }

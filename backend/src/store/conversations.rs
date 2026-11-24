@@ -68,7 +68,7 @@ pub fn conversation_summaries(path: &Path) -> Result<ConversationCatalog, String
             .lock()
             .map_err(|e| e.to_string())?;
         if let Some((saved_id, catalog)) = catalogs.get(path) {
-            if *saved_id == current_id {
+            if current_id.is_some() && *saved_id == current_id {
                 catalog.clone()
             } else {
                 // Drop the stale connection first so its WAL/SHM handles close

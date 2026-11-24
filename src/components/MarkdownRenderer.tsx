@@ -133,6 +133,10 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
     const cache = useRef<StreamingMarkdownCache | null>(null);
     const copyTimers = useRef(new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>());
     const copyLabel = t("复制到剪贴板");
+    const decoratedCodeBlocksRef = useRef<{ label: string; map: Map<string, string> }>({
+      label: "",
+      map: new Map(),
+    });
     if (!cache.current) cache.current = new StreamingMarkdownCache();
     useEffect(() => () => {
       for (const timer of copyTimers.current.values()) clearTimeout(timer);
@@ -147,11 +151,21 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
           const withCursor = isStreaming && streamingCursor
             ? injectCursorIntoBlocks(blocks, cursorHtml)
             : blocks;
-          const decoratedBlocks = withCursor.map(block =>
-            block.includes("<pre") ? addCodeCopyButtons(block, copyLabel) : block
-          );
+          const prevMap = decoratedCodeBlocksRef.current.label === copyLabel
+            ? decoratedCodeBlocksRef.current.map
+            : null;
+          const nextMap = new Map<string, string>();
+          const decoratedBlocks = withCursor.map(block => {
+            if (!block.includes("<pre")) return block;
+            const cached = prevMap?.get(block);
+            const decorated = cached ?? addCodeCopyButtons(block, copyLabel);
+            nextMap.set(block, decorated);
+            return decorated;
+          });
+          decoratedCodeBlocksRef.current = { label: copyLabel, map: nextMap };
           return { html: decoratedBlocks.join(""), blocks: decoratedBlocks };
         }
+        decoratedCodeBlocksRef.current = { label: copyLabel, map: new Map() };
         const html = isStreaming && streamingCursor
           ? injectStreamingCursor(rendered, cursorHtml)
           : rendered;

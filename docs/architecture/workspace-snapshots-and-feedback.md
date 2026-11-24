@@ -732,13 +732,7 @@ a retry can merge a fresh source baseline into the retained composition without
 rerunning nodes. A partially applied checkout requires recovery rather than
 blindly absorbing source changes. Atomic retries clean only temporaries with
 recorded ownership in their journal, under the publication lease; foreign locks and unrelated
-files remain protected. Older in-place checkouts can leave a truncated file
-matching neither input nor result. Such bytes are not automatically assumed to
-be Grapher's work: errors name the mismatching paths, and the explicit
-[offline single-file reconciliation](../development/conversation-logs.md#reconcile-a-legacy-partial-publication-file)
-requires the observed blob identity and preserves both current and result bytes
-outside the project before an atomic replacement. It does not mark publication
-complete or launch nodes.
+files remain protected. Older in-place checkouts could leave a truncated file matching neither input nor result. Such bytes are never automatically assumed to be Grapher's work: errors name the mismatching paths and fail closed so the user can inspect or resolve them before retrying (the legacy offline single-file reconciliation command is retired; see [Offline maintenance](../development/conversation-logs.md#offline-maintenance)).
 
 Completion verifies internal input ancestry and delivery evidence, not node
 ancestry in the user's branch. Private bridge snapshots retain delivered node

@@ -1,6 +1,4 @@
 export const UPDATER_RELEASES_URL = "https://github.com/zhexusun10/grapher/releases";
-export const UPDATER_MANIFEST_URL =
-  "https://github.com/zhexusun10/grapher/releases/latest/download/latest.json";
 
 export type UpdaterPlatform = "macos" | "windows" | "linux" | "unknown";
 
@@ -907,9 +905,4 @@ export function getAppUpdater(): AppUpdaterController {
     sharedUpdaterController = new AppUpdaterController();
   }
   return sharedUpdaterController;
-}
-
-export function resetAppUpdaterForTests(): void {
-  sharedUpdaterController?.dispose();
-  sharedUpdaterController = null;
 }

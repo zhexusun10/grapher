@@ -422,7 +422,7 @@ fn search_index_entry_for(
             .lock()
             .map_err(|e| e.to_string())?;
         if let Some((saved_id, existing, waiting)) = map.get(db_path) {
-            if *saved_id == current_id {
+            if current_id.is_some() && *saved_id == current_id {
                 return Ok((existing.clone(), waiting.clone()));
             }
             // Drop the stale connection before opening the replacement SQLite file
@@ -437,7 +437,7 @@ fn search_index_entry_for(
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some((saved_id, existing, existing_waiting)) = map.get(db_path) {
-        if *saved_id == current_id {
+        if current_id.is_some() && *saved_id == current_id {
             return Ok((existing.clone(), existing_waiting.clone()));
         }
     }

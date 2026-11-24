@@ -185,7 +185,6 @@ impl FileChangesCache {
 
     fn is_evictable_clean_run(&self, run_id: &str, keep_run: &str) -> bool {
         run_id != keep_run
-            && self.hydrated_runs.contains(run_id)
             && self.clean_persisted_seq.get(run_id)
                 == Some(&self.mutation_seq.get(run_id).copied().unwrap_or(0))
             && !self.has_live_entries(run_id)
@@ -209,11 +208,20 @@ impl FileChangesCache {
         self.clean_persisted_seq.remove(run_id);
     }
 
-    pub(super) fn mark_persisted_if_unchanged(&mut self, run_id: &str, captured_seq: u64) {
-        if self.mutation_seq.get(run_id).copied().unwrap_or(0) == captured_seq
+    pub(super) fn mark_persisted_if_unchanged(
+        &mut self,
+        run_id: &str,
+        captured_seq: u64,
+        captured_epoch: u64,
+        previous_had_entries: bool,
+    ) {
+        if self.run_epochs.get(run_id).copied().unwrap_or(0) == captured_epoch
+            && self.mutation_seq.get(run_id).copied().unwrap_or(0) == captured_seq
             && !self.has_live_entries(run_id)
         {
-            self.hydrated_runs.insert(run_id.to_string());
+            if !previous_had_entries {
+                self.hydrated_runs.insert(run_id.to_string());
+            }
             self.clean_persisted_seq
                 .insert(run_id.to_string(), captured_seq);
             self.touch_run(run_id);
@@ -223,14 +231,13 @@ impl FileChangesCache {
 
     fn evict_clean_runs_if_needed(&mut self, keep_run: &str) {
         let keep_is_clean = !keep_run.is_empty()
-            && self.hydrated_runs.contains(keep_run)
             && self.clean_persisted_seq.get(keep_run)
                 == Some(&self.mutation_seq.get(keep_run).copied().unwrap_or(0))
             && !self.has_live_entries(keep_run);
         let budget_for_others = MAX_CLEAN_HYDRATED_RUNS.saturating_sub(usize::from(keep_is_clean));
         let mut candidates: Vec<(u64, String)> = self
-            .hydrated_runs
-            .iter()
+            .clean_persisted_seq
+            .keys()
             .filter(|run_id| self.is_evictable_clean_run(run_id, keep_run))
             .map(|run_id| {
                 (
@@ -1799,19 +1806,15 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     let Some(path) = persisted_path(root, run_id) else {
         return;
     };
-    if cache()
-        .lock()
-        .map(|mut guard| {
-            let hydrated = guard.hydrated_runs.contains(run_id);
-            if hydrated {
-                guard.touch_run(run_id);
-            }
-            hydrated
-        })
-        .unwrap_or(false)
-    {
+    let Some(epoch_before) = cache().lock().ok().and_then(|mut guard| {
+        if guard.hydrated_runs.contains(run_id) {
+            guard.touch_run(run_id);
+            return None;
+        }
+        Some(guard.run_epochs.get(run_id).copied().unwrap_or(0))
+    }) else {
         return;
-    }
+    };
     let Ok(text) = fs::read_to_string(&path) else {
         return;
     };
@@ -1824,6 +1827,11 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     let Ok(mut guard) = cache().lock() else {
         return;
     };
+    if guard.run_epochs.get(run_id).copied().unwrap_or(0) != epoch_before
+        || guard.hydrated_runs.contains(run_id)
+    {
+        return;
+    }
     let seq_before = guard.mutation_seq.get(run_id).copied().unwrap_or(0);
     let key_run = run_id.to_string();
     for (execution_id, summary) in saved.executions {

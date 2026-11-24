@@ -18,9 +18,10 @@ Back up the runtime data directory and stop its backend before explicit maintena
 ```sh
 npm run cleanup:workspaces
 npm run cleanup:workspaces -- --apply
+npm run cleanup:workspaces -- --stale-days 7 --apply
 ```
 
-Preview and apply acquire the backend's exclusive runtime lease. Cleanup uses recorded ownership, source protection and generation checks. It does not adopt old project-adjacent workspace layouts, unmarked engine copies or retired Partitioner directories. Missing ownership is not permission to delete a directory.
+Preview and apply acquire the backend's exclusive runtime lease. Cleanup uses recorded ownership, source protection and generation checks. Pass `--stale-days DAYS` to preview or reclaim abandoned incomplete Run workspace directories (leaving SQLite conversation history and source projects intact); `--apply` also drains pending detached cleanup receipts. It does not adopt old project-adjacent workspace layouts, unmarked engine copies or retired Partitioner directories. Missing ownership is not permission to delete a directory.
 
 The old `migrate`/`compact`, paused-batch restoration and partial-publication-file repair commands are retired. Use a new data directory for a persisted-format change; keep the previous installation with its own data if access to old Runs is needed. Do not delete or rewrite old data to make the new version accept it.
 
