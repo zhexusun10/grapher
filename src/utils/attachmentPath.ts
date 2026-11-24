@@ -131,8 +131,16 @@ export function prependAttachmentPrefix(prefix: string, body: string): string {
  * `localStorage` or trigger pathological WebKit line-clamp layout. */
 export function truncateRunLabel(text: string, maxChars = 512): string {
   if (!text || text.length <= maxChars) return text;
-  const sliced = text.slice(0, maxChars).trimEnd();
-  return `${sliced}…`;
+  // Match the backend's character limit without splitting an emoji's UTF-16
+  // pair or allocating an array for an entire multi-megabyte pasted prompt.
+  let chars = 0;
+  let end = 0;
+  for (const char of text) {
+    if (chars >= maxChars) return `${text.slice(0, end).trimEnd()}…`;
+    chars++;
+    end += char.length;
+  }
+  return text;
 }
 
 /** Format a goal/label string for compact UI surfaces (such as sidebar titles)

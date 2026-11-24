@@ -688,6 +688,29 @@ test("leading live summaries keep stable IDs across tool completion, follow-up t
   assert.equal(new Set(splitSummaryIds).size, splitSummaryIds.length);
 });
 
+test("summary regrouping preserves long histories and resolves overlap ties without stealing row IDs", () => {
+  const child = (id: string, toolCallId?: string): TranscriptItem => ({ id, toolCallId, type: "tool_call" });
+  const summary = (id: string, summaryItems: TranscriptItem[]): TranscriptItem => ({ id, type: "activity_summary", summaryItems });
+  const previous = Array.from({ length: 2000 }, (_, index) =>
+    summary(`old-${index}`, [child(`child-${index}`)]));
+  const incoming = previous.map((row, index) => summary(`new-${index}`, row.summaryItems!));
+  const stable = stabilizeActivitySummaryIds(incoming, previous);
+  assert.deepEqual(stable.map(row => row.id), previous.map(row => row.id));
+  assert.equal(incoming[0].id, "new-0", "the caller's rows remain untouched");
+  assert.equal(stable[0].summaryItems, incoming[0].summaryItems);
+  assert.equal(stabilizeActivitySummaryIds(stable, stable), stable);
+
+  const a = child("a", "tool-a"), b = child("b", "tool-b"), extra = child("extra");
+  const old = [summary("group-a", [a, extra]), summary("group-b", [b])];
+  assert.equal(stabilizeActivitySummaryIds([summary("merged", [a, b])], old)[0].id, "merged",
+    "equal tool and item overlaps are ambiguous");
+  assert.equal(stabilizeActivitySummaryIds([summary("merged", [a, b, extra])], old)[0].id, "group-a",
+    "an item overlap breaks a tool overlap tie");
+  const reserved = [summary("merged", [a, extra]), { id: "group-a", type: "text" as const }];
+  assert.equal(stabilizeActivitySummaryIds(reserved, old), reserved,
+    "a matching summary cannot take an ordinary row's identity");
+});
+
 test("isItemHydrated requires both args and result hydration when a live tool settles with an omitted result", () => {
   const argsHydratedPatch = { args: { path: "src/app.ts", content: "full" }, argsOmitted: false, bodyOmitted: false };
   const runningTool: TranscriptItem = {

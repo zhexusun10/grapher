@@ -666,6 +666,9 @@ All three categories participate in LRU eviction. An entry too large to retain
 remains available to the current query, so memory pressure does not hide matches;
 cache hits do not copy whole conversation histories. Unicode match offsets are
 recovered by walking to the lowercase hit, without a per-byte offset table.
+Log entries retain the database version at which they were checked. A user-only
+query, another workspace's search or an interrupted warmup cannot mark unread
+execution/Planner entries fresh by advancing the shared index version.
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.

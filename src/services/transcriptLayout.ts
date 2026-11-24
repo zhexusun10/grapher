@@ -146,6 +146,23 @@ export function stabilizeActivitySummaryIds(
     }
   }
 
+  if (summaryIndexes.every(index => claimedPrevIds.has(rows[index].id))) return rows;
+
+  // Find only groups that share a child. Scanning every old group and every
+  // current row for each candidate made projection upgrades cubic in history.
+  const byTool = new Map<string, typeof prevList>();
+  const byItem = new Map<string, typeof prevList>();
+  for (const entry of prevList) {
+    for (const [ids, map] of [[entry.toolCallIds, byTool], [entry.itemIds, byItem]] as const) {
+      for (const id of ids) {
+        const owners = map.get(id);
+        if (owners) owners.push(entry); else map.set(id, [entry]);
+      }
+    }
+  }
+  const rowIdCounts = new Map<string, number>();
+  for (const row of rows) rowIdCounts.set(row.id, (rowIdCounts.get(row.id) ?? 0) + 1);
+
   let nextRows: TranscriptItem[] | null = null;
   for (const index of summaryIndexes) {
     const row = rows[index];
@@ -154,52 +171,39 @@ export function stabilizeActivitySummaryIds(
     const isIdTakenElsewhere = (candidateId: string) =>
       claimedPrevIds.has(candidateId) ||
       usedRowIds.has(candidateId) ||
-      summaryIndexes.some(other => other !== index && (nextRows ? nextRows[other] : rows[other]).id === candidateId);
+      (rowIdCounts.get(candidateId) ?? 0) > Number(candidateId === row.id);
 
-    let matchedId: string | null = null;
-    let bestToolOverlap = 0;
-    let toolTied = false;
-    for (const prev of prevList) {
-      if (isIdTakenElsewhere(prev.item.id) || !prev.toolCallIds.size) continue;
-      const overlap = children.reduce(
-        (count, child) => count + Number(Boolean(child.toolCallId && prev.toolCallIds.has(child.toolCallId))),
-        0,
-      );
-      if (overlap > bestToolOverlap) {
-        bestToolOverlap = overlap;
-        matchedId = prev.item.id;
-        toolTied = false;
-      } else if (overlap > 0 && overlap === bestToolOverlap) {
-        toolTied = true;
+    const overlaps = (map: Map<string, typeof prevList>, tool: boolean) => {
+      const counts = new Map<typeof prevList[number], number>();
+      for (const child of children) {
+        const id = tool ? child.toolCallId : child.id;
+        if (id === undefined) continue;
+        for (const entry of map.get(id) ?? []) counts.set(entry, (counts.get(entry) ?? 0) + 1);
       }
-    }
-    if (toolTied) matchedId = null;
-
-    if (!matchedId) {
-      let bestItemOverlap = 0;
-      let itemTied = false;
-      for (const prev of prevList) {
-        if (isIdTakenElsewhere(prev.item.id)) continue;
-        const overlap = children.reduce(
-          (count, child) => count + Number(prev.itemIds.has(child.id)),
-          0,
-        );
-        if (overlap > bestItemOverlap) {
-          bestItemOverlap = overlap;
-          matchedId = prev.item.id;
-          itemTied = false;
-        } else if (overlap > 0 && overlap === bestItemOverlap) {
-          itemTied = true;
+      let matched: string | null = null;
+      let best = 0;
+      let tied = false;
+      for (const [entry, count] of counts) {
+        if (isIdTakenElsewhere(entry.item.id)) continue;
+        if (count > best) {
+          best = count;
+          matched = entry.item.id;
+          tied = false;
+        } else if (count === best) {
+          tied = true;
         }
       }
-      if (itemTied) matchedId = null;
-    }
+      return tied ? null : matched;
+    };
+    const matchedId = overlaps(byTool, true) ?? overlaps(byItem, false);
 
     if (matchedId && matchedId !== row.id) {
       claimedPrevIds.add(matchedId);
       usedRowIds.add(matchedId);
       if (!nextRows) nextRows = [...rows];
       nextRows[index] = { ...row, id: matchedId };
+      rowIdCounts.set(row.id, rowIdCounts.get(row.id)! - 1);
+      rowIdCounts.set(matchedId, (rowIdCounts.get(matchedId) ?? 0) + 1);
     } else {
       usedRowIds.add(row.id);
     }

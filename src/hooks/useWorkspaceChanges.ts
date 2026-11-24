@@ -82,7 +82,7 @@ function sameSummary(a: FileChangeSummary, b: FileChangeSummary): boolean {
  * File changes are authoritative only in the backend summary: Git compares the
  * real snapshots, while tool-transcript parsing is an approximation (it misses
  * bash edits, truncated arguments and post-run direct writes). This hook never
- * counts lines itself; it only merges what the backend projected.
+ * counts lines or merges scopes itself; it displays the backend projection.
  *
  * The snapshot omits the change list (a build-heavy Run can hold tens of
  * thousands of paths), so the hook fetches it on demand through

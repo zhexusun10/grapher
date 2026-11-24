@@ -137,6 +137,9 @@ test("formatManagedAttachmentDisplayLabel hides internal paths and falls back to
   const stored = truncateRunLabel(huge);
   assert.ok(stored.length <= 513);
   assert.ok(stored.endsWith("…"));
+  assert.equal(truncateRunLabel("中😀文🚀标题", 4), "中😀文🚀…");
+  assert.equal(truncateRunLabel("😀🚀", 2), "😀🚀", "exactly fitting characters need no ellipsis");
+  assert.equal(formatManagedAttachmentDisplayLabel("a".repeat(239) + "😀尾"), "a".repeat(239) + "😀…");
 });
 
 test("EditableUserBubble collapses oversized pasted user messages into a bounded preview", () => {

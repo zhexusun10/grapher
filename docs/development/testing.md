@@ -51,7 +51,7 @@ Files stay at their existing paths so fixtures, Rust `include_str!` callers and 
 | `probe:*`, `scripts/readme-screenshots.mjs`, `scripts/planning-trajectory.mjs` | Opt-in diagnostics/evidence generation, not default validation. |
 | `clean:stale`, `cleanup:workspaces` | Explicit maintenance commands; never run these as test cleanup. |
 
-Browser fixtures use the current wire contract. [current-api.mjs](../../scripts/fixtures/current-api.mjs) builds conversation summaries, scoped log pages with `startOffset`, and file-change responses with explicit scope and summary counters. Full output in a synthetic fixture is backing log data; expose its byte count and serve pages through the mocked API. Completed model/thinking labels need recorded metrics. Keep old-format rejection cases separate from these current response builders.
+Browser fixtures use the current wire contract. [current-api.mjs](../../scripts/fixtures/current-api.mjs) builds conversation summaries, scoped log pages with `startOffset`, and file-change responses with explicit scope and summary counters. `fixtureFileChangeSummary` constructs complete synthetic row sets; production summary totals and scope aggregation belong to the backend. Full output in a synthetic fixture is backing log data; expose its byte count and serve pages through the mocked API. Completed model/thinking labels need recorded metrics. Keep old-format rejection cases separate from these current response builders.
 
 ## Build isolation
 

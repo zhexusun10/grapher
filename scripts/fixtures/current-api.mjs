@@ -32,6 +32,20 @@ export function fixtureExecutionPage(body, snapshots) {
 
 export function fixtureFileChanges(body, summary) {
   return { runId: body?.runId, executionId: body?.executionId ?? null, executionIds: body?.executionIds ?? null,
-    summary: summary ?? { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0,
-      renamedCount: 0, totalAdditions: 0, totalDeletions: 0, isRunning: false } };
+    summary: summary ?? fixtureFileChangeSummary([]) };
+}
+
+// Synthetic complete row sets only. Production counters and scoped aggregates
+// come from the backend; fixtures must not resurrect browser-side merging.
+export function fixtureFileChangeSummary(files, isRunning = false, activeFilePath) {
+  return {
+    files, totalFiles: files.length,
+    addedCount: files.filter(file => file.status === 'added').length,
+    modifiedCount: files.filter(file => file.status === 'modified').length,
+    deletedCount: files.filter(file => file.status === 'deleted').length,
+    renamedCount: files.filter(file => file.status === 'renamed').length,
+    totalAdditions: files.reduce((sum, file) => sum + file.additions, 0),
+    totalDeletions: files.reduce((sum, file) => sum + file.deletions, 0),
+    isRunning, ...(activeFilePath ? { activeFilePath } : {}),
+  };
 }

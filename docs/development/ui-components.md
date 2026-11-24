@@ -34,6 +34,10 @@ Sidebar menus use [ContextMenu](../../src/components/ui/context-menu.tsx): right
 
 ### Sidebar hover labels
 
+Stored and displayed conversation labels are bounded by Unicode character
+count, preserving surrogate pairs when a title ends near an emoji. The full
+prompt remains in conversation history.
+
 The Sidebar deliberately does **not** show hover tags/tooltips, including native HTML `title` bubbles. Do not add them to workspace cards, conversation cards, icon actions or the collapsed rail, even when text is truncated. This avoids redundant floating labels covering nearby items. Keep visible labels and accessible names (`aria-label` for icon-only controls and full workspace paths); conversation text remains available to assistive technology despite visual ellipsis. Full paths and prompts can be copied through the context menu. Hover styling and keyboard focus indicators remain enabled. [Sidebar browser tests](../../scripts/sidebar-copy-prompt-ui.test.mjs) cover this choice in expanded and collapsed states.
 
 ### Settings first-open stability
@@ -76,7 +80,7 @@ Markdown images fit the transcript width. Relative image targets stay inert thro
 
 Blob URLs belong to mounted Markdown and are shared by images using the same path. Streamed text updates retain resources for displayed paths; removing the last reference cancels its pending request and revokes its URL. Scope changes/unmount release everything, and a removed path can load again if reintroduced, including after failure. Neither URLs nor image bytes enter the Markdown cache. Missing/unsupported images show a readable fallback instead of a broken icon. Local previews read current files, not immutable historical captures; deleted unpublished files cannot be recovered by this preview API. [Markdown browser regressions](../../scripts/frontend-audit.test.mjs) cover scoped requests, streaming reuse, sizing, failure and resource cleanup.
 
-Tool cards and their headers do not change appearance on hover; click-to-expand, keyboard focus and copy-button feedback remain enabled.
+Tool cards and their headers do not change appearance on hover; click-to-expand, keyboard focus and copy-button feedback remain enabled. Activity-summary regrouping matches indexed child/tool identities, preserving mounted row IDs and refusing ambiguous or already-occupied identities without scanning every pair of history groups. [Transcript layout tests](../../scripts/transcript-window.test.ts) cover long histories, splits and overlap ties.
 
 A reasoning card opens at its newest line. Scrolling stays inside a reasoning or tool card while it has room, then chains vertically to the conversation at the edge; only the latter stops outer bottom-following. Reopening reasoning resets to the newest line. Expansion keeps composer focus and does not move a reader who has scrolled away.
 

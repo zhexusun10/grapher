@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
-import { buildSummaryFromFiles } from "../../src/services/fileChanges";
+import { fixtureFileChangeSummary } from "./current-api.mjs";
 import { defaultConfig, emptySnapshot, publicationMergerCardId, type Execution, type FileChangeItem, type OpenWorkspaceFileRequest, type Snapshot } from "../../src/types";
 import { tokens } from "../../src/tokens";
 import "../../src/styles.css";
@@ -138,7 +138,7 @@ function Fixture() {
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState(mode === "node" || mode === "waiting" ? "worker" : mode === "merger" ? publicationMergerCardId : "");
   const [selectedMergerId, setSelectedMergerId] = useState("");
-  const summary = buildSummaryFromFiles(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
+  const summary = fixtureFileChangeSummary(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
     ...file, additions: file.additions + (index === 0 ? revision : 0),
   })), false);
   const cardsMode = params.get("cards") === "1";

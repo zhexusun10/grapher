@@ -39,6 +39,7 @@ struct CachedExecutionTexts {
     run_id: String,
     end_offset: Option<usize>,
     log_bytes: usize,
+    data_version: Option<i64>,
     texts: Arc<[String]>,
     bytes: usize,
     last_used: u64,
@@ -47,6 +48,7 @@ struct CachedExecutionTexts {
 struct CachedPlannerTexts {
     len: u64,
     modified: Option<SystemTime>,
+    data_version: Option<i64>,
     texts: Arc<[String]>,
     bytes: usize,
     last_used: u64,
@@ -194,14 +196,16 @@ impl SearchIndex {
         run_id: &str,
         execution_id: &str,
         end_offset: Option<usize>,
-        db_changed: bool,
     ) -> Arc<[String]> {
         let tick = self.next_tick();
-        let fast_hit = !db_changed
-            && self
-                .executions
-                .get(execution_id)
-                .is_some_and(|entry| entry.run_id == run_id && entry.end_offset == end_offset);
+        // A different workspace, user-only query or interrupted warmup may
+        // already have observed this DB version without checking this log.
+        // Freshness belongs to each entry, not the most recent query.
+        let fast_hit = self.executions.get(execution_id).is_some_and(|entry| {
+            entry.run_id == run_id
+                && entry.end_offset == end_offset
+                && entry.data_version == self.data_version
+        });
         if fast_hit {
             if let Some(entry) = self.executions.get_mut(execution_id) {
                 entry.last_used = tick;
@@ -222,6 +226,7 @@ impl SearchIndex {
         if cache_hit {
             if let Some(entry) = self.executions.get_mut(execution_id) {
                 entry.last_used = tick;
+                entry.data_version = self.data_version;
             }
             return self
                 .executions
@@ -258,6 +263,7 @@ impl SearchIndex {
                 run_id: run_id.to_string(),
                 end_offset,
                 log_bytes,
+                data_version: self.data_version,
                 texts,
                 bytes,
                 last_used: tick,
@@ -277,7 +283,11 @@ impl SearchIndex {
         check_disk: bool,
     ) -> Arc<[String]> {
         let tick = self.next_tick();
-        if !check_disk && self.planners.contains_key(planning_id) {
+        if !check_disk
+            && self.planners.get(planning_id).is_some_and(|entry| {
+                entry.data_version == self.data_version
+            })
+        {
             if let Some(entry) = self.planners.get_mut(planning_id) {
                 entry.last_used = tick;
             }
@@ -308,6 +318,7 @@ impl SearchIndex {
         if cache_hit {
             if let Some(entry) = self.planners.get_mut(planning_id) {
                 entry.last_used = tick;
+                entry.data_version = self.data_version;
             }
             return self
                 .planners
@@ -342,6 +353,7 @@ impl SearchIndex {
             CachedPlannerTexts {
                 len,
                 modified,
+                data_version: self.data_version,
                 texts,
                 bytes,
                 last_used: tick,
@@ -597,7 +609,6 @@ fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
                 &summary.run_id,
                 &exec.execution_id,
                 exec.end_offset,
-                db_changed,
             );
         }
         if let Some(planning_root) = planning_root.as_deref() {
@@ -682,7 +693,6 @@ fn search_workspace_root(
                 &query_lower,
                 query_is_caseless,
                 role_filter,
-                db_changed,
                 check_planner_disk,
             ) {
                 truncated = true;
@@ -699,7 +709,6 @@ fn search_workspace_root(
             &query_lower,
             query_is_caseless,
             role_filter,
-            db_changed,
             check_planner_disk,
             max_for_run,
             &mut run_hits,
@@ -1353,7 +1362,6 @@ fn collect_run_matches(
     query_lower: &str,
     query_is_caseless: bool,
     role_filter: RoleFilter,
-    db_changed: bool,
     check_planner_disk: bool,
     max_hits: usize,
     out: &mut Vec<ConversationSearchMatch>,
@@ -1414,7 +1422,6 @@ fn collect_run_matches(
             &summary.run_id,
             &exec.execution_id,
             exec.end_offset,
-            db_changed,
         );
         for text in texts.iter().rev() {
             if push_match(
@@ -1452,7 +1459,6 @@ fn run_has_any_match(
     query_lower: &str,
     query_is_caseless: bool,
     role_filter: RoleFilter,
-    db_changed: bool,
     check_planner_disk: bool,
 ) -> bool {
     let mut hits = Vec::new();
@@ -1464,7 +1470,6 @@ fn run_has_any_match(
         query_lower,
         query_is_caseless,
         role_filter,
-        db_changed,
         check_planner_disk,
         1,
         &mut hits,
@@ -2815,6 +2820,158 @@ mod tests {
             "检查 @/foo/attachment-inputs/bar 路径"
         );
 
+        crate::store::forget_catalog(&db);
+    }
+
+    #[test]
+    fn search_refreshes_logs_after_an_unrelated_query_observes_the_database_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let db = root.join("events.sqlite");
+        let store = Store::open(&db).unwrap();
+        let repo = root.join("workspace").to_string_lossy().into_owned();
+        let mut state = Snapshot {
+            run_id: "cache-invalidation".into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: "user goal".into(),
+                        nodes: vec![Node {
+                            id: "task".into(),
+                            task: "work".into(),
+                        }],
+                        edges: vec![],
+                    },
+                    config: test_config(&repo),
+                    planning_id: None,
+                    planning: None,
+                },
+            )
+            .unwrap();
+        let mut execution = test_execution("live", "task", 1, None);
+        execution.status = "running".into();
+        store
+            .append(
+                &mut state,
+                EventKind::Started {
+                    execution,
+                    message_sequences: None,
+                    fresh_restart: false,
+                },
+            )
+            .unwrap();
+        let output = |text: &str| EventKind::Output {
+            execution_id: "live".into(),
+            text: format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+                })
+            ),
+        };
+        store.append(&mut state, output("initial reply")).unwrap();
+        assert_eq!(
+            search_workspace_root(root, &repo, "initial reply", RoleFilter::Assistant, 10)
+                .unwrap()
+                .matches
+                .len(),
+            1
+        );
+        store.append(&mut state, output("new reply")).unwrap();
+
+        // A user-only query syncs the shared DB version without reading any
+        // assistant logs. It must not validate their older cached contents.
+        assert_eq!(
+            search_workspace_root(root, &repo, "user goal", RoleFilter::User, 10)
+                .unwrap()
+                .matches
+                .len(),
+            1
+        );
+        assert_eq!(
+            search_workspace_root(root, &repo, "new reply", RoleFilter::Assistant, 10)
+                .unwrap()
+                .matches
+                .len(),
+            1
+        );
+        forget_search_index(&db);
+        crate::store::forget_catalog(&db);
+    }
+
+    #[test]
+    fn search_refreshes_final_planner_output_after_a_user_only_query() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let db = root.join("events.sqlite");
+        let store = Store::open(&db).unwrap();
+        let repo = root.join("workspace").to_string_lossy().into_owned();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut planning = PlanningSummary {
+            planning_id: id.into(),
+            goal: Some("user goal".into()),
+            status: Some("running".into()),
+            ..Default::default()
+        };
+        let mut state = Snapshot {
+            run_id: "planner-cache-invalidation".into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::PlanningStarted {
+                    goal: "user goal".into(),
+                    config: test_config(&repo),
+                    planning: planning.clone(),
+                    plan_type: None,
+                },
+            )
+            .unwrap();
+        let log = root.join("planning").join(id).join("planner.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(&log, "").unwrap();
+        assert!(
+            search_workspace_root(root, &repo, "final reply", RoleFilter::Assistant, 10)
+                .unwrap()
+                .matches
+                .is_empty()
+        );
+        fs::write(&log, "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"final reply\"}]}}\n").unwrap();
+        planning.status = Some("completed".into());
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: "user goal".into(),
+                        ..Default::default()
+                    },
+                    config: test_config(&repo),
+                    planning_id: Some(id.into()),
+                    planning: Some(planning),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            search_workspace_root(root, &repo, "user goal", RoleFilter::User, 10)
+                .unwrap()
+                .matches
+                .len(),
+            1
+        );
+        assert_eq!(
+            search_workspace_root(root, &repo, "final reply", RoleFilter::Assistant, 10)
+                .unwrap()
+                .matches
+                .len(),
+            1
+        );
+        forget_search_index(&db);
         crate::store::forget_catalog(&db);
     }
 
