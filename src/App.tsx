@@ -13,7 +13,7 @@ import {
   type ConversationModelConfig, type OpenWorkspaceFileRequest, type RoleModelConfig
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
-import { extractLeadingAttachmentPrefix, prependAttachmentPrefix, stripManagedAttachmentMentions } from "./utils/attachmentPath";
+import { extractLeadingAttachmentPrefix, prependAttachmentPrefix, stripManagedAttachmentMentions, truncateRunLabel } from "./utils/attachmentPath";
 import { tokens } from "./tokens";
 import { RunNotFoundError, runtimeService } from "./services/runtime";
 import {
@@ -36,7 +36,7 @@ import { providerAuth } from "./services/providerAuth";
 import { ComposerModels, type ComposerScope } from "./services/composerCommands";
 import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig, updateRoleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
-import { deduceRouteType } from "./services/executionRoute";
+import { deduceRouteType, resolveRunRouteType } from "./services/executionRoute";
 import { loadWorkbench, preloadWorkbench } from "./services/workbenchLoader";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay, runningPlanningFromSnapshot } from "./services/planningRecovery";
 import {
@@ -332,8 +332,9 @@ export default function App() {
   }, [rememberLatestSnapshot, observeIndicatorSnapshot]);
   const syncRunLabelFromSnapshot = useCallback((snapshot: Snapshot) => {
     if (!snapshot.runId || snapshot.runId.startsWith("pending-")) return;
-    const label = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
-    if (!label) return;
+    const rawLabel = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
+    if (!rawLabel) return;
+    const label = truncateRunLabel(rawLabel);
     setRunLabels((prev) => {
       if (prev[snapshot.runId] === label || deletedRunIdsRef.current.has(snapshot.runId)) return prev;
       const updated = { ...prev, [snapshot.runId]: label };
@@ -575,7 +576,7 @@ export default function App() {
     setRunLabels((prev) => {
       const copy = { ...prev };
       delete copy[oldId];
-      copy[newId] = label;
+      copy[newId] = truncateRunLabel(label);
       writeStorageJson(STORAGE_KEYS.runLabels, copy);
       return copy;
     });
@@ -1278,7 +1279,7 @@ export default function App() {
       setWorkspaceRuns(indexedRuns);
       setRunLabels(previous => {
         const next = { ...previous };
-        for (const item of summaries) next[item.runId] = item.title;
+        for (const item of summaries) next[item.runId] = truncateRunLabel(item.title);
         writeStorageJson(STORAGE_KEYS.runLabels, next);
         return next;
       });
@@ -1736,10 +1737,40 @@ export default function App() {
       setError(t("对话正在创建，请稍后再删除。"));
       return;
     }
+    const targetRouteType = resolveRunRouteType({
+      runId,
+      activeRunId: state.runId,
+      activeRouteType: routeType,
+      cachedSnapshot: latestSnapshotsRef.current.get(runId),
+      runMode: runModes[runId],
+    });
+    const shortId = runId.slice(0, 8);
+    if (targetRouteType === "serial") {
+      setConfirmModal({
+        title: t("删除 Serial 对话"),
+        message: t("确定删除 Serial 对话「Serial {0}」吗？", shortId),
+        detail: t("对话 ID: {0}\n删除后该对话的消息历史与事件记录将被彻底清除，不会删除源项目代码文件。", runId),
+        confirmText: t("删除对话"),
+        danger: true,
+        onConfirm: () => handleDeleteRun(runId),
+      });
+      return;
+    }
+    if (targetRouteType === "graph") {
+      setConfirmModal({
+        title: t("删除 Graph 对话"),
+        message: t("确定删除 Graph 对话「Graph {0}」吗？", shortId),
+        detail: t("对话 ID: {0}\n删除后该次运行的执行拓扑图、节点记录与事件日志将被彻底清除；如果这是该项目最后一条 Graph 对话，对应的外置影子仓库也会一并清理。", runId),
+        confirmText: t("删除对话"),
+        danger: true,
+        onConfirm: () => handleDeleteRun(runId),
+      });
+      return;
+    }
     setConfirmModal({
       title: t("删除运行历史"),
-      message: t("确定删除历史快照「Graph {0}」吗？", runId.slice(0, 8)),
-      detail: t("快照 ID: {0}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除；如果这是该项目最后一条 Conversation，对应的外置影子仓库也会一并清理。", runId),
+      message: t("确定删除历史对话「{0}」吗？", shortId),
+      detail: t("对话 ID: {0}\n删除后该对话的记录与事件日志将被彻底清除；如果不再被其他对话引用，对应的外置影子仓库也会一并清理。", runId),
       confirmText: t("删除历史"),
       danger: true,
       onConfirm: () => handleDeleteRun(runId),
@@ -1892,7 +1923,7 @@ export default function App() {
     setModal(null);
     if (draftRunId && snapshot.runId === draftRunId) {
       setRunLabels((prev) => {
-        const updated = { ...prev, [draftRunId]: graph.originalGoal || "" };
+        const updated = { ...prev, [draftRunId]: truncateRunLabel(graph.originalGoal || "") };
         writeStorageJson(STORAGE_KEYS.runLabels, updated);
         return updated;
       });
@@ -2192,7 +2223,7 @@ export default function App() {
                   recordRunToWorkspace(event.runId, targetRepo);
                   setRunLabels((prev) => {
                     if (prev[event.runId!]) return prev;
-                    const updated = { ...prev, [event.runId!]: targetGoal };
+                    const updated = { ...prev, [event.runId!]: truncateRunLabel(targetGoal) };
                     writeStorageJson(STORAGE_KEYS.runLabels, updated);
                     return updated;
                   });
@@ -2241,7 +2272,7 @@ export default function App() {
                   });
                   setRunLabels((prev) => {
                     if (prev[runId]) return prev;
-                    const updated = { ...prev, [runId]: targetGoal };
+                    const updated = { ...prev, [runId]: truncateRunLabel(targetGoal) };
                     writeStorageJson(STORAGE_KEYS.runLabels, updated);
                     return updated;
                   });

@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect } from "react";
 import { FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
 import type { Snapshot, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
+import { copyTextToClipboard } from "../services/externalLink";
 import "./PublicationCompletedDetails.css";
 
 interface PublicationCompletedDetailsProps {
@@ -40,10 +41,9 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
   const activeMerger = mergers.find(m => m.id === selectedMergerId) ?? mergers[mergers.length - 1];
 
   const handleCopyRepo = async () => {
-    if (!targetRepo || !navigator.clipboard?.writeText) return;
+    if (!targetRepo) return;
     try {
-      await navigator.clipboard.writeText(targetRepo);
-      if (!mountedRef.current) return;
+      if (!await copyTextToClipboard(targetRepo) || !mountedRef.current) return;
       setCopiedRepo(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setCopiedRepo(false); }, 2000);

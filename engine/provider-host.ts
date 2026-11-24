@@ -16,7 +16,11 @@ async function dispatch(request: Record<string, any>) {
   if (request.operation !== 'extension_command') return adapter.dispatch(request);
   if (request.version !== 1) throw new Error('Invalid extension command protocol');
   commandHostLoading ??= import('./extension-commands.ts')
-    .then(({ ExtensionCommands }) => commandHost = new ExtensionCommands());
+    .then(({ ExtensionCommands }) => commandHost = new ExtensionCommands())
+    .catch((error) => {
+      commandHostLoading = undefined;
+      throw error;
+    });
   return (await commandHostLoading).dispatch(request.command);
 }
 

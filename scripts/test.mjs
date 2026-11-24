@@ -47,6 +47,30 @@ export function checkInventory({ directory = root, catalog = suites } = {}) {
   return { suites: Object.keys(catalog).length, tests: registered.size };
 }
 
+const PRESERVED_TEST_GRAPHER_KEYS = new Set([
+  'GRAPHER_BROWSER_CHANNEL',
+  'GRAPHER_UI_SCREENSHOTS',
+  'GRAPHER_ENV_SEAL_PROBE_REPORT',
+]);
+
+export function sanitizedTestEnv(source = process.env) {
+  const env = { ...source };
+  for (const key of Object.keys(env)) {
+    const upper = key.toUpperCase();
+    if (
+      upper.startsWith('GRAPHER_') &&
+      !PRESERVED_TEST_GRAPHER_KEYS.has(upper) &&
+      !upper.startsWith('GRAPHER_ENV_PROBE_') &&
+      !upper.startsWith('GRAPHER_ENV_TEST_')
+    ) {
+      delete env[key];
+    } else if (/^PI_(?:SESSION_ID|SESSION_FILE|CODING_AGENT_DIR|CODING_AGENT|MODEL|PROVIDER|REASONING_LEVEL|THINKING)$/i.test(key)) {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
 export function runSteps(steps, { cwd = root, env = process.env, spawn = spawnSync,
   log = console.log, error = console.error } = {}) {
   for (const args of steps) {
@@ -92,7 +116,7 @@ function main(args) {
     for (const step of steps) console.log(commandText(step));
     return 0;
   }
-  return runSteps(steps);
+  return runSteps(steps, { env: sanitizedTestEnv(process.env) });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

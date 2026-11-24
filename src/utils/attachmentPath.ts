@@ -41,6 +41,7 @@ export interface ManagedAttachmentMention {
 
 /** Find every `@<path>` or `@"<path>"` mention referencing an external managed attachment. */
 export function findManagedAttachmentMentions(text: string): ManagedAttachmentMention[] {
+  if (!text.includes("attachment-inputs/")) return [];
   const results: ManagedAttachmentMention[] = [];
   const regex = new RegExp(MANAGED_ATTACHMENT_MENTION_RE.source, "g");
   let match: RegExpExecArray | null;
@@ -126,12 +127,23 @@ export function prependAttachmentPrefix(prefix: string, body: string): string {
   return /\s$/.test(prefix) ? `${prefix}${body}` : `${prefix} ${body}`;
 }
 
+/** Bound a sidebar conversation label so huge pasted prompts never bloat
+ * `localStorage` or trigger pathological WebKit line-clamp layout. */
+export function truncateRunLabel(text: string, maxChars = 512): string {
+  if (!text || text.length <= maxChars) return text;
+  const sliced = text.slice(0, maxChars).trimEnd();
+  return `${sliced}…`;
+}
+
 /** Format a goal/label string for compact UI surfaces (such as sidebar titles)
  * by hiding internal managed attachment paths and falling back to filenames. */
-export function formatManagedAttachmentDisplayLabel(text: string): string {
+export function formatManagedAttachmentDisplayLabel(text: string, maxChars = 240): string {
+  if (!text.includes("attachment-inputs/")) {
+    return truncateRunLabel(text, maxChars);
+  }
   const mentions = findManagedAttachmentMentions(text);
-  if (mentions.length === 0) return text;
+  if (mentions.length === 0) return truncateRunLabel(text, maxChars);
   const cleaned = stripManagedAttachmentMentions(text);
-  if (cleaned) return cleaned;
-  return mentions.map((mention) => mention.name).join(", ");
+  if (cleaned) return truncateRunLabel(cleaned, maxChars);
+  return truncateRunLabel(mentions.map((mention) => mention.name).join(", "), maxChars);
 }

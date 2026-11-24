@@ -4,6 +4,7 @@ import {
   installDesktopExternalLinkHandler,
   openExternalUrl,
   resolveExternalHttpUrl,
+  copyTextToClipboard,
 } from '../src/services/externalLink.ts';
 
 function withDesktopGlobal<T>(
@@ -45,6 +46,60 @@ test('resolveExternalHttpUrl accepts only http/https URLs and rejects anchors or
   assert.equal(resolveExternalHttpUrl('file:///etc/passwd'), null);
   assert.equal(resolveExternalHttpUrl('https://user:password@example.com/'), null);
   assert.equal(resolveExternalHttpUrl('mailto:test@example.com'), null);
+});
+
+test('copyTextToClipboard falls back to the document copy command inside a modal without losing focus', async () => {
+  const host = globalThis as Record<string, unknown>;
+  const originalDocument = host.document;
+  const originalHTMLElement = host.HTMLElement;
+  class FakeElement {
+    value = '';
+    selected = false;
+    removed = false;
+    focused = false;
+    isConnected = true;
+    tabIndex = 0;
+    style: Record<string, string> = {};
+    children: FakeElement[] = [];
+    dialog: FakeElement | null = null;
+    setAttribute() {}
+    appendChild(child: FakeElement) { this.children.push(child); }
+    closest(selector: string) { return selector.includes('dialog') ? this.dialog : null; }
+    select() { this.selected = true; }
+    focus() { this.focused = true; }
+    remove() { this.removed = true; this.isConnected = false; }
+  }
+  const dialog = new FakeElement();
+  const trigger = new FakeElement();
+  trigger.dialog = dialog;
+  const body = new FakeElement();
+  let created: FakeElement | null = null;
+  host.HTMLElement = FakeElement;
+  host.document = {
+    body,
+    activeElement: trigger,
+    createElement() {
+      created = new FakeElement();
+      return created;
+    },
+    execCommand(command: string) {
+      return command === 'copy'
+        && dialog.children.includes(created!)
+        && body.children.length === 0
+        && Boolean(created?.selected)
+        && created?.value === 'https://auth.example/login';
+    },
+  };
+  try {
+    assert.equal(await copyTextToClipboard('https://auth.example/login'), true);
+    assert.equal(created?.removed, true, 'the temporary copy field is removed');
+    assert.equal(trigger.focused, true, 'focus returns to the modal trigger after copying');
+  } finally {
+    if (originalDocument === undefined) delete host.document;
+    else host.document = originalDocument;
+    if (originalHTMLElement === undefined) delete host.HTMLElement;
+    else host.HTMLElement = originalHTMLElement;
+  }
 });
 
 test('openExternalUrl delegates to open_external_url IPC command in Tauri desktop mode', async () => {

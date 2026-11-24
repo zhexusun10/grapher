@@ -434,6 +434,100 @@ impl Files {
         Ok(entries(left)? == entries(right)?)
     }
 
+    /// Reclaim `versions/` and `blobs/` that are not reachable from any
+    /// `retained_roots` (following `Version.parents`). Fail-closed: if any
+    /// retained version or ancestor cannot be loaded/verified, nothing is deleted.
+    pub(crate) fn prune_unreferenced(
+        &self,
+        retained_roots: &BTreeSet<String>,
+    ) -> Result<usize, String> {
+        let mut keep_versions = BTreeSet::new();
+        let mut keep_blobs = BTreeSet::new();
+        let mut queue: Vec<String> = retained_roots
+            .iter()
+            .filter(|id| !id.is_empty())
+            .cloned()
+            .collect();
+        while let Some(version_id) = queue.pop() {
+            if !keep_versions.insert(version_id.clone()) {
+                continue;
+            }
+            let version = match self.load(&version_id) {
+                Ok(version) => version,
+                Err(_) => return Ok(0),
+            };
+            for entry in version.entries.values() {
+                if let Entry::File { blob, .. } = entry {
+                    keep_blobs.insert(blob.clone());
+                }
+            }
+            if let Some(rooted) = &version.rooted {
+                for frame in rooted.roots.values() {
+                    for entry in frame.entries.values() {
+                        if let Entry::File { blob, .. } = entry {
+                            keep_blobs.insert(blob.clone());
+                        }
+                    }
+                }
+            }
+            for parent in version.parents {
+                if !parent.is_empty() && !keep_versions.contains(&parent) {
+                    queue.push(parent);
+                }
+            }
+        }
+        let mut removed = 0usize;
+        let versions_dir = self.directory.join("versions");
+        if let Some(dir) = real_child_path(&self.directory, &versions_dir, false)? {
+            for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".json")) else {
+                    continue;
+                };
+                if !keep_versions.contains(stem) {
+                    if fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        let blobs_dir = self.directory.join("blobs");
+        if let Some(dir) = real_child_path(&self.directory, &blobs_dir, false)? {
+            for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(blob) = name.to_str() else {
+                    continue;
+                };
+                // Skip in-flight temporary staging files.
+                if blob.contains(".tmp") || blob.starts_with('.') {
+                    continue;
+                }
+                if !keep_blobs.contains(blob) {
+                    if fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     fn blob_path(&self, blob: &str) -> Result<PathBuf, String> {
         if blob.len() != 40 || !blob.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("Invalid workspace file blob".into());

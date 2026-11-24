@@ -1352,7 +1352,7 @@ pub struct Event {
 }
 
 impl Event {
-    fn planning_summary(&self) -> Option<&PlanningSummary> {
+    pub(crate) fn planning_summary(&self) -> Option<&PlanningSummary> {
         match &self.kind {
             EventKind::PlanningStarted { planning, .. }
             | EventKind::PlannerWorkspaceSelected { planning }

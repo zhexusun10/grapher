@@ -181,12 +181,41 @@ fn git_lock(path: &Path) -> bool {
 /// the streaming path so a big artifact never lands in a buffer.
 const IN_MEMORY_HASH_LIMIT: u64 = 8 * 1024 * 1024;
 
-fn file_blob(path: &Path, len: u64) -> Result<git2::Oid, String> {
+fn snapshot_changed_error(path: &str, disappeared: bool) -> String {
+    if disappeared {
+        format!(
+            "Project changed while binding its byte snapshot ({path} disappeared); retry preparation"
+        )
+    } else {
+        format!(
+            "Project changed while binding its byte snapshot ({path}); retry preparation"
+        )
+    }
+}
+
+fn map_snapshot_io_error(error: std::io::Error, path: &str) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        snapshot_changed_error(path, true)
+    } else {
+        format!("{path}: {error}")
+    }
+}
+
+fn file_blob(display_name: &str, path: &Path, len: u64) -> Result<git2::Oid, String> {
     if len <= IN_MEMORY_HASH_LIMIT {
-        let bytes = fs::read(path).map_err(|e| e.to_string())?;
+        let bytes = fs::read(path).map_err(|e| map_snapshot_io_error(e, display_name))?;
         return git2::Oid::hash_object(git2::ObjectType::Blob, &bytes).map_err(|e| e.to_string());
     }
-    git2::Oid::hash_file(git2::ObjectType::Blob, path).map_err(|e| e.to_string())
+    git2::Oid::hash_file(git2::ObjectType::Blob, path).map_err(|e| {
+        if e.code() == git2::ErrorCode::NotFound
+            || fs::symlink_metadata(path)
+                .is_err_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
+        {
+            snapshot_changed_error(display_name, true)
+        } else {
+            format!("{display_name}: {e}")
+        }
+    })
 }
 
 fn scan(
@@ -224,10 +253,43 @@ fn scan_scoped(
     tracked: &std::collections::BTreeSet<String>,
 ) -> Result<(), String> {
     let mut files = Vec::new();
-    walk_scoped(
-        root, relative, entries, &mut files, git, owner, exclusions, tracked,
+    let tracked_index = workspace::TrackedPathIndex::new(root, tracked);
+    walk_scoped_with_nested(
+        root,
+        relative,
+        entries,
+        &mut files,
+        git,
+        owner,
+        exclusions,
+        &tracked_index,
+        None,
+        false,
     )?;
     fill_file_entries(entries, files)
+}
+
+fn scan_tree_only(
+    root: &Path,
+    entries: &mut BTreeMap<String, Entry>,
+    exclusions: &[String],
+    tracked: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut files = Vec::new();
+    let tracked_index = workspace::TrackedPathIndex::new(root, tracked);
+    walk_scoped_with_nested(
+        root,
+        Path::new(""),
+        entries,
+        &mut files,
+        false,
+        root,
+        exclusions,
+        &tracked_index,
+        None,
+        true,
+    )?;
+    fill_file_entries_tree_only(entries, files)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,27 +304,52 @@ fn scan_scoped_with_links(
     nested_git: Option<&mut std::collections::BTreeSet<String>>,
 ) -> Result<crate::workspace_links::Topology, String> {
     let mut files = Vec::new();
+    let tracked_index = workspace::TrackedPathIndex::new(root, tracked);
     walk_scoped_with_nested(
-        root, relative, entries, &mut files, git, owner, exclusions, tracked, nested_git,
+        root,
+        relative,
+        entries,
+        &mut files,
+        git,
+        owner,
+        exclusions,
+        &tracked_index,
+        nested_git,
+        false,
     )?;
     fill_file_entries_with_links(entries, files)
 }
 
 /// Identity of one regular file: bytes and the supplemental metadata a project
 /// view records for it.
-fn file_entry(absolute: &Path, metadata: &fs::Metadata) -> Result<Entry, String> {
+fn file_entry(display_name: &str, absolute: &Path, metadata: &fs::Metadata) -> Result<Entry, String> {
     Ok(Entry::File {
         mode: mode(metadata),
-        blob: file_blob(absolute, metadata.len())?.to_string(),
+        blob: file_blob(display_name, absolute, metadata.len())?.to_string(),
         extra: crate::workspace_metadata::capture(absolute, metadata)?,
     })
 }
 
+/// Lightweight file observation for tree-only operations (`live_tree_scoped`)
+/// that never inspect or persist supplemental OS metadata (ACLs/xattrs/flags).
+fn file_tree_entry(
+    display_name: &str,
+    absolute: &Path,
+    metadata: &fs::Metadata,
+) -> Result<Entry, String> {
+    Ok(Entry::File {
+        mode: mode(metadata),
+        blob: file_blob(display_name, absolute, metadata.len())?.to_string(),
+        extra: crate::workspace_metadata::Extra::default(),
+    })
+}
+
 fn file_entry_with_identity(
+    display_name: &str,
     absolute: &Path,
     metadata: &fs::Metadata,
 ) -> Result<(Entry, (u128, u64)), String> {
-    let blob = file_blob(absolute, metadata.len())?.to_string();
+    let blob = file_blob(display_name, absolute, metadata.len())?.to_string();
     let (extra, identity) = crate::workspace_metadata::capture_with_identity(absolute, metadata)?;
     Ok((
         Entry::File {
@@ -288,12 +375,31 @@ fn fill_file_entries(
         .min(4);
     if threads <= 1 || files.len() < PARALLEL_THRESHOLD {
         for file in files {
-            let entry = file_entry(&file.absolute, &file.metadata)?;
+            let entry = file_entry(&file.name, &file.absolute, &file.metadata)?;
             entries.insert(file.name, entry);
         }
         return Ok(());
     }
     file_scan::fill(entries, files, threads)
+}
+
+fn fill_file_entries_tree_only(
+    entries: &mut BTreeMap<String, Entry>,
+    files: Vec<PendingFile>,
+) -> Result<(), String> {
+    const PARALLEL_THRESHOLD: usize = 256;
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(4);
+    if threads <= 1 || files.len() < PARALLEL_THRESHOLD {
+        for file in files {
+            let entry = file_tree_entry(&file.name, &file.absolute, &file.metadata)?;
+            entries.insert(file.name, entry);
+        }
+        return Ok(());
+    }
+    file_scan::fill_tree_only(entries, files, threads)
 }
 
 fn fill_file_entries_with_links(
@@ -308,7 +414,8 @@ fn fill_file_entries_with_links(
     if threads <= 1 || files.len() < PARALLEL_THRESHOLD {
         let mut identities = BTreeMap::new();
         for file in files {
-            let (entry, identity) = file_entry_with_identity(&file.absolute, &file.metadata)?;
+            let (entry, identity) =
+                file_entry_with_identity(&file.name, &file.absolute, &file.metadata)?;
             entries.insert(file.name.clone(), entry);
             identities.insert(file.name, identity);
         }
@@ -321,6 +428,7 @@ fn fill_file_entries_with_links(
     file_scan::fill_with_links(entries, files, threads)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn walk_scoped(
     root: &Path,
@@ -332,8 +440,18 @@ fn walk_scoped(
     exclusions: &[String],
     tracked: &std::collections::BTreeSet<String>,
 ) -> Result<(), String> {
+    let tracked_index = workspace::TrackedPathIndex::new(root, tracked);
     walk_scoped_with_nested(
-        root, relative, entries, files, git, owner, exclusions, tracked, None,
+        root,
+        relative,
+        entries,
+        files,
+        git,
+        owner,
+        exclusions,
+        &tracked_index,
+        None,
+        false,
     )
 }
 
@@ -341,9 +459,11 @@ fn is_git_entry_name(root: &Path, name: &std::ffi::OsStr) -> bool {
     if name == ".git" {
         return true;
     }
-    (cfg!(windows)
-        || (cfg!(target_os = "macos") && crate::path_identity::case_insensitive_volume(root)))
-        && name.to_string_lossy().eq_ignore_ascii_case(".git")
+    if name.len() != 4 || !name.to_string_lossy().eq_ignore_ascii_case(".git") {
+        return false;
+    }
+    cfg!(windows)
+        || (cfg!(target_os = "macos") && crate::path_identity::case_insensitive_volume(root))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,8 +475,9 @@ fn walk_scoped_with_nested(
     git: bool,
     owner: &Path,
     exclusions: &[String],
-    tracked: &std::collections::BTreeSet<String>,
+    tracked: &workspace::TrackedPathIndex<'_>,
     mut nested_git: Option<&mut std::collections::BTreeSet<String>>,
+    tree_only: bool,
 ) -> Result<(), String> {
     for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
@@ -372,7 +493,7 @@ fn walk_scoped_with_nested(
         // Excluded scopes (managed environments/caches) and untracked generated
         // artifacts are not part of the project view, so a scoped capture never
         // inspects their contents.
-        if !git && workspace::collection_excluded_at(root, &path, tracked, exclusions) {
+        if !git && workspace::collection_excluded_with_index(root, &path, tracked, exclusions) {
             continue;
         }
         // Lock files are volatile Git storage, not the source's repository
@@ -388,13 +509,49 @@ fn walk_scoped_with_nested(
             continue;
         }
         let absolute = root.join(&path);
-        let metadata = fs::symlink_metadata(&absolute).map_err(|e| e.to_string())?;
+        let display_path = path.to_string_lossy().replace('\\', "/");
+        let metadata = fs::symlink_metadata(&absolute)
+            .map_err(|e| map_snapshot_io_error(e, &display_path))?;
         if metadata.is_file() && !crate::workspace_symlinks::is_link(&metadata) {
             files.push(PendingFile {
                 name: name(&path)?,
                 absolute,
                 metadata,
             });
+            continue;
+        }
+        if tree_only {
+            if crate::workspace_symlinks::is_link(&metadata) {
+                entries.insert(
+                    name(&path)?,
+                    Entry::Link {
+                        target: crate::workspace_symlinks::capture(owner, &absolute, &metadata)?,
+                        extra: crate::workspace_metadata::Extra::default(),
+                    },
+                );
+            } else if metadata.is_dir() {
+                walk_scoped_with_nested(
+                    root,
+                    &path,
+                    entries,
+                    files,
+                    git,
+                    owner,
+                    exclusions,
+                    tracked,
+                    nested_git.as_deref_mut(),
+                    true,
+                )?;
+            } else if let Some((special, _)) = special_entry(&metadata) {
+                if special == "socket" {
+                    return Err(format!("Workspace capability gap: live Unix socket {} cannot be reconstructed as an equivalent endpoint; remove it from the source before preparing a workspace", absolute.display()));
+                }
+            } else {
+                return Err(format!(
+                    "Workspace capability gap: special project entry {}",
+                    absolute.display()
+                ));
+            }
             continue;
         }
         let extra = crate::workspace_metadata::capture(&absolute, &metadata)?;
@@ -424,6 +581,7 @@ fn walk_scoped_with_nested(
                 exclusions,
                 tracked,
                 nested_git.as_deref_mut(),
+                false,
             )?;
             Entry::Directory {
                 mode: mode(&metadata),
@@ -1364,10 +1522,34 @@ fn copy_git(
 
 /// Raw capture avoids clean/smudge/EOL filters changing the physical baseline.
 /// The index belongs to graph Git, never the source or visible project Git.
-pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> {
+pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<String, String> {
+    stage_project_scoped(path, metadata, &[])
+}
+
+pub(crate) fn stage_project_scoped(
+    path: &Path,
+    metadata: &Path,
+    exclusions: &[String],
+) -> Result<String, String> {
     let mut entries = BTreeMap::new();
-    scan(path, Path::new(""), &mut entries, false)?;
-    stage_project_entries(path, metadata, entries)
+    let tracked = workspace::project_tracked_paths(path);
+    scan_tree_only(path, &mut entries, exclusions, &tracked)?;
+    stage_project_entries_inner(path, metadata, &entries, true, None)
+}
+
+/// Compute the live project tree without inspecting supplemental OS metadata
+/// (ACLs/xattrs/flags) and, for SHA-1 repositories, without mutating the shadow
+/// index on disk or spawning `git read-tree`/`git write-tree`.
+pub(crate) fn live_tree_scoped(
+    path: &Path,
+    metadata: &Path,
+    exclusions: &[String],
+    old_head: Option<&str>,
+) -> Result<String, String> {
+    let mut entries = BTreeMap::new();
+    let tracked = workspace::project_tracked_paths(path);
+    scan_tree_only(path, &mut entries, exclusions, &tracked)?;
+    stage_project_entries_inner(path, metadata, &entries, false, old_head)
 }
 
 /// Stage using the fresh observation already inspected for this source snapshot,
@@ -1376,8 +1558,8 @@ pub(crate) fn stage_project_with_view(
     path: &Path,
     metadata: &Path,
     view: &View,
-) -> Result<(), String> {
-    stage_project_entries_borrowed(path, metadata, &view.entries)
+) -> Result<String, String> {
+    stage_project_entries_inner(path, metadata, &view.entries, true, None)
 }
 
 /// Consume a fresh observation of this single-writer workspace. This is not a
@@ -1387,41 +1569,31 @@ fn stage_project_entries(
     path: &Path,
     metadata: &Path,
     entries: BTreeMap<String, Entry>,
-) -> Result<(), String> {
-    stage_project_entries_borrowed(path, metadata, &entries)
+) -> Result<String, String> {
+    stage_project_entries_inner(path, metadata, &entries, true, None)
 }
 
-fn stage_project_entries_borrowed(
+fn stage_project_entries_inner(
     path: &Path,
     metadata: &Path,
     entries: &BTreeMap<String, Entry>,
-) -> Result<(), String> {
-    // macOS host bookkeeping is not project output. Forced collection above sees
-    // every file, so drop newly discovered metadata while keeping paths the user
-    // already tracks. Other hosts keep collecting it as ordinary project data.
-    // Read tracked paths through the Git CLI: libgit2 cannot open SHA-256 repos.
+    update_index: bool,
+    old_head: Option<&str>,
+) -> Result<String, String> {
+    // macOS host bookkeeping is not project output. Match the exact same
+    // project-Git tracking boundary used by `walk_scoped_with_nested`, so a
+    // newly staged (uncommitted) `.DS_Store` in the project `.git` stays
+    // consistent between `view.json` and the graph Git tree.
     let macos_tracked = if cfg!(target_os = "macos")
         && entries.keys().any(|name| workspace::is_host_metadata(name))
     {
-        let tracked = workspace::git(
-            path,
-            &[
-                "--git-dir",
-                metadata.to_str().ok_or("Invalid graph Git")?,
-                "ls-files",
-                "-z",
-            ],
-        )?;
-        Some(
-            tracked
-                .split('\0')
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<std::collections::BTreeSet<String>>(),
-        )
+        Some(workspace::project_tracked_paths(path))
     } else {
         None
     };
+    let macos_tracked_index = macos_tracked
+        .as_ref()
+        .map(|tracked| workspace::TrackedPathIndex::new(path, tracked));
     let repository = match git2::Repository::open(metadata) {
         Ok(repo)
             if repo
@@ -1444,35 +1616,74 @@ fn stage_project_entries_borrowed(
                 ],
             )?;
             if format == "sha256" {
+                #[cfg(windows)]
+                if let Some(head) = old_head {
+                    workspace::git(
+                        path,
+                        &[
+                            "--git-dir",
+                            metadata.to_str().ok_or("Invalid graph Git")?,
+                            "--work-tree",
+                            path.to_str().ok_or("Invalid project root")?,
+                            "read-tree",
+                            head,
+                        ],
+                    )?;
+                }
                 let mut filtered = entries.clone();
-                if let Some(tracked) = &macos_tracked {
+                if let Some(tracked) = &macos_tracked_index {
                     filtered.retain(|name, _| {
-                        !workspace::is_host_metadata(name)
-                            || workspace::tracked_path_matches(Some(path), tracked, name)
+                        !workspace::is_host_metadata(name) || tracked.matches(name)
                     });
                 }
-                return stage_sha256(path, metadata, filtered);
+                stage_sha256(path, metadata, filtered)?;
+                return workspace::git(
+                    path,
+                    &[
+                        "--git-dir",
+                        metadata.to_str().ok_or("Invalid graph Git")?,
+                        "--work-tree",
+                        path.to_str().ok_or("Invalid project root")?,
+                        "write-tree",
+                    ],
+                );
             }
             result.map_err(|e| e.to_string())?
         }
     };
     // Keep Git's index instead of duplicating every path/mode in another tree.
     // Only Windows needs an old mode (its filesystem has no executable bit).
-    // Still open the index on every platform so unreadable evidence fails as
-    // before, rather than silently replacing a damaged index.
-    let old_index = repository.index().map_err(|e| e.to_string())?;
+    // When `old_head` is supplied (`live_tree_scoped`), inspect that commit's
+    // tree directly instead of mutating the shadow index on disk.
+    let old_tree = if cfg!(windows) {
+        old_head
+            .map(|head| {
+                let oid = git2::Oid::from_str(head).map_err(|e| e.to_string())?;
+                repository
+                    .find_commit(oid)
+                    .and_then(|commit| commit.tree())
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let old_index = if update_index || (cfg!(windows) && old_tree.is_none()) {
+        Some(repository.index().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let mut index = git2::Index::new().map_err(|e| e.to_string())?;
     // Reuse the database handle throughout this staging pass. Entries came
     // from this capture's fresh byte scan, never a prior execution's cache;
     // stored objects still have their type and size checked below.
     let odb = repository.odb().map_err(|e| e.to_string())?;
     let mut verified_existing: BTreeMap<git2::Oid, u64> = BTreeMap::new();
-    let mut missing_small: BTreeMap<git2::Oid, (PathBuf, u64, Vec<PathBuf>)> = BTreeMap::new();
+    let mut missing_small: BTreeMap<git2::Oid, (String, PathBuf, u64, Vec<(String, PathBuf)>)> =
+        BTreeMap::new();
     for (name, entry) in entries {
-        if let Some(tracked) = &macos_tracked {
-            if workspace::is_host_metadata(name)
-                && !workspace::tracked_path_matches(Some(path), tracked, name)
-            {
+        if let Some(tracked) = &macos_tracked_index {
+            if workspace::is_host_metadata(name) && !tracked.matches(name) {
                 continue;
             }
         }
@@ -1488,33 +1699,27 @@ fn stage_project_entries_borrowed(
                 // same-size rewrite cannot race the binding scan.
                 let oid = git2::Oid::from_str(blob).map_err(|e| e.to_string())?;
                 let file = path.join(name);
-                let len = fs::metadata(&file).map_err(|e| e.to_string())?.len();
+                let len = fs::metadata(&file)
+                    .map_err(|e| map_snapshot_io_error(e, name))?
+                    .len();
                 if let Some(&expected_size) = verified_existing.get(&oid) {
                     if expected_size != len {
-                        return Err(
-                            "Project changed while binding its byte snapshot; retry preparation"
-                                .into(),
-                        );
+                        return Err(snapshot_changed_error(name, false));
                     }
-                } else if let Some((_, expected_size, duplicates)) = missing_small.get_mut(&oid) {
+                } else if let Some((_, _, expected_size, duplicates)) = missing_small.get_mut(&oid)
+                {
                     if *expected_size != len {
-                        return Err(
-                            "Project changed while binding its byte snapshot; retry preparation"
-                                .into(),
-                        );
+                        return Err(snapshot_changed_error(name, false));
                     }
-                    duplicates.push(file);
+                    duplicates.push((name.clone(), file));
                 } else if odb.exists(oid) {
                     let (size, kind) = odb.read_header(oid).map_err(|e| e.to_string())?;
                     if kind != git2::ObjectType::Blob || size as u64 != len {
-                        return Err(
-                            "Project changed while binding its byte snapshot; retry preparation"
-                                .into(),
-                        );
+                        return Err(snapshot_changed_error(name, false));
                     }
                     verified_existing.insert(oid, size as u64);
                 } else if len <= 8 * 1024 * 1024 {
-                    missing_small.insert(oid, (file, len, Vec::new()));
+                    missing_small.insert(oid, (name.clone(), file, len, Vec::new()));
                 } else {
                     let file_host = crate::native::host_path(&file);
                     let stored = workspace::git(
@@ -1531,16 +1736,16 @@ fn stage_project_entries_borrowed(
                     )?;
                     let stored = git2::Oid::from_str(&stored).map_err(|e| e.to_string())?;
                     if stored != oid {
-                        return Err(
-                            "Project changed while binding its byte snapshot; retry preparation"
-                                .into(),
-                        );
+                        return Err(snapshot_changed_error(name, false));
                     }
                     verified_existing.insert(oid, len);
                 }
                 let executable = if cfg!(unix) {
                     mode & 0o111 != 0
-                } else {
+                } else if let Some(tree) = &old_tree {
+                    tree.get_path(Path::new(name))
+                        .is_ok_and(|entry| entry.filemode() == 0o100755)
+                } else if let Some(old_index) = &old_index {
                     old_index
                         .get_path(Path::new(name), 0)
                         .and_then(|entry| {
@@ -1554,6 +1759,8 @@ fn stage_project_entries_borrowed(
                             }
                         })
                         .is_some_and(|entry| entry.mode == 0o100755)
+                } else {
+                    false
                 };
                 (oid, if executable { 0o100755 } else { 0o100644 })
             }
@@ -1587,25 +1794,94 @@ fn stage_project_entries_borrowed(
     let tree = index
         .write_tree_to(&repository)
         .map_err(|e| e.to_string())?;
-    workspace::git(
-        path,
-        &[
-            "--git-dir",
-            metadata.to_str().ok_or("Invalid graph metadata path")?,
-            "--work-tree",
-            path.to_str().ok_or("Invalid project root")?,
-            "read-tree",
-            &tree.to_string(),
-        ],
-    )?;
-    Ok(())
+    let tree_hex = tree.to_string();
+    if update_index {
+        workspace::git(
+            path,
+            &[
+                "--git-dir",
+                metadata.to_str().ok_or("Invalid graph metadata path")?,
+                "--work-tree",
+                path.to_str().ok_or("Invalid project root")?,
+                "read-tree",
+                &tree_hex,
+            ],
+        )?;
+    }
+    Ok(tree_hex)
+}
+
+type MissingBlobEntry = (String, PathBuf, u64, Vec<(String, PathBuf)>);
+
+fn write_missing_blobs_fast_import(
+    metadata: &Path,
+    missing: &BTreeMap<git2::Oid, MissingBlobEntry>,
+) -> Result<(), String> {
+    use std::io::Write;
+    const BATCH_ENTRIES: usize = 512;
+    const BATCH_BYTES: usize = 16 * 1024 * 1024;
+    let metadata_text = metadata.to_str().ok_or("Invalid graph metadata path")?;
+    let args = [
+        "--git-dir",
+        metadata_text,
+        "fast-import",
+        "--quiet",
+        "--done",
+    ];
+    let mut input = Vec::new();
+    let mut count = 0usize;
+    let mut payload = 0usize;
+    let flush = |input: &mut Vec<u8>, count: &mut usize, payload: &mut usize| -> Result<(), String> {
+        if *count == 0 {
+            return Ok(());
+        }
+        input.extend_from_slice(b"done\n");
+        workspace::git_bytes(metadata, &args, None, Some(input))?;
+        input.clear();
+        *count = 0;
+        *payload = 0;
+        Ok(())
+    };
+    for (oid, (rel_name, file, expected_len, duplicates)) in missing {
+        let bytes = fs::read(file).map_err(|e| map_snapshot_io_error(e, rel_name))?;
+        if bytes.len() as u64 != *expected_len
+            || git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
+                .map_err(|e| e.to_string())?
+                != *oid
+        {
+            return Err(snapshot_changed_error(rel_name, false));
+        }
+        for (dup_name, duplicate) in duplicates {
+            let dup_bytes = fs::read(duplicate).map_err(|e| map_snapshot_io_error(e, dup_name))?;
+            if dup_bytes.len() as u64 != *expected_len
+                || git2::Oid::hash_object(git2::ObjectType::Blob, &dup_bytes)
+                    .map_err(|e| e.to_string())?
+                    != *oid
+            {
+                return Err(snapshot_changed_error(dup_name, false));
+            }
+        }
+        if count >= BATCH_ENTRIES || (count > 0 && payload + bytes.len() > BATCH_BYTES) {
+            flush(&mut input, &mut count, &mut payload)?;
+        }
+        write!(&mut input, "blob\ndata {}\n", bytes.len()).map_err(|e| e.to_string())?;
+        input.extend_from_slice(&bytes);
+        input.push(b'\n');
+        count += 1;
+        payload += bytes.len();
+    }
+    flush(&mut input, &mut count, &mut payload)
 }
 
 fn write_missing_blobs(
     metadata: &Path,
     repository: &git2::Repository,
-    missing: BTreeMap<git2::Oid, (PathBuf, u64, Vec<PathBuf>)>,
+    missing: BTreeMap<git2::Oid, MissingBlobEntry>,
 ) -> Result<(), String> {
+    const PACK_IMPORT_THRESHOLD: usize = 512;
+    if missing.len() >= PACK_IMPORT_THRESHOLD {
+        return write_missing_blobs_fast_import(metadata, &missing);
+    }
     const PARALLEL_BLOB_THRESHOLD: usize = 32;
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -1613,39 +1889,34 @@ fn write_missing_blobs(
         .min(4);
     let write_one = |repo: &git2::Repository,
                      oid: git2::Oid,
+                     rel_name: &str,
                      file: &Path,
                      expected_len: u64,
-                     duplicates: &[PathBuf]|
+                     duplicates: &[(String, PathBuf)]|
      -> Result<(), String> {
-        let bytes = fs::read(file).map_err(|e| e.to_string())?;
+        let bytes = fs::read(file).map_err(|e| map_snapshot_io_error(e, rel_name))?;
         if bytes.len() as u64 != expected_len {
-            return Err(
-                "Project changed while binding its byte snapshot; retry preparation".into(),
-            );
+            return Err(snapshot_changed_error(rel_name, false));
         }
         let stored = repo.blob(&bytes).map_err(|e| e.to_string())?;
         if stored != oid {
-            return Err(
-                "Project changed while binding its byte snapshot; retry preparation".into(),
-            );
+            return Err(snapshot_changed_error(rel_name, false));
         }
-        for duplicate in duplicates {
-            let dup_bytes = fs::read(duplicate).map_err(|e| e.to_string())?;
+        for (dup_name, duplicate) in duplicates {
+            let dup_bytes = fs::read(duplicate).map_err(|e| map_snapshot_io_error(e, dup_name))?;
             if dup_bytes.len() as u64 != expected_len
                 || git2::Oid::hash_object(git2::ObjectType::Blob, &dup_bytes)
                     .map_err(|e| e.to_string())?
                     != oid
             {
-                return Err(
-                    "Project changed while binding its byte snapshot; retry preparation".into(),
-                );
+                return Err(snapshot_changed_error(dup_name, false));
             }
         }
         Ok(())
     };
     if threads <= 1 || missing.len() < PARALLEL_BLOB_THRESHOLD {
-        for (oid, (file, expected_len, duplicates)) in missing {
-            write_one(repository, oid, &file, expected_len, &duplicates)?;
+        for (oid, (rel_name, file, expected_len, duplicates)) in missing {
+            write_one(repository, oid, &rel_name, &file, expected_len, &duplicates)?;
         }
         return Ok(());
     }
@@ -1658,9 +1929,9 @@ fn write_missing_blobs(
     for prefix in fanouts {
         fs::create_dir_all(objects_dir.join(prefix)).map_err(|e| e.to_string())?;
     }
-    let items: Vec<(git2::Oid, PathBuf, u64, Vec<PathBuf>)> = missing
+    let items: Vec<(git2::Oid, String, PathBuf, u64, Vec<(String, PathBuf)>)> = missing
         .into_iter()
-        .map(|(oid, (file, len, duplicates))| (oid, file, len, duplicates))
+        .map(|(oid, (rel_name, file, len, duplicates))| (oid, rel_name, file, len, duplicates))
         .collect();
     let results: Vec<std::sync::OnceLock<Result<(), String>>> = (0..items.len())
         .map(|_| std::sync::OnceLock::new())
@@ -1676,10 +1947,11 @@ fn write_missing_blobs(
                     let repo = git2::Repository::open(metadata).map_err(|e| e.to_string())?;
                     loop {
                         let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some((oid, file, expected_len, duplicates)) = items.get(idx) else {
+                        let Some((oid, rel_name, file, expected_len, duplicates)) = items.get(idx)
+                        else {
                             break;
                         };
-                        let res = write_one(&repo, *oid, file, *expected_len, duplicates);
+                        let res = write_one(&repo, *oid, rel_name, file, *expected_len, duplicates);
                         let failed = res.is_err();
                         let _ = results[idx].set(res);
                         if failed {
@@ -1808,6 +2080,23 @@ pub(crate) fn capture_source_scoped(
 ) -> Result<(), String> {
     capture_source_view(source, head, "", exclusions, None)
 }
+struct PendingDirGuard(Option<PathBuf>);
+impl PendingDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for PendingDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = crate::workspace_cleanup::remove_tree(&path);
+        }
+    }
+}
+
 fn capture_source_view(
     source: &Path,
     head: &str,
@@ -1835,18 +2124,22 @@ fn capture_source_view(
     fs::create_dir_all(target.parent().ok_or("Missing view store")?).map_err(|e| e.to_string())?;
     let pending = target.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
+    let mut pending_guard = PendingDirGuard::new(pending.clone());
     copy_project_repositories(source, &pending, &view)?;
-    if inspect_scoped(source, source, exclusions)? != view {
-        return Err(
-            "Source changed while copying project Git; original data retained, retry preparation"
-                .into(),
-        );
+    let after = inspect_scoped(source, source, exclusions)?;
+    if after != view {
+        return Err(match equality::first_diff_detail(&view, &after) {
+            Some(detail) => format!(
+                "Source changed while copying project Git ({detail}); original data retained, retry preparation"
+            ),
+            None => "Source changed while copying project Git; original data retained, retry preparation".into(),
+        });
     }
     save(&pending, &view)?;
     if let Err(error) = fs::rename(&pending, &target) {
         // A concurrent writer may have published the same immutable record first.
         if target.exists() && load(&target).ok().as_ref() == Some(&view) {
-            let _ = fs::remove_dir_all(&pending);
+            return Ok(());
         } else {
             return Err(format!(
                 "Cannot publish project-view record {}: {error}",
@@ -1854,6 +2147,7 @@ fn capture_source_view(
             ));
         }
     }
+    pending_guard.disarm();
     Ok(())
 }
 
@@ -2068,65 +2362,130 @@ fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> 
         // Deep slot paths can exceed Git's Windows config-lock path handling.
         // Build the file under the short system temp path, then copy the
         // finished bytes with Rust (which handles long destination paths).
+        for name in view.git_files.keys() {
+            if !matches!(name.as_str(), "excludes" | "attributes") {
+                return Err("Unsafe captured Git resource".into());
+            }
+        }
         let short = std::env::temp_dir();
         let pending = short.join(format!("grapher-gitcfg-{}", uuid::Uuid::new_v4()));
         fs::write(&pending, b"").map_err(|e| e.to_string())?;
-        let pending_text = crate::native::host_path(&pending)
-            .to_str()
-            .ok_or("Invalid Git configuration path")?
-            .to_string();
-        let config = |args: &[&str]| workspace::project_git(&short, args);
-        for (key, value) in &view.git_config {
-            config(&[
-                "config",
-                "--file",
-                &pending_text,
-                "--add",
-                key,
-                &if path_config(key) {
+        let worktree_str = crate::native::host_path(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let write_fast = || -> Result<(), String> {
+            let mut cfg = git2::Config::open(&pending).map_err(|e| e.to_string())?;
+            for (key, value) in &view.git_config {
+                let value = if path_config(key) {
                     value.replace("{workspace}", &root)
                 } else {
                     value.clone()
-                },
-            ])?;
-        }
-        config(&[
-            "config",
-            "--file",
-            &pending_text,
-            "--replace-all",
-            "core.bare",
-            "false",
-        ])?;
-        if view.git_file {
-            config(&[
-                "config",
-                "--file",
-                &pending_text,
-                "--replace-all",
-                "core.worktree",
-                &crate::native::host_path(path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            ])?;
-        }
-        for (name, (reference, local)) in &view.git_files {
-            if !local {
-                continue;
+                };
+                // Use `a^` (valid POSIX ERE that never matches any value,
+                // including `""`) so empty reset entries like
+                // `credential.helper = ""` followed by a real helper are
+                // appended like `git config --add`, not overwritten.
+                cfg.set_multivar(key, "a^", &value)
+                    .map_err(|e| e.to_string())?;
             }
-            let key = match name.as_str() {
-                "excludes" => "core.excludesfile",
-                "attributes" => "core.attributesfile",
-                _ => return Err("Unsafe captured Git resource".into()),
+            let replace = |cfg: &mut git2::Config, key: &str, value: &str| -> Result<(), String> {
+                let mut count = 0usize;
+                let mut single_matches = false;
+                if let Ok(mut entries) = cfg.multivar(key, None) {
+                    while let Some(entry) = entries.next() {
+                        if let Ok(entry) = entry {
+                            count += 1;
+                            single_matches = count == 1 && entry.value().ok() == Some(value);
+                        }
+                    }
+                }
+                if single_matches {
+                    return Ok(());
+                }
+                if count <= 1 {
+                    return cfg.set_str(key, value).map_err(|e| e.to_string());
+                }
+                match cfg.remove_multivar(key, ".*") {
+                    Ok(()) => {}
+                    Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                cfg.set_str(key, value).map_err(|e| e.to_string())
             };
+            replace(&mut cfg, "core.bare", "false")?;
+            if view.git_file {
+                replace(&mut cfg, "core.worktree", &worktree_str)?;
+            }
+            for (name, (reference, local)) in &view.git_files {
+                if !local {
+                    continue;
+                }
+                let key = match name.as_str() {
+                    "excludes" => "core.excludesfile",
+                    "attributes" => "core.attributesfile",
+                    _ => return Err("Unsafe captured Git resource".into()),
+                };
+                replace(&mut cfg, key, &reference.replace("{workspace}", &root))?;
+            }
+            Ok(())
+        };
+        let config = |args: &[&str]| workspace::project_git(&short, args);
+        if write_fast().is_err() {
+            fs::write(&pending, b"").map_err(|e| e.to_string())?;
+            let pending_text = crate::native::host_path(&pending)
+                .to_str()
+                .ok_or("Invalid Git configuration path")?
+                .to_string();
+            for (key, value) in &view.git_config {
+                config(&[
+                    "config",
+                    "--file",
+                    &pending_text,
+                    "--add",
+                    key,
+                    &if path_config(key) {
+                        value.replace("{workspace}", &root)
+                    } else {
+                        value.clone()
+                    },
+                ])?;
+            }
             config(&[
                 "config",
                 "--file",
                 &pending_text,
                 "--replace-all",
-                key,
-                &reference.replace("{workspace}", &root),
+                "core.bare",
+                "false",
             ])?;
+            if view.git_file {
+                config(&[
+                    "config",
+                    "--file",
+                    &pending_text,
+                    "--replace-all",
+                    "core.worktree",
+                    &worktree_str,
+                ])?;
+            }
+            for (name, (reference, local)) in &view.git_files {
+                if !local {
+                    continue;
+                }
+                let key = match name.as_str() {
+                    "excludes" => "core.excludesfile",
+                    "attributes" => "core.attributesfile",
+                    _ => return Err("Unsafe captured Git resource".into()),
+                };
+                config(&[
+                    "config",
+                    "--file",
+                    &pending_text,
+                    "--replace-all",
+                    key,
+                    &reference.replace("{workspace}", &root),
+                ])?;
+            }
         }
         let config_destination = git_dir.join("config");
         ensure_writable_target(&config_destination)?;
@@ -2136,23 +2495,43 @@ fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> 
         if worktree_config.is_file() {
             let scratch = short.join(format!("grapher-gitwt-{}", uuid::Uuid::new_v4()));
             fs::copy(&worktree_config, &scratch).map_err(|e| e.to_string())?;
-            let scratch_text = crate::native::host_path(&scratch)
-                .to_str()
-                .ok_or("Invalid worktree Git configuration path")?
-                .to_string();
-            if config(&["config", "--file", &scratch_text, "--get", "core.worktree"]).is_ok() {
-                config(&[
-                    "config",
-                    "--file",
-                    &scratch_text,
-                    "--replace-all",
-                    "core.worktree",
-                    &crate::native::host_path(path)
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                ])?;
-                ensure_writable_target(&worktree_config)?;
-                fs::copy(&scratch, &worktree_config).map_err(|e| e.to_string())?;
+            let updated_fast = (|| -> Result<bool, String> {
+                let mut cfg = git2::Config::open(&scratch).map_err(|e| e.to_string())?;
+                if cfg.get_string("core.worktree").is_err() {
+                    return Ok(false);
+                }
+                let _ = cfg.remove_multivar("core.worktree", ".*");
+                cfg.set_str("core.worktree", &worktree_str)
+                    .map_err(|e| e.to_string())?;
+                Ok(true)
+            })();
+            match updated_fast {
+                Ok(true) => {
+                    ensure_writable_target(&worktree_config)?;
+                    fs::copy(&scratch, &worktree_config).map_err(|e| e.to_string())?;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    fs::copy(&worktree_config, &scratch).map_err(|e| e.to_string())?;
+                    let scratch_text = crate::native::host_path(&scratch)
+                        .to_str()
+                        .ok_or("Invalid worktree Git configuration path")?
+                        .to_string();
+                    if config(&["config", "--file", &scratch_text, "--get", "core.worktree"])
+                        .is_ok()
+                    {
+                        config(&[
+                            "config",
+                            "--file",
+                            &scratch_text,
+                            "--replace-all",
+                            "core.worktree",
+                            &worktree_str,
+                        ])?;
+                        ensure_writable_target(&worktree_config)?;
+                        fs::copy(&scratch, &worktree_config).map_err(|e| e.to_string())?;
+                    }
+                }
             }
             let _ = fs::remove_file(&scratch);
         }
@@ -2395,108 +2774,147 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn same_fs_path(left: &str, right: &str, case_insensitive: bool) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if !case_insensitive && left.is_ascii() && right.is_ascii() {
-            return false;
-        }
-        return crate::path_identity::macos_equivalent_path(
-            Path::new(left),
-            Path::new(right),
-            case_insensitive,
-        );
-    }
-    #[cfg(windows)]
-    {
-        return case_insensitive && left.eq_ignore_ascii_case(right);
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
+/// Pre-indexed alias lookup for a `BTreeMap<String, Entry>` so macOS/Windows
+/// case/Unicode alias lookups run in O(1) instead of O(N) per entry.
+struct EntryAliasIndex<'a> {
+    entries: &'a BTreeMap<String, Entry>,
+    #[cfg(any(target_os = "macos", windows))]
+    case_insensitive: bool,
+    #[cfg(any(target_os = "macos", windows))]
+    by_folded: std::collections::HashMap<String, Vec<(&'a String, &'a Entry)>>,
+}
+
+impl<'a> EntryAliasIndex<'a> {
+    fn new(entries: &'a BTreeMap<String, Entry>, case_insensitive: bool) -> Self {
+        #[cfg(any(target_os = "macos", windows))]
+        let by_folded = {
+            let mut map: std::collections::HashMap<String, Vec<(&'a String, &'a Entry)>> =
+                std::collections::HashMap::with_capacity(entries.len());
+            for (key, entry) in entries {
+                let folded = crate::path_identity::fold_relative_path(key, case_insensitive);
+                map.entry(folded).or_default().push((key, entry));
+            }
+            map
+        };
+        #[cfg(not(any(target_os = "macos", windows)))]
         let _ = case_insensitive;
+        Self {
+            entries,
+            #[cfg(any(target_os = "macos", windows))]
+            case_insensitive,
+            #[cfg(any(target_os = "macos", windows))]
+            by_folded,
+        }
+    }
+
+    fn key_entry(&self, name: &str, expected_kind: Option<u8>) -> Option<(&'a String, &'a Entry)> {
+        if let Some((key, exact)) = self.entries.get_key_value(name) {
+            return expected_kind
+                .is_none_or(|wanted| kind(exact) == wanted)
+                .then_some((key, exact));
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            if cfg!(target_os = "macos") && !self.case_insensitive && name.is_ascii() {
+                return None;
+            }
+            let folded = crate::path_identity::fold_relative_path(name, self.case_insensitive);
+            let matches = self.by_folded.get(&folded)?;
+            if matches.len() != 1 {
+                return None;
+            }
+            let (key, entry) = matches[0];
+            expected_kind
+                .is_none_or(|wanted| kind(entry) == wanted)
+                .then_some((key, entry))
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = expected_kind;
+            None
+        }
+    }
+
+    fn entry(&self, name: &str, expected_kind: Option<u8>) -> Option<&'a Entry> {
+        self.key_entry(name, expected_kind).map(|(_, entry)| entry)
+    }
+}
+
+struct FoldedPathSet {
+    exact: std::collections::HashSet<String>,
+    #[cfg(any(target_os = "macos", windows))]
+    case_insensitive: bool,
+    #[cfg(any(target_os = "macos", windows))]
+    folded: std::collections::HashMap<String, String>,
+}
+
+impl FoldedPathSet {
+    fn new(case_insensitive: bool) -> Self {
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = case_insensitive;
+        Self {
+            exact: std::collections::HashSet::new(),
+            #[cfg(any(target_os = "macos", windows))]
+            case_insensitive,
+            #[cfg(any(target_os = "macos", windows))]
+            folded: std::collections::HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, value: String) {
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let folded = crate::path_identity::fold_relative_path(&value, self.case_insensitive);
+            self.folded.entry(folded).or_insert_with(|| value.clone());
+        }
+        self.exact.insert(value);
+    }
+
+    fn contains_alias(&self, name: &str) -> bool {
+        if self.exact.contains(name) {
+            return true;
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            if cfg!(target_os = "macos") && !self.case_insensitive && name.is_ascii() {
+                return false;
+            }
+            let folded = crate::path_identity::fold_relative_path(name, self.case_insensitive);
+            self.folded.contains_key(&folded)
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         false
     }
-}
 
-fn has_fs_alias<T>(entries: &BTreeMap<String, T>, name: &str, case_insensitive: bool) -> bool {
-    entries.contains_key(name)
-        || entries
-            .keys()
-            .any(|candidate| same_fs_path(candidate, name, case_insensitive))
-}
-
-fn has_fs_alias_in_set(
-    entries: &std::collections::BTreeSet<String>,
-    name: &str,
-    case_insensitive: bool,
-) -> bool {
-    entries.contains(name)
-        || entries
-            .iter()
-            .any(|candidate| same_fs_path(candidate, name, case_insensitive))
-}
-
-fn key_entry_by_alias<'a>(
-    entries: &'a BTreeMap<String, Entry>,
-    name: &str,
-    expected_kind: Option<u8>,
-    case_insensitive: bool,
-) -> Option<(&'a String, &'a Entry)> {
-    if let Some((key, exact)) = entries.get_key_value(name) {
-        return expected_kind
-            .is_none_or(|wanted| kind(exact) == wanted)
-            .then_some((key, exact));
-    }
-    #[cfg(any(target_os = "macos", windows))]
-    {
-        if cfg!(target_os = "macos") && !case_insensitive && name.is_ascii() {
-            return None;
+    fn canonical_alias(&self, name: &str) -> Option<&str> {
+        if let Some(exact) = self.exact.get(name) {
+            return Some(exact.as_str());
         }
-        let mut matched: Option<(&'a String, &'a Entry)> = None;
-        for (candidate_key, entry) in entries {
-            if same_fs_path(candidate_key, name, case_insensitive) {
-                if matched.is_some() {
-                    return None;
-                }
-                matched = Some((candidate_key, entry));
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            if cfg!(target_os = "macos") && !self.case_insensitive && name.is_ascii() {
+                return None;
             }
+            let folded = crate::path_identity::fold_relative_path(name, self.case_insensitive);
+            self.folded.get(&folded).map(String::as_str)
         }
-        matched.filter(|(_, entry)| expected_kind.is_none_or(|wanted| kind(entry) == wanted))
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
-        let _ = (expected_kind, case_insensitive);
+        #[cfg(not(any(target_os = "macos", windows)))]
         None
     }
 }
 
-fn entry_by_alias<'a>(
-    entries: &'a BTreeMap<String, Entry>,
+fn choose_alias_spelling_indexed(
+    base_index: &EntryAliasIndex<'_>,
+    input_indices: &[EntryAliasIndex<'_>],
     name: &str,
     expected_kind: Option<u8>,
-    case_insensitive: bool,
-) -> Option<&'a Entry> {
-    key_entry_by_alias(entries, name, expected_kind, case_insensitive).map(|(_, entry)| entry)
-}
-
-fn choose_alias_spelling(
-    base_view: &View,
-    inputs: &[(PathBuf, View)],
-    name: &str,
-    expected_kind: Option<u8>,
-    case_insensitive: bool,
 ) -> Result<String, String> {
-    let base_name =
-        key_entry_by_alias(&base_view.entries, name, expected_kind, case_insensitive)
-            .map(|(key, _)| key.as_str());
+    let base_name = base_index
+        .key_entry(name, expected_kind)
+        .map(|(key, _)| key.as_str());
     let mut changed = Vec::new();
-    for (_, view) in inputs {
-        if let Some((input_key, _)) =
-            key_entry_by_alias(&view.entries, name, expected_kind, case_insensitive)
-        {
+    for index in input_indices {
+        if let Some((input_key, _)) = index.key_entry(name, expected_kind) {
             let input_key = input_key.as_str();
             if Some(input_key) != base_name && !changed.contains(&input_key) {
                 changed.push(input_key);
@@ -2510,19 +2928,15 @@ fn choose_alias_spelling(
     }
     if base_name.is_some()
         && !changed.is_empty()
-        && inputs.iter().any(|(_, view)| {
-            key_entry_by_alias(&view.entries, name, None, case_insensitive).is_none()
-        })
+        && input_indices
+            .iter()
+            .any(|index| index.key_entry(name, None).is_none())
     {
         return Err(format!(
             "Project path deletion conflicts with rename at {name}; refusing to discard an input's change"
         ));
     }
-    Ok(changed
-        .pop()
-        .or(base_name)
-        .unwrap_or(name)
-        .to_string())
+    Ok(changed.pop().or(base_name).unwrap_or(name).to_string())
 }
 
 fn sorted_candidate_names<'a>(
@@ -2543,11 +2957,7 @@ fn sorted_candidate_names<'a>(
     seen.into_iter().map(|(_, name)| name).collect()
 }
 
-fn resolve_parent_alias_prefix(
-    name: &str,
-    canonical_dirs: &[String],
-    case_insensitive: bool,
-) -> String {
+fn resolve_parent_alias_prefix_indexed(name: &str, canonical_dirs: &FoldedPathSet) -> String {
     let mut out = PathBuf::new();
     let mut changed = false;
     let parts: Vec<_> = Path::new(name).components().collect();
@@ -2555,11 +2965,8 @@ fn resolve_parent_alias_prefix(
         out.push(part.as_os_str());
         if index + 1 < parts.len() {
             if let Ok(prefix) = name_of(&out) {
-                if let Some(canonical) = canonical_dirs
-                    .iter()
-                    .find(|candidate| same_fs_path(candidate, &prefix, case_insensitive))
-                {
-                    if canonical != &prefix {
+                if let Some(canonical) = canonical_dirs.canonical_alias(&prefix) {
+                    if canonical != prefix {
                         out = PathBuf::from(canonical);
                         changed = true;
                     }
@@ -2574,20 +2981,18 @@ fn resolve_parent_alias_prefix(
     }
 }
 
-fn choose_directory_entry(
-    base_view: &View,
-    inputs: &[(PathBuf, View)],
+fn choose_directory_entry_indexed(
+    base_index: &EntryAliasIndex<'_>,
+    input_indices: &[EntryAliasIndex<'_>],
     name: &str,
-    case_insensitive: bool,
 ) -> Result<Option<(String, Entry)>, String> {
-    let base = entry_by_alias(&base_view.entries, name, Some(1), case_insensitive);
-    let candidates: Vec<_> = inputs
+    let base = base_index.entry(name, Some(1));
+    let candidates: Vec<_> = input_indices
         .iter()
-        .map(|(_, view)| entry_by_alias(&view.entries, name, Some(1), case_insensitive))
+        .map(|index| index.entry(name, Some(1)))
         .collect();
     let metadata = choose_metadata(base, &candidates, name)?;
-    let chosen_name =
-        choose_alias_spelling(base_view, inputs, name, Some(1), case_insensitive)?;
+    let chosen_name = choose_alias_spelling_indexed(base_index, input_indices, name, Some(1))?;
     Ok(metadata.map(|entry| (chosen_name, entry)))
 }
 
@@ -2604,21 +3009,29 @@ fn reconcile_tree_aliases(
         .map(|entry| (Path::new(entry).components().count(), entry.clone()))
         .collect();
     ordered.sort();
+    let mut by_folded: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::with_capacity(actual.len());
+    for candidate in actual.keys() {
+        let folded = crate::path_identity::fold_relative_path(candidate, case_insensitive);
+        by_folded.entry(folded).or_default().push(candidate.clone());
+    }
     for (_, wanted) in ordered {
         if actual.contains_key(&wanted) {
             continue;
         }
         let wanted_parent = Path::new(&wanted).parent();
         let wanted_depth = Path::new(&wanted).components().count();
+        let folded_wanted = crate::path_identity::fold_relative_path(&wanted, case_insensitive);
+        let Some(candidates) = by_folded.get(&folded_wanted) else {
+            continue;
+        };
         let mut alias: Option<String> = None;
         let mut ambiguous = false;
-        for candidate in actual.keys() {
+        for candidate in candidates {
             if Path::new(candidate).components().count() != wanted_depth {
                 continue;
             }
-            if Path::new(candidate).parent() == wanted_parent
-                && same_fs_path(candidate, &wanted, case_insensitive)
-            {
+            if Path::new(candidate).parent() == wanted_parent {
                 if alias.is_some() {
                     ambiguous = true;
                     break;
@@ -2640,7 +3053,8 @@ fn reconcile_tree_aliases(
             let parent_path = root.join(parent);
             if let Ok(meta) = fs::metadata(&parent_path) {
                 #[cfg(target_os = "macos")]
-                if crate::workspace_cleanup::clear_macos_immutable_flags(&parent_path, &meta).is_ok()
+                if crate::workspace_cleanup::clear_macos_immutable_flags(&parent_path, &meta)
+                    .is_ok()
                 {
                     materialized.insert(name_of(parent)?);
                 }
@@ -2661,15 +3075,17 @@ fn reconcile_tree_aliases(
             }
         }
         let to = root.join(&wanted);
-        let mut hop = to
-            .parent()
-            .unwrap_or(root)
-            .join(format!(".grapher-rename-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let mut hop = to.parent().unwrap_or(root).join(format!(
+            ".grapher-rename-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         while fs::symlink_metadata(&hop).is_ok() {
-            hop = to
-                .parent()
-                .unwrap_or(root)
-                .join(format!(".grapher-rename-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+            hop = to.parent().unwrap_or(root).join(format!(
+                ".grapher-rename-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
         }
         // Two-step rename forces APFS (especially case-sensitive APFS on NFD<->NFC)
         // and HFS+/Windows filesystems to update the stored directory entry spelling.
@@ -2695,6 +3111,11 @@ fn reconcile_tree_aliases(
             }
         }
         *actual = updated;
+        by_folded.clear();
+        for candidate in actual.keys() {
+            let folded = crate::path_identity::fold_relative_path(candidate, case_insensitive);
+            by_folded.entry(folded).or_default().push(candidate.clone());
+        }
     }
     Ok(())
 }
@@ -2730,6 +3151,151 @@ fn view_unobservable(
     }
     Ok(true)
 }
+/// Serialize only the files referenced by `topology.aliases` (typically 0 or a
+/// handful), instead of JSON-encoding every regular file in the repository.
+fn hardlink_signatures(
+    expected: &BTreeMap<String, Entry>,
+    topology: &crate::workspace_links::Topology,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut signatures = BTreeMap::new();
+    for name in topology.aliased_paths() {
+        if signatures.contains_key(name) {
+            continue;
+        }
+        if let Some(entry @ Entry::File { .. }) = expected.get(name) {
+            signatures.insert(
+                name.to_string(),
+                serde_json::to_string(entry).map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    Ok(signatures)
+}
+
+/// Restore freshly checked-out entries. Regular-file/link/special leaves are
+/// independent when no hardlinks share an inode, so large trees restore them in
+/// parallel before restoring directories bottom-up (preserving read-only dirs).
+fn restore_fresh_entries(
+    path: &Path,
+    expected: &BTreeMap<String, Entry>,
+    no_hardlinks: bool,
+) -> Result<(), String> {
+    const PARALLEL_RESTORE_THRESHOLD: usize = 256;
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(4);
+    if !no_hardlinks || threads <= 1 || expected.len() < PARALLEL_RESTORE_THRESHOLD {
+        for (name, entry) in expected.iter().rev() {
+            restore_entry(&path.join(name), entry)
+                .map_err(|error| format!("Cannot restore project metadata for {name}: {error}"))?;
+        }
+        return Ok(());
+    }
+    let mut leaves: Vec<(&String, &Entry)> = Vec::new();
+    let mut dirs: Vec<(&String, &Entry)> = Vec::new();
+    for (name, entry) in expected.iter().rev() {
+        if matches!(entry, Entry::Directory { .. }) {
+            dirs.push((name, entry));
+        } else {
+            leaves.push((name, entry));
+        }
+    }
+    if leaves.len() < PARALLEL_RESTORE_THRESHOLD {
+        for (name, entry) in leaves {
+            restore_entry(&path.join(name), entry)
+                .map_err(|error| format!("Cannot restore project metadata for {name}: {error}"))?;
+        }
+    } else {
+        let errors: Vec<std::sync::OnceLock<Result<(), String>>> = (0..leaves.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let leaves = &leaves;
+                    let errors = &errors;
+                    let next = &next;
+                    scope.spawn(move || loop {
+                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((name, entry)) = leaves.get(idx) else {
+                            break;
+                        };
+                        let res = restore_entry(&path.join(name), entry).map_err(|error| {
+                            format!("Cannot restore project metadata for {name}: {error}")
+                        });
+                        let failed = res.is_err();
+                        let _ = errors[idx].set(res);
+                        if failed {
+                            break;
+                        }
+                    })
+                })
+                .collect();
+            let mut panicked = false;
+            for handle in handles {
+                if handle.join().is_err() {
+                    panicked = true;
+                }
+            }
+            if panicked {
+                Err("Project metadata restore worker failed".to_string())
+            } else {
+                Ok(())
+            }
+        })?;
+        for slot in &errors {
+            if let Some(Err(error)) = slot.get() {
+                return Err(error.clone());
+            }
+        }
+        if errors.iter().any(|slot| slot.get().is_none()) {
+            return Err("Project metadata restore worker left an entry unfinished".into());
+        }
+    }
+    for (name, entry) in dirs {
+        restore_entry(&path.join(name), entry)
+            .map_err(|error| format!("Cannot restore project metadata for {name}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Read a Git blob in-process via libgit2 for SHA-1 repositories, avoiding
+/// spawning one `git cat-file` subprocess per symlink or changed file.
+fn read_blob_fast(
+    odb: Option<&git2::Odb<'_>>,
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    oid: &str,
+) -> Result<Vec<u8>, String> {
+    if oid.len() == 40 {
+        if let Some(odb) = odb {
+            if let Ok(id) = git2::Oid::from_str(oid) {
+                if let Ok(object) = odb.read(id) {
+                    return Ok(object.data().to_vec());
+                }
+            }
+        }
+    }
+    if let Some(dir) = git_dir {
+        workspace::git_bytes(
+            cwd,
+            &[
+                "--git-dir",
+                dir.to_str().ok_or("Invalid Git metadata path")?,
+                "cat-file",
+                "blob",
+                oid,
+            ],
+            None,
+            None,
+        )
+    } else {
+        workspace::git_bytes(cwd, &["cat-file", "blob", oid], None, None)
+    }
+}
+
 /// Finish a brand-new base checkout from the already validated immutable view.
 /// Git has just materialized the exact recorded tree into an empty private slot,
 /// so hashing every regular file again only repeats the checkout proof. Native
@@ -2742,8 +3308,9 @@ fn prepare_fresh_base_checkout(
     exclusions: &[String],
 ) -> Result<Option<View>, String> {
     let tracked = workspace::project_tracked_paths(path);
+    let tracked_index = workspace::TrackedPathIndex::new(path, &tracked);
     for (name, entry) in view.entries.iter().rev() {
-        if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
+        if workspace::collection_excluded_with_index(path, Path::new(name), &tracked_index, exclusions) {
             let target = path.join(name);
             if fs::symlink_metadata(&target).is_ok() {
                 remove_entry(path, &tracked, entry, &target)?;
@@ -2754,7 +3321,7 @@ fn prepare_fresh_base_checkout(
         .entries
         .iter()
         .filter(|(name, _)| {
-            !workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions)
+            !workspace::collection_excluded_with_index(path, Path::new(name), &tracked_index, exclusions)
         })
         .map(|(name, entry)| (name.clone(), entry.clone()))
         .collect();
@@ -2795,26 +3362,20 @@ fn prepare_fresh_base_checkout(
             Entry::File { .. } | Entry::Link { .. } => {}
         }
     }
-    let signatures = expected
-        .iter()
-        .filter(|(_, entry)| matches!(entry, Entry::File { .. }))
-        .map(|(name, entry)| {
-            Ok((
-                name.clone(),
-                serde_json::to_string(entry).map_err(|e| e.to_string())?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
-    let topology = crate::workspace_links::compose(
-        &view.hardlinks,
-        &[],
-        &signatures.keys().cloned().collect(),
-    )?;
+    let (topology, signatures) = if view.hardlinks.is_empty() {
+        (crate::workspace_links::Topology::default(), BTreeMap::new())
+    } else {
+        let files: std::collections::BTreeSet<String> = expected
+            .iter()
+            .filter(|(_, entry)| matches!(entry, Entry::File { .. }))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let topology = crate::workspace_links::compose(&view.hardlinks, &[], &files)?;
+        let signatures = hardlink_signatures(&expected, &topology)?;
+        (topology, signatures)
+    };
     crate::workspace_links::restore(path, &topology, &signatures)?;
-    for (name, entry) in expected.iter().rev() {
-        restore_entry(&path.join(name), entry)
-            .map_err(|error| format!("Cannot restore project metadata for {name}: {error}"))?;
-    }
+    restore_fresh_entries(path, &expected, topology.is_empty())?;
     let root = Entry::Directory {
         mode: view.root_mode,
         extra: view.root_extra.clone(),
@@ -2925,6 +3486,16 @@ pub(crate) fn prepare(
     } else {
         cfg!(windows)
     };
+    let tracked_index = workspace::TrackedPathIndex::new(path, &tracked);
+    let base_index = EntryAliasIndex::new(&base_view.entries, volume_case_insensitive);
+    let input_indices: Vec<EntryAliasIndex<'_>> = inputs
+        .iter()
+        .map(|(_, view)| EntryAliasIndex::new(&view.entries, volume_case_insensitive))
+        .collect();
+    let graph_repo = workspace::private_git_dir(path)
+        .and_then(|dir| git2::Repository::open(dir).ok())
+        .or_else(|| git2::Repository::open(path).ok());
+    let graph_odb = graph_repo.as_ref().and_then(|repo| repo.odb().ok());
     let mut materialized = std::collections::BTreeSet::new();
     if conflict {
         // Conflict marker bytes are task composition state, not HEAD bytes.
@@ -2950,7 +3521,12 @@ pub(crate) fn prepare(
             }
             // A recorded tree may still carry generated artifacts from before
             // this policy; skip them here so the comparison matches the scan.
-            if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
+            if workspace::collection_excluded_with_index(
+                path,
+                Path::new(name),
+                &tracked_index,
+                exclusions,
+            ) {
                 continue;
             }
             parsed_entries.push((fields[0], fields[2], name));
@@ -2977,20 +3553,12 @@ pub(crate) fn prepare(
         for (entry_mode, entry_oid, name) in parsed_entries {
             let target = path.join(name);
             if entry_mode == "120000" {
-                let data =
-                    workspace::git_bytes(path, &["cat-file", "blob", entry_oid], None, None)?;
+                let data = read_blob_fast(graph_odb.as_ref(), path, None, entry_oid)?;
                 let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
-                let baseline = entry_by_alias(
-                    &base_view.entries,
-                    name,
-                    Some(2),
-                    volume_case_insensitive,
-                );
-                let candidates = inputs
+                let baseline = base_index.entry(name, Some(2));
+                let candidates = input_indices
                     .iter()
-                    .map(|(_, view)| {
-                        entry_by_alias(&view.entries, name, Some(2), volume_case_insensitive)
-                    })
+                    .map(|index| index.entry(name, Some(2)))
                     .collect::<Vec<_>>();
                 let template = choose_metadata(baseline, &candidates, name)?
                     .or_else(|| {
@@ -3019,12 +3587,7 @@ pub(crate) fn prepare(
                 let blob = if entry_oid.len() == 40 {
                     entry_oid.to_string()
                 } else {
-                    let data = workspace::git_bytes(
-                        path,
-                        &["cat-file", "blob", entry_oid],
-                        None,
-                        None,
-                    )?;
+                    let data = read_blob_fast(graph_odb.as_ref(), path, None, entry_oid)?;
                     let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &data)
                         .map_err(|e| e.to_string())?
                         .to_string();
@@ -3040,12 +3603,7 @@ pub(crate) fn prepare(
                     }
                     let data = match cached {
                         Some(data) => data,
-                        None => workspace::git_bytes(
-                            path,
-                            &["cat-file", "blob", entry_oid],
-                            None,
-                            None,
-                        )?,
+                        None => read_blob_fast(graph_odb.as_ref(), path, None, entry_oid)?,
                     };
                     if let Some(existing) = actual.get(name) {
                         if !matches!(existing, Entry::File { .. }) {
@@ -3093,29 +3651,29 @@ pub(crate) fn prepare(
         }
     }
     let mut directory_names = std::collections::BTreeSet::new();
+    let mut expected_aliases = FoldedPathSet::new(volume_case_insensitive);
     for name in expected.keys() {
+        expected_aliases.insert(name.clone());
         let mut parent = Path::new(name).parent();
         while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
             directory_names.insert(name_of(path)?);
             parent = path.parent();
         }
     }
-    let mut canonical_dirs: Vec<String> = directory_names.iter().cloned().collect();
+    let mut canonical_dirs = FoldedPathSet::new(volume_case_insensitive);
+    for dir in &directory_names {
+        canonical_dirs.insert(dir.clone());
+    }
     for name in sorted_candidate_names(&base_view, &inputs, Some(1)) {
-        if has_fs_alias_in_set(&directory_names, name, volume_case_insensitive)
-            || has_fs_alias(&expected, name, volume_case_insensitive)
-        {
+        if canonical_dirs.contains_alias(name) || expected_aliases.contains_alias(name) {
             continue;
         }
         if let Some((chosen_name, directory)) =
-            choose_directory_entry(&base_view, &inputs, name, volume_case_insensitive)?
+            choose_directory_entry_indexed(&base_index, &input_indices, name)?
         {
-            let resolved_name = resolve_parent_alias_prefix(
-                &chosen_name,
-                &canonical_dirs,
-                volume_case_insensitive,
-            );
-            canonical_dirs.push(resolved_name.clone());
+            let resolved_name = resolve_parent_alias_prefix_indexed(&chosen_name, &canonical_dirs);
+            canonical_dirs.insert(resolved_name.clone());
+            expected_aliases.insert(resolved_name.clone());
             expected.entry(resolved_name).or_insert(directory);
         }
     }
@@ -3127,6 +3685,7 @@ pub(crate) fn prepare(
         real_child_path(path, &target, false)?;
         fs::create_dir_all(&target).map_err(|e| e.to_string())?;
         let metadata = fs::metadata(&target).map_err(|e| e.to_string())?;
+        expected_aliases.insert(name.clone());
         expected.insert(
             name.clone(),
             Entry::Directory {
@@ -3148,28 +3707,18 @@ pub(crate) fn prepare(
                 .flat_map(|(_, view)| view.entries.iter())
                 .filter(|(name, entry)| {
                     matches!(entry, Entry::Special { .. })
-                        && entry_by_alias(
-                            &base_view.entries,
-                            name,
-                            None,
-                            volume_case_insensitive,
-                        )
-                        .is_none()
+                        && base_index.entry(name, None).is_none()
                 })
                 .map(|(name, _)| name.clone()),
         )
         .collect();
     for name in special_names {
-        if has_fs_alias(&expected, &name, volume_case_insensitive)
-            || has_fs_alias_in_set(&directory_names, &name, volume_case_insensitive)
-        {
+        if expected_aliases.contains_alias(&name) || canonical_dirs.contains_alias(&name) {
             continue;
         }
-        let values: Vec<Option<Entry>> = inputs
+        let values: Vec<Option<Entry>> = input_indices
             .iter()
-            .map(|(_, view)| {
-                entry_by_alias(&view.entries, &name, Some(3), volume_case_insensitive).cloned()
-            })
+            .map(|index| index.entry(&name, Some(3)).cloned())
             .collect();
         if values.len() > 1 && values.iter().any(|value| *value != values[0]) {
             return Err(format!(
@@ -3178,27 +3727,13 @@ pub(crate) fn prepare(
         }
         let selected = match values.last() {
             Some(value) => value.clone(),
-            None => entry_by_alias(
-                &base_view.entries,
-                &name,
-                Some(3),
-                volume_case_insensitive,
-            )
-            .cloned(),
+            None => base_index.entry(&name, Some(3)).cloned(),
         };
         if let Some(entry) = selected {
-            let chosen_name = choose_alias_spelling(
-                &base_view,
-                &inputs,
-                &name,
-                Some(3),
-                volume_case_insensitive,
-            )?;
-            let resolved_name = resolve_parent_alias_prefix(
-                &chosen_name,
-                &canonical_dirs,
-                volume_case_insensitive,
-            );
+            let chosen_name =
+                choose_alias_spelling_indexed(&base_index, &input_indices, &name, Some(3))?;
+            let resolved_name = resolve_parent_alias_prefix_indexed(&chosen_name, &canonical_dirs);
+            expected_aliases.insert(resolved_name.clone());
             expected.insert(resolved_name, entry);
         }
     }
@@ -3223,17 +3758,10 @@ pub(crate) fn prepare(
     }
     for (name, entry) in &mut expected {
         let wanted_kind = Some(kind(entry));
-        let base = entry_by_alias(
-            &base_view.entries,
-            name,
-            wanted_kind,
-            volume_case_insensitive,
-        );
-        let candidates: Vec<_> = inputs
+        let base = base_index.entry(name, wanted_kind);
+        let candidates: Vec<_> = input_indices
             .iter()
-            .map(|(_, view)| {
-                entry_by_alias(&view.entries, name, wanted_kind, volume_case_insensitive)
-            })
+            .map(|index| index.entry(name, wanted_kind))
             .collect();
         if let Some(metadata) = choose_metadata(base, &candidates, name)? {
             match (entry, metadata) {
@@ -3302,25 +3830,24 @@ pub(crate) fn prepare(
             }
         }
     }
-    let signatures = expected
-        .iter()
-        .filter(|(_, entry)| matches!(entry, Entry::File { .. }))
-        .map(|(name, entry)| {
-            Ok((
-                name.clone(),
-                serde_json::to_string(entry).map_err(|e| e.to_string())?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
-    let link_inputs = inputs
-        .iter()
-        .map(|(_, view)| &view.hardlinks)
-        .collect::<Vec<_>>();
-    let topology = crate::workspace_links::compose(
-        &base_view.hardlinks,
-        &link_inputs,
-        &signatures.keys().cloned().collect(),
-    )?;
+    let (topology, signatures) = if base_view.hardlinks.is_empty()
+        && inputs.iter().all(|(_, view)| view.hardlinks.is_empty())
+    {
+        (crate::workspace_links::Topology::default(), BTreeMap::new())
+    } else {
+        let files: std::collections::BTreeSet<String> = expected
+            .iter()
+            .filter(|(_, entry)| matches!(entry, Entry::File { .. }))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let link_inputs = inputs
+            .iter()
+            .map(|(_, view)| &view.hardlinks)
+            .collect::<Vec<_>>();
+        let topology = crate::workspace_links::compose(&base_view.hardlinks, &link_inputs, &files)?;
+        let signatures = hardlink_signatures(&expected, &topology)?;
+        (topology, signatures)
+    };
     crate::workspace_links::restore(path, &topology, &signatures)?;
     for (name, entry) in expected.iter().rev() {
         // Reuse the metadata captured by the scan above: an entry whose on-disk
@@ -3342,16 +3869,10 @@ pub(crate) fn prepare(
         }
         if matches!(entry, Entry::Directory { .. }) && !expected.contains_key(name) {
             let dir_path = path.join(name);
-            let known_deleted = entry_by_alias(
-                &base_view.entries,
-                name,
-                None,
-                volume_case_insensitive,
-            )
-            .is_some()
-                || inputs.iter().any(|(_, view)| {
-                    entry_by_alias(&view.entries, name, None, volume_case_insensitive).is_some()
-                });
+            let known_deleted = base_index.entry(name, None).is_some()
+                || input_indices
+                    .iter()
+                    .any(|index| index.entry(name, None).is_some());
             if known_deleted {
                 match fs::remove_dir(&dir_path) {
                     Ok(()) => {}
@@ -3856,8 +4377,19 @@ pub(crate) fn seal_composed_view(
     } else {
         cfg!(windows)
     };
+    let tracked_index = workspace::TrackedPathIndex::new(path, &tracked);
+    let base_index = EntryAliasIndex::new(&base_view.entries, volume_case_insensitive);
+    let input_indices: Vec<EntryAliasIndex<'_>> = inputs
+        .iter()
+        .map(|(_, view)| EntryAliasIndex::new(&view.entries, volume_case_insensitive))
+        .collect();
+    let shadow_path = workspace::shadow_repo_if_exists(source)?;
+    let shadow_repo = shadow_path
+        .as_deref()
+        .and_then(|dir| git2::Repository::open(dir).ok());
+    let shadow_odb = shadow_repo.as_ref().and_then(|repo| repo.odb().ok());
     let listed = workspace::repository_git(source, &["ls-tree", "-r", "-z", head])?;
-    let mut entries = BTreeMap::new();
+    let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     for item in listed.split('\0').filter(|item| !item.is_empty()) {
         let (header, name) = item.split_once('\t').ok_or("Invalid graph tree entry")?;
         let fields: Vec<_> = header.split_whitespace().collect();
@@ -3872,7 +4404,12 @@ pub(crate) fn seal_composed_view(
         }) {
             return Err("Unsafe graph project path".into());
         }
-        if workspace::collection_excluded_at(path, Path::new(name), &tracked, exclusions) {
+        if workspace::collection_excluded_with_index(
+            path,
+            Path::new(name),
+            &tracked_index,
+            exclusions,
+        ) {
             continue;
         }
         if fields[2].len() != 40 {
@@ -3881,30 +4418,17 @@ pub(crate) fn seal_composed_view(
             return Ok(None);
         }
         if fields[0] == "120000" {
-            let shadow = workspace::shadow_repo_if_exists(source)?
+            let shadow = shadow_path
+                .as_deref()
                 .ok_or("Missing internal repository for composed project link")?;
-            let data = workspace::git_bytes(
-                source,
-                &[
-                    "--git-dir",
-                    shadow.to_str().ok_or("Invalid shadow path")?,
-                    "cat-file",
-                    "blob",
-                    fields[2],
-                ],
-                None,
-                None,
-            )?;
+            let data = read_blob_fast(shadow_odb.as_ref(), source, Some(shadow), fields[2])?;
             // Link targets are raw blob bytes, not line-oriented Git output:
             // whitespace (including a trailing newline) is significant.
             let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
-            let baseline =
-                entry_by_alias(&base_view.entries, name, Some(2), volume_case_insensitive);
-            let candidates = inputs
+            let baseline = base_index.entry(name, Some(2));
+            let candidates = input_indices
                 .iter()
-                .map(|(_, view)| {
-                    entry_by_alias(&view.entries, name, Some(2), volume_case_insensitive)
-                })
+                .map(|index| index.entry(name, Some(2)))
                 .collect::<Vec<_>>();
             let Some(template) = choose_metadata(baseline, &candidates, name)? else {
                 return Ok(None);
@@ -3922,12 +4446,10 @@ pub(crate) fn seal_composed_view(
         // Metadata is composed independently of content, exactly as in the
         // materialized path. In particular, a changed blob must not lose its
         // permissions/xattrs, and divergent metadata changes must fail closed.
-        let baseline = entry_by_alias(&base_view.entries, name, Some(0), volume_case_insensitive);
-        let candidates = inputs
+        let baseline = base_index.entry(name, Some(0));
+        let candidates = input_indices
             .iter()
-            .map(|(_, view)| {
-                entry_by_alias(&view.entries, name, Some(0), volume_case_insensitive)
-            })
+            .map(|index| index.entry(name, Some(0)))
             .collect::<Vec<_>>();
         let Some(Entry::File { mode, extra, .. }) = choose_metadata(baseline, &candidates, name)?
         else {
@@ -3944,76 +4466,50 @@ pub(crate) fn seal_composed_view(
         );
     }
     let mut directories = std::collections::BTreeSet::new();
+    let mut entry_aliases = FoldedPathSet::new(volume_case_insensitive);
     for name in entries.keys() {
+        entry_aliases.insert(name.clone());
         let mut parent = Path::new(name).parent();
         while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
             directories.insert(name_of(path)?);
             parent = path.parent();
         }
     }
-    let mut folded_keys = std::collections::HashSet::new();
+    let mut folded_keys = std::collections::HashSet::with_capacity(entries.len() + directories.len());
     for key in entries.keys().chain(directories.iter()) {
-        let folded = if cfg!(windows) {
-            if volume_case_insensitive {
-                key.to_ascii_lowercase()
-            } else {
-                key.clone()
-            }
-        } else {
-            #[cfg(target_os = "macos")]
-            {
-                key.split('/')
-                    .map(|part| {
-                        crate::path_identity::macos_fold_component(part, volume_case_insensitive)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("/")
-            }
-            #[cfg(not(target_os = "macos"))]
-            key.clone()
-        };
+        let folded = crate::path_identity::fold_relative_path(key, volume_case_insensitive);
         if !folded_keys.insert(folded) {
             return Ok(None);
         }
     }
     // Git omits empty directories. Compose every recorded directory, not just
     // the ancestors of files present in the result tree.
-    let mut canonical_dirs: Vec<String> = directories.iter().cloned().collect();
+    let mut canonical_dirs = FoldedPathSet::new(volume_case_insensitive);
+    for dir in &directories {
+        canonical_dirs.insert(dir.clone());
+    }
     let mut recorded_directories = std::collections::BTreeSet::new();
     for name in sorted_candidate_names(&base_view, &inputs, Some(1)) {
-        if !has_fs_alias_in_set(&directories, name, volume_case_insensitive)
-            && !has_fs_alias_in_set(&recorded_directories, name, volume_case_insensitive)
-            && !has_fs_alias(&entries, name, volume_case_insensitive)
-        {
-            let chosen_name = choose_alias_spelling(
-                &base_view,
-                &inputs,
-                name,
-                Some(1),
-                volume_case_insensitive,
-            )?;
-            let resolved_name = resolve_parent_alias_prefix(
-                &chosen_name,
-                &canonical_dirs,
-                volume_case_insensitive,
-            );
-            canonical_dirs.push(resolved_name.clone());
+        if !canonical_dirs.contains_alias(name) && !entry_aliases.contains_alias(name) {
+            let chosen_name =
+                choose_alias_spelling_indexed(&base_index, &input_indices, name, Some(1))?;
+            let resolved_name = resolve_parent_alias_prefix_indexed(&chosen_name, &canonical_dirs);
+            canonical_dirs.insert(resolved_name.clone());
             recorded_directories.insert(resolved_name);
         }
     }
     for name in directories.union(&recorded_directories) {
-        if has_fs_alias(&entries, name, volume_case_insensitive) {
+        if entry_aliases.contains_alias(name) {
             continue;
         }
-        let baseline = entry_by_alias(&base_view.entries, name, Some(1), volume_case_insensitive);
-        let candidates = inputs
+        let baseline = base_index.entry(name, Some(1));
+        let candidates = input_indices
             .iter()
-            .map(|(_, view)| {
-                entry_by_alias(&view.entries, name, Some(1), volume_case_insensitive)
-            })
+            .map(|index| index.entry(name, Some(1)))
             .collect::<Vec<_>>();
         match choose_metadata(baseline, &candidates, name)? {
             Some(directory @ Entry::Directory { .. }) => {
+                entry_aliases.insert(name.clone());
                 entries.insert(name.clone(), directory);
             }
             Some(_) => return Err("Project entry type changed during metadata composition".into()),
@@ -4025,16 +4521,7 @@ pub(crate) fn seal_composed_view(
             None => {}
         }
     }
-    let files = entries
-        .iter()
-        .filter(|(_, entry)| matches!(entry, Entry::File { .. }))
-        .map(|(name, _)| name.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let link_inputs = inputs
-        .iter()
-        .map(|(_, view)| &view.hardlinks)
-        .collect::<Vec<_>>();
-    let hardlinks = crate::workspace_links::compose(&base_view.hardlinks, &link_inputs, &files)?;
+    let hardlinks = crate::workspace_links::Topology::default();
     let base_root = Entry::Directory {
         mode: base_view.root_mode,
         extra: base_view.root_extra.clone(),
@@ -4116,9 +4603,16 @@ fn strip_generated_at(
     tracked: &std::collections::BTreeSet<String>,
     root: Option<&Path>,
 ) {
+    let tracked_index = root.map(|r| workspace::TrackedPathIndex::new(r, tracked));
     let keep = |name: &str| {
-        !(crate::workspace::is_generated_artifact(Path::new(name))
-            && !crate::workspace::tracked_path_matches(root, tracked, name))
+        if !crate::workspace::is_generated_artifact(Path::new(name)) {
+            return true;
+        }
+        if let Some(index) = &tracked_index {
+            index.matches(name) || index.has_tracked_generated_descendant(name)
+        } else {
+            crate::workspace::tracked_path_matches(root, tracked, name)
+        }
     };
     view.entries.retain(|name, _| keep(name));
     view.hardlinks.retain(keep);
@@ -4225,13 +4719,8 @@ pub(crate) fn stage_node_snapshot_with_record(
             base_match: None,
         });
     };
-    if exclusions.is_empty() {
-        let metadata = workspace::private_git_dir(path).unwrap_or_else(|| path.join(".git"));
-        stage_project_entries(path, &metadata, entries)?;
-    } else {
-        drop(entries);
-        workspace::stage_scoped_local(path, exclusions)?;
-    }
+    let metadata = workspace::private_git_dir(path).unwrap_or_else(|| path.join(".git"));
+    stage_project_entries(path, &metadata, entries)?;
     Ok(StagedNodeSnapshot {
         identity: Some(identity),
         base_match,
@@ -4332,6 +4821,7 @@ fn capture_node_view(
         .map_err(|e| e.to_string())?;
     let pending = target.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
+    let mut pending_guard = PendingDirGuard::new(pending.clone());
     if let Some(record) = inherited {
         copy_recorded_repositories(record, &pending, view)?;
     } else {
@@ -4341,13 +4831,15 @@ fn capture_node_view(
     if let Err(error) = fs::rename(&pending, &target) {
         // A concurrent writer may have published the same immutable record first.
         if target.exists() && load(&target).ok().as_ref() == Some(view) {
-            let _ = fs::remove_dir_all(&pending);
+            drop(pending_guard);
         } else {
             return Err(format!(
                 "Cannot publish project-view record {}: {error}",
                 target.display()
             ));
         }
+    } else {
+        pending_guard.disarm();
     }
     if launchable && is_bound(path) {
         mark_ready_at(path, head)?;

@@ -129,13 +129,19 @@ struct FileChangesCache {
     planning_live: HashMap<(String, String), ChangeAccumulator>,
     /// Runs whose durable sidecar is already loaded into this cache. The
     /// sidecar can be tens of MiB, so it is parsed once per process rather
-    /// than on every warm call.
+    /// than on every warm call, and bounded by LRU eviction of clean runs.
     hydrated_runs: std::collections::HashSet<String>,
     /// Executions whose sidecar summary already merged their log and Git parts.
     /// Without this the warm path would re-run an expensive Git diff for every
     /// settled execution on each cold access.
     hydrated_executions: std::collections::HashSet<(String, String)>,
+    access_clock: u64,
+    last_accessed: HashMap<String, u64>,
+    mutation_seq: HashMap<String, u64>,
+    clean_persisted_seq: HashMap<String, u64>,
 }
+
+const MAX_CLEAN_HYDRATED_RUNS: usize = 16;
 
 impl FileChangesCache {
     fn log_token(&self, key: &(String, String)) -> CacheToken {
@@ -154,15 +160,106 @@ impl FileChangesCache {
         )
     }
 
+    fn touch_run(&mut self, run_id: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        self.access_clock = self.access_clock.wrapping_add(1);
+        self.last_accessed
+            .insert(run_id.to_string(), self.access_clock);
+    }
+
+    fn note_mutation(&mut self, run_id: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        let seq = self.mutation_seq.entry(run_id.to_string()).or_default();
+        *seq = seq.wrapping_add(1);
+        self.touch_run(run_id);
+    }
+
+    fn has_live_entries(&self, run_id: &str) -> bool {
+        self.live.keys().any(|(r, _)| r == run_id)
+            || self.planning_live.keys().any(|(r, _)| r == run_id)
+    }
+
+    fn is_evictable_clean_run(&self, run_id: &str, keep_run: &str) -> bool {
+        run_id != keep_run
+            && self.hydrated_runs.contains(run_id)
+            && self.clean_persisted_seq.get(run_id)
+                == Some(&self.mutation_seq.get(run_id).copied().unwrap_or(0))
+            && !self.has_live_entries(run_id)
+    }
+
+    pub(super) fn evict_run(&mut self, run_id: &str) {
+        let epoch = self.run_epochs.entry(run_id.to_string()).or_default();
+        *epoch = epoch.wrapping_add(1);
+        self.planning_revisions.retain(|(r, _), _| r != run_id);
+        self.log_state.retain(|(r, _), _| r != run_id);
+        self.log_changes.retain(|(r, _), _| r != run_id);
+        self.git_changes.retain(|(r, _), _| r != run_id);
+        self.publication_changes.remove(run_id);
+        self.planning_changes.retain(|(r, _), _| r != run_id);
+        self.live.retain(|(r, _), _| r != run_id);
+        self.planning_live.retain(|(r, _), _| r != run_id);
+        self.hydrated_runs.remove(run_id);
+        self.hydrated_executions.retain(|(r, _)| r != run_id);
+        self.last_accessed.remove(run_id);
+        self.mutation_seq.remove(run_id);
+        self.clean_persisted_seq.remove(run_id);
+    }
+
+    pub(super) fn mark_persisted_if_unchanged(&mut self, run_id: &str, captured_seq: u64) {
+        if self.mutation_seq.get(run_id).copied().unwrap_or(0) == captured_seq
+            && !self.has_live_entries(run_id)
+        {
+            self.hydrated_runs.insert(run_id.to_string());
+            self.clean_persisted_seq
+                .insert(run_id.to_string(), captured_seq);
+            self.touch_run(run_id);
+            self.evict_clean_runs_if_needed(run_id);
+        }
+    }
+
+    fn evict_clean_runs_if_needed(&mut self, keep_run: &str) {
+        let keep_is_clean = !keep_run.is_empty()
+            && self.hydrated_runs.contains(keep_run)
+            && self.clean_persisted_seq.get(keep_run)
+                == Some(&self.mutation_seq.get(keep_run).copied().unwrap_or(0))
+            && !self.has_live_entries(keep_run);
+        let budget_for_others = MAX_CLEAN_HYDRATED_RUNS.saturating_sub(usize::from(keep_is_clean));
+        let mut candidates: Vec<(u64, String)> = self
+            .hydrated_runs
+            .iter()
+            .filter(|run_id| self.is_evictable_clean_run(run_id, keep_run))
+            .map(|run_id| {
+                (
+                    self.last_accessed.get(run_id).copied().unwrap_or(0),
+                    run_id.clone(),
+                )
+            })
+            .collect();
+        if candidates.len() <= budget_for_others {
+            return;
+        }
+        candidates.sort_unstable_by_key(|(used, _)| *used);
+        let remove_count = candidates.len() - budget_for_others;
+        for (_, run_id) in candidates.into_iter().take(remove_count) {
+            self.evict_run(&run_id);
+        }
+    }
+
     fn planning_changed(&mut self, key: &(String, String)) {
         let revision = self.planning_revisions.entry(key.clone()).or_default();
         *revision = revision.wrapping_add(1);
+        self.note_mutation(&key.0);
     }
 
     fn log_changed(&mut self, key: &(String, String)) {
         let state = self.log_state.entry(key.clone()).or_default();
         state.revision = state.revision.wrapping_add(1);
         state.scanned = None;
+        self.note_mutation(&key.0);
     }
 }
 
@@ -174,18 +271,7 @@ fn cache() -> &'static Mutex<FileChangesCache> {
 
 pub fn invalidate_run(run_id: &str) {
     if let Ok(mut guard) = cache().lock() {
-        let epoch = guard.run_epochs.entry(run_id.to_string()).or_default();
-        *epoch = epoch.wrapping_add(1);
-        guard.planning_revisions.retain(|(r, _), _| r != run_id);
-        guard.log_state.retain(|(r, _), _| r != run_id);
-        guard.log_changes.retain(|(r, _), _| r != run_id);
-        guard.git_changes.retain(|(r, _), _| r != run_id);
-        guard.publication_changes.remove(run_id);
-        guard.planning_changes.retain(|(r, _), _| r != run_id);
-        guard.live.retain(|(r, _), _| r != run_id);
-        guard.planning_live.retain(|(r, _), _| r != run_id);
-        guard.hydrated_runs.remove(run_id);
-        guard.hydrated_executions.retain(|(r, _)| r != run_id);
+        guard.evict_run(run_id);
     }
 }
 
@@ -203,6 +289,10 @@ pub fn clear_all() {
         guard.planning_live.clear();
         guard.hydrated_runs.clear();
         guard.hydrated_executions.clear();
+        guard.access_clock = 0;
+        guard.last_accessed.clear();
+        guard.mutation_seq.clear();
+        guard.clean_persisted_seq.clear();
     }
 }
 
@@ -1533,6 +1623,7 @@ pub fn record_git_commit_changes(
         // An empty diff is a successful result too, not a reason to rerun Git
         // on every live poll. Failed reads remain uncached and retryable.
         if let Ok(mut guard) = cache().lock() {
+            guard.note_mutation(run_id);
             guard
                 .git_changes
                 .insert((run_id.to_string(), execution_id.to_string()), summary);
@@ -1546,6 +1637,7 @@ pub fn record_publication_git_changes(run_id: &str, repository: &Path, base: &st
     }
     if let Some(summary) = compute_git_changes(repository, base, Some(head), "", "") {
         if let Ok(mut guard) = cache().lock() {
+            guard.note_mutation(run_id);
             guard
                 .publication_changes
                 .insert(run_id.to_string(), summary);
@@ -1709,7 +1801,13 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     };
     if cache()
         .lock()
-        .map(|guard| guard.hydrated_runs.contains(run_id))
+        .map(|mut guard| {
+            let hydrated = guard.hydrated_runs.contains(run_id);
+            if hydrated {
+                guard.touch_run(run_id);
+            }
+            hydrated
+        })
         .unwrap_or(false)
     {
         return;
@@ -1726,6 +1824,7 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     let Ok(mut guard) = cache().lock() else {
         return;
     };
+    let seq_before = guard.mutation_seq.get(run_id).copied().unwrap_or(0);
     let key_run = run_id.to_string();
     for (execution_id, summary) in saved.executions {
         guard
@@ -1749,6 +1848,11 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
             .or_insert(publication);
     }
     guard.hydrated_runs.insert(run_id.to_string());
+    if seq_before == 0 && !guard.has_live_entries(run_id) {
+        guard.clean_persisted_seq.insert(run_id.to_string(), 0);
+    }
+    guard.touch_run(run_id);
+    guard.evict_clean_runs_if_needed(run_id);
 }
 
 /// The caller holds the selected Run mutex, so these tokens and its Snapshot
@@ -1758,9 +1862,10 @@ pub(crate) fn capture_warm_fence(
     state: &Snapshot,
     scope: Option<&[String]>,
 ) -> Result<WarmFence, String> {
-    let guard = cache()
+    let mut guard = cache()
         .try_lock()
         .map_err(|_| "File-change cache is busy; retry the read".to_string())?;
+    guard.touch_run(&state.run_id);
     let logs = state
         .executions
         .iter()
@@ -1936,6 +2041,7 @@ pub(crate) fn warm_scoped_changes(
                     {
                         // Retain empty Planner results as well. This immutable
                         // planning ID's live parser supersedes them on writes.
+                        guard.note_mutation(&key.0);
                         guard.planning_changes.insert(key, summary);
                     }
                 }

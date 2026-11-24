@@ -106,6 +106,7 @@ fn metadata_event(event: &Event) -> Value {
     for key in [
         "graph",
         "config",
+        "goal",
         "input",
         "result",
         "descriptor",
@@ -225,10 +226,22 @@ pub(crate) struct SnapshotMetadata<'a> {
 }
 
 pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
+    let mut latest_planning_event_index: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for (index, event) in state.events.iter().enumerate() {
+        if let Some(id) = event
+            .planning_summary()
+            .map(|summary| summary.planning_id.as_str())
+            .filter(|id| !id.is_empty())
+        {
+            latest_planning_event_index.insert(id, index);
+        }
+    }
     let events = state
         .events
         .iter()
-        .filter_map(|event| match &event.kind {
+        .enumerate()
+        .filter_map(|(index, event)| match &event.kind {
             EventKind::Output { .. } => None,
             EventKind::Finished {
                 execution_id, head, ..
@@ -239,7 +252,26 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
                 sequence: event.sequence,
                 timestamp: event.timestamp,
             }),
-            _ => Some(EventMetadata::Projected(metadata_event(event))),
+            _ => {
+                let mut projected = metadata_event(event);
+                // When a later event for the same planning turn already carries
+                // its authoritative summary, drop the duplicated `planning.goal`
+                // from earlier events so large pasted prompts are not repeated.
+                if let Some(planning) = projected
+                    .get_mut("planning")
+                    .and_then(Value::as_object_mut)
+                {
+                    let is_superseded = planning
+                        .get("planningId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| latest_planning_event_index.get(id))
+                        .is_some_and(|&latest| latest > index);
+                    if is_superseded {
+                        planning.remove("goal");
+                    }
+                }
+                Some(EventMetadata::Projected(projected))
+            }
         })
         .collect::<Vec<_>>();
     let (can_resume, resumable) = state.recovery_hints();
@@ -1048,5 +1080,56 @@ mod tests {
         state.mergers[0].completed_at = Some(3);
         let settled = snapshot_metadata(&state).unwrap();
         assert_eq!(settled["nodes"]["join"]["status"], json!("running"));
+    }
+
+    #[test]
+    fn metadata_omits_redundant_event_goal_and_superseded_planning_goal() {
+        let large_goal = "massive pasted log ".repeat(5_000);
+        let planning = PlanningSummary {
+            planning_id: "plan-1".into(),
+            goal: Some(large_goal.clone()),
+            ..Default::default()
+        };
+        let config: crate::model::Config = serde_json::from_value(json!({
+            "repository": "/repo", "model": "test/model", "maxParallel": 1
+        }))
+        .unwrap();
+        let mut state = Snapshot {
+            run_id: "dedup-goal".into(),
+            planning_id: Some("plan-1".into()),
+            planning: Some(planning.clone()),
+            graph: Graph {
+                original_goal: large_goal.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state.events.push(Event {
+            sequence: 1,
+            timestamp: 1,
+            kind: EventKind::PlanningStarted {
+                goal: large_goal.clone(),
+                config: config.clone(),
+                planning: planning.clone(),
+                plan_type: Some("serial".into()),
+            },
+        });
+        state.events.push(Event {
+            sequence: 2,
+            timestamp: 2,
+            kind: EventKind::Created {
+                graph: state.graph.clone(),
+                config,
+                planning_id: Some("plan-1".into()),
+                planning: Some(planning.clone()),
+            },
+        });
+        let metadata = snapshot_metadata(&state).unwrap();
+        let events = metadata["events"].as_array().unwrap();
+        assert!(events[0].get("goal").is_none());
+        assert!(events[0]["planning"].get("goal").is_none());
+        assert_eq!(events[0]["planning"]["planningId"], "plan-1");
+        assert_eq!(events[1]["planning"]["goal"], large_goal);
+        assert_eq!(metadata["graph"]["originalGoal"], large_goal);
     }
 }

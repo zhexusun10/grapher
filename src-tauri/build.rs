@@ -159,11 +159,12 @@ fn main() {
     }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        let objc_src = std::path::PathBuf::from(
+        let manifest_dir = std::path::PathBuf::from(
             std::env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"),
-        )
-        .join("objc")
-        .join("macos_notifications.m");
+        );
+        let objc_src = manifest_dir
+            .join("objc")
+            .join("macos_notifications.m");
         println!("cargo:rerun-if-changed={}", objc_src.display());
         cc::Build::new()
             .file(&objc_src)
@@ -172,6 +173,7 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=UserNotifications");
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=AppKit");
+        println!("cargo:rerun-if-changed=Info.plist");
     }
 
     // Ensure staged resource directories exist so `cargo check` and `cargo test`

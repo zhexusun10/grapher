@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronRight, FileDiff, Loader2, Network, RefreshCw, X } from "lucide-react";
+import { ChevronRight, FileDiff, Loader2, Network, X } from "lucide-react";
 import { t } from "../../i18n";
 import { runtimeService } from "../../services/runtime";
 import type { FileChangeItem, FileChangeSummary, FileDiffResult } from "../../types";
@@ -41,12 +41,11 @@ export const MAX_RENDERED_FILE_CHANGES = 60;
 interface WorkspaceChangesPaneProps {
   id: string;
   runId: string;
+  viewScopeKey?: string;
   scopedExecutionIds?: string[];
   summary: FileChangeSummary;
   isLoaded: boolean;
-  isRefreshing: boolean;
   refreshVersion: number;
-  onRefresh: () => void;
   hasGraphPane: boolean;
   onSelectGraph?: () => void;
   onClose: () => void;
@@ -58,17 +57,17 @@ interface WorkspaceChangesPaneProps {
 export const WorkspaceChangesPane = React.memo(function WorkspaceChangesPane({
   id,
   runId,
+  viewScopeKey,
   scopedExecutionIds,
   summary,
   isLoaded,
-  isRefreshing,
   refreshVersion,
-  onRefresh,
   hasGraphPane,
   onSelectGraph,
   onClose,
   onOpenFile,
 }: WorkspaceChangesPaneProps) {
+  const effectiveViewScopeKey = viewScopeKey ?? runId;
   const scopeKey = useMemo(
     () => JSON.stringify([runId, scopedExecutionIds ?? null]),
     [runId, scopedExecutionIds],
@@ -77,7 +76,7 @@ export const WorkspaceChangesPane = React.memo(function WorkspaceChangesPane({
 
   useEffect(() => {
     setExpandedPaths(new Set());
-  }, [scopeKey]);
+  }, [effectiveViewScopeKey]);
 
   const toggleFile = useCallback((path: string) => {
     setExpandedPaths((prev) => {
@@ -180,17 +179,6 @@ export const WorkspaceChangesPane = React.memo(function WorkspaceChangesPane({
             <span className="changes-pane-file-count">{t("当前工作区变更")}</span>
           )}
         </div>
-        <button
-          type="button"
-          className="changes-pane-refresh-btn"
-          data-testid="workspace-changes-refresh"
-          aria-label={t("刷新文件变更")}
-          title={t("刷新")}
-          disabled={!isLoaded || isRefreshing}
-          onClick={onRefresh}
-        >
-          <RefreshCw size={13} className={isRefreshing ? "spin" : undefined} aria-hidden="true" />
-        </button>
       </div>
 
       <div
@@ -215,6 +203,7 @@ export const WorkspaceChangesPane = React.memo(function WorkspaceChangesPane({
               <ChangedFileRow
                 key={item.path}
                 runId={runId}
+                viewScopeKey={effectiveViewScopeKey}
                 scopeKey={scopeKey}
                 item={item}
                 expanded={expandedPaths.has(item.path)}

@@ -2401,6 +2401,23 @@ button.transcript-error-toggle {
   cursor: pointer;
 }
 
+.provider-auth-link-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.provider-auth-link-row .provider-oauth-btn {
+  margin-top: 0;
+}
+
+.provider-oauth-copy-btn {
+  margin-top: 0;
+  align-self: flex-start;
+}
+
 .provider-oauth-btn {
   display: inline-flex;
   align-items: center;

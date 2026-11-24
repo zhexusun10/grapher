@@ -1,7 +1,7 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
 import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, Wallpaper, AlertTriangle, Info } from "lucide-react";
 import { Config, MAX_MAX_FEEDBACK, MAX_MAX_PARALLEL, MIN_MAX_FEEDBACK, MIN_MAX_PARALLEL, normalizeMaxFeedback, normalizeMaxParallel } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
@@ -20,6 +20,7 @@ import {
   type NotificationPermissionState,
 } from "../../services/completionNotifications";
 import { isTauriDesktop } from "../../services/apiBase";
+import { copyTextToClipboard } from "../../services/externalLink";
 import { DotPattern } from "../ui/dot-pattern";
 import { ConfirmModal } from "./ConfirmModal";
 import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
@@ -156,6 +157,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     open: isOpen,
     onClose: () => { if (!savingRef.current && pendingLanguage === null) onClose(); },
   });
+  const isPresent = useIsPresent();
 
   if (!isOpen) return null;
 
@@ -163,7 +165,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const veilMotion = dialogVeilMotion(reduceMotion);
 
   const content = (
-    <div className="modal-backdrop subtle-backdrop">
+    <div
+      className="modal-backdrop subtle-backdrop"
+      inert={!isPresent || undefined}
+      style={!isPresent ? { pointerEvents: "none" } : undefined}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && isPresent && !savingRef.current && pendingLanguage === null) onClose();
+      }}
+    >
       {/* Light translucent veil only: a full-screen backdrop-filter forced the
           browser onto a slow compositing path and made even modal scrolling
           janky. Only this layer fades, via a cheap compositor opacity change. */}
@@ -521,7 +530,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                     disabled={!dataPath}
                     onClick={() => {
                       const cleanPath = normalizeWorkspacePath(dataPath);
-                      if (cleanPath && navigator.clipboard?.writeText) void navigator.clipboard.writeText(cleanPath).catch(() => {});
+                      if (cleanPath) void copyTextToClipboard(cleanPath);
                     }}
                     aria-label={t("复制路径")}
                   >

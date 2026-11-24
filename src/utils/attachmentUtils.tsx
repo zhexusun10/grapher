@@ -80,58 +80,64 @@ export function parseMessageAttachmentsAndText(
   const images: ImageAttachment[] = existingImages ? [...existingImages] : [];
 
   // Managed external attachment mentions (`@<data_root>/attachment-inputs/...`)
-  for (const mention of findManagedAttachmentMentions(cleanText)) {
-    const fileName = mention.name;
-    const isImage = IMAGE_FILE_EXT.test(fileName);
-    if (!attachments.some((a) => a.name === fileName || a.name === mention.path)) {
-      attachments.push({
-        name: fileName,
-        type: isImage ? "image" : "file",
-      });
+  if (cleanText.includes("attachment-inputs/")) {
+    for (const mention of findManagedAttachmentMentions(cleanText)) {
+      const fileName = mention.name;
+      const isImage = IMAGE_FILE_EXT.test(fileName);
+      if (!attachments.some((a) => a.name === fileName || a.name === mention.path)) {
+        attachments.push({
+          name: fileName,
+          type: isImage ? "image" : "file",
+        });
+      }
     }
+    cleanText = stripManagedAttachmentMentions(cleanText);
   }
-  cleanText = stripManagedAttachmentMentions(cleanText);
 
-  // XML tags: <file name="...">content</file> or <file name="..."></file>
-  const fileTagRegex = /<file name="([^"]+)">([\s\S]*?)<\/file>\s*/g;
   let match: RegExpExecArray | null;
-  while ((match = fileTagRegex.exec(cleanText)) !== null) {
-    const fullName = match[1].trim();
-    const fileName = fullName.split(/[/\\]/).pop() || fullName;
-    const content = match[2];
-    const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName);
-    if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
-      attachments.push({
-        name: fileName,
-        size: content ? new Blob([content]).size : undefined,
-        type: isImage ? "image" : "file",
-        content,
-      });
+  // XML tags: <file name="...">content</file> or <file name="..."></file>
+  if (cleanText.includes("<file name=")) {
+    const fileTagRegex = /<file name="([^"]+)">([\s\S]*?)<\/file>\s*/g;
+    while ((match = fileTagRegex.exec(cleanText)) !== null) {
+      const fullName = match[1].trim();
+      const fileName = fullName.split(/[/\\]/).pop() || fullName;
+      const content = match[2];
+      const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName);
+      if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
+        attachments.push({
+          name: fileName,
+          size: content ? new Blob([content]).size : undefined,
+          type: isImage ? "image" : "file",
+          content,
+        });
+      }
     }
+    cleanText = cleanText.replace(fileTagRegex, "");
   }
-  cleanText = cleanText.replace(fileTagRegex, "");
 
-  // Bracketed labels: [附件: filename] or [Attachment: filename]
-  const bracketRegex = /\s*\[(?:附件|图片|Attachment):\s*([^\]]+)\]/gi;
-  while ((match = bracketRegex.exec(cleanText)) !== null) {
-    const fullName = match[1].trim();
-    const fileName = fullName.split(/[/\\]/).pop() || fullName;
-    if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
-      attachments.push({ name: fileName, type: "file" });
+  if (cleanText.includes("[")) {
+    // Bracketed labels: [附件: filename] or [Attachment: filename]
+    const bracketRegex = /\s*\[(?:附件|图片|Attachment):\s*([^\]]+)\]/gi;
+    while ((match = bracketRegex.exec(cleanText)) !== null) {
+      const fullName = match[1].trim();
+      const fileName = fullName.split(/[/\\]/).pop() || fullName;
+      if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
+        attachments.push({ name: fileName, type: "file" });
+      }
     }
-  }
-  cleanText = cleanText.replace(bracketRegex, "");
+    cleanText = cleanText.replace(bracketRegex, "");
 
-  // Filename brackets like [name.ext] at the end or inline
-  const filenameBracketRegex = /\s*\[([a-zA-Z0-9_\-. ]+\.(?:docx\.md|md|py|txt|json|ts|tsx|js|jsx|pdf|csv|log|png|jpe?g|gif|webp))\]/gi;
-  while ((match = filenameBracketRegex.exec(cleanText)) !== null) {
-    const fullName = match[1].trim();
-    const fileName = fullName.split(/[/\\]/).pop() || fullName;
-    if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
-      attachments.push({ name: fileName, type: "file" });
+    // Filename brackets like [name.ext] at the end or inline
+    const filenameBracketRegex = /\s*\[([a-zA-Z0-9_\-. ]+\.(?:docx\.md|md|py|txt|json|ts|tsx|js|jsx|pdf|csv|log|png|jpe?g|gif|webp))\]/gi;
+    while ((match = filenameBracketRegex.exec(cleanText)) !== null) {
+      const fullName = match[1].trim();
+      const fileName = fullName.split(/[/\\]/).pop() || fullName;
+      if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
+        attachments.push({ name: fileName, type: "file" });
+      }
     }
+    cleanText = cleanText.replace(filenameBracketRegex, "");
   }
-  cleanText = cleanText.replace(filenameBracketRegex, "");
 
   const filteredAttachments = images.length > 0
     ? attachments.filter((att) => !isDuplicateImageAttachmentFile(att, images))

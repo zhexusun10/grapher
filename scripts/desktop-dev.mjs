@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { toolchainEnv } from './cargo.mjs';
+import { macosDesktopToolchainEnv, toolchainEnv } from './cargo.mjs';
 import { backendBuildUpToDate, loadDevEnvironment, recordDevBuildStamp } from './dev.mjs';
 import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs';
 
@@ -65,10 +65,14 @@ async function runDesktopDev(extraArgs) {
     );
     recordDevBuildStamp(root, env);
   }
+  const tauriEnv = macosDesktopToolchainEnv(env);
+  if (process.platform === 'darwin' && tauriEnv.SDKROOT && tauriEnv.SDKROOT !== env.SDKROOT) {
+    console.log(`[desktop:dev] Using macOS compatibility SDK (${tauriEnv.SDKROOT}).`);
+  }
   const tauriJs = join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
   console.log('[desktop:dev] Starting Tauri v2 desktop shell...');
   if (existsSync(tauriJs)) {
-    return spawnInherited(process.execPath, [tauriJs, 'dev', ...extraArgs], env);
+    return spawnInherited(process.execPath, [tauriJs, 'dev', ...extraArgs], tauriEnv);
   }
   const tauriBin = join(
     root,
@@ -76,7 +80,7 @@ async function runDesktopDev(extraArgs) {
     '.bin',
     process.platform === 'win32' ? 'tauri.cmd' : 'tauri',
   );
-  return spawnInherited(tauriBin, ['dev', ...extraArgs], env);
+  return spawnInherited(tauriBin, ['dev', ...extraArgs], tauriEnv);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {

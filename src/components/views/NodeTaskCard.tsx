@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Check, Copy, Pencil, X } from "lucide-react";
 import { t } from "../../i18n";
 import { MarkdownRenderer } from "../MarkdownRenderer";
+import { copyTextToClipboard } from "../../services/externalLink";
 
 export interface NodeTaskCardProps {
   nodeName: string;
@@ -16,23 +17,6 @@ export interface NodeTaskCardProps {
   onCancel: () => void;
   onSave: (value: string) => void;
   disabled?: boolean;
-}
-
-function fallbackCopy(text: string, onSuccess: () => void) {
-  try {
-    const el = document.createElement("textarea");
-    el.value = text;
-    el.style.position = "fixed";
-    el.style.opacity = "0";
-    document.body.appendChild(el);
-    el.focus();
-    el.select();
-    const successful = document.execCommand("copy");
-    document.body.removeChild(el);
-    if (successful) onSuccess();
-  } catch {
-    // ignore
-  }
 }
 
 export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
@@ -90,13 +74,9 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
       }, 1500);
     };
 
-    if (navigator?.clipboard?.writeText) {
-      navigator.clipboard.writeText(taskText).then(onSuccess).catch(() => {
-        fallbackCopy(taskText, onSuccess);
-      });
-    } else {
-      fallbackCopy(taskText, onSuccess);
-    }
+    void copyTextToClipboard(taskText).then((ok) => {
+      if (ok) onSuccess();
+    }).catch(() => {});
   };
 
   const isChanged = draft.trim() !== taskText.trim();

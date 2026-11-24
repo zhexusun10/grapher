@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { TranscriptItem } from "../types";
 import { formatToolDuration } from "../utils/toolTiming";
+import { copyTextToClipboard } from "../services/externalLink";
 import { truncateToolText } from "../services/toolOutput";
 import { syncOverscrollContainment } from "../services/transcriptScroll";
 import { observeElementResize } from "../services/sharedResizeObserver";
@@ -31,6 +32,7 @@ interface ToolCallCardProps {
   item: TranscriptItem;
   defaultExpanded?: boolean;
   expanded?: boolean;
+  animateAppear?: boolean;
   onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
 }
 
@@ -57,7 +59,7 @@ function webSearchSummary(args: Record<string, any>): string {
 }
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
-  ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
+  ({ item, defaultExpanded = false, expanded, animateAppear: directAnimateAppear, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mountedRef = useRef(true);
@@ -236,9 +238,9 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
       const textToCopy = resultText || (argsText.text || truncateToolText(JSON.stringify(args, null, 2)).text);
-      if (!textToCopy || !navigator.clipboard?.writeText) return;
-      navigator.clipboard.writeText(textToCopy).then(() => {
-        if (!mountedRef.current) return;
+      if (!textToCopy) return;
+      void copyTextToClipboard(textToCopy).then((ok) => {
+        if (!ok || !mountedRef.current) return;
         setIsCopied(true);
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
         copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setIsCopied(false); }, 1800);
@@ -250,7 +252,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       [item.interruptedOutput, resultText]
     );
 
-    const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, item.animateAppear);
+    const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, directAnimateAppear ?? item.animateAppear);
 
     // Only the duration the runtime measured and the backend relayed is
     // shown; a command that is still running has no such value yet.

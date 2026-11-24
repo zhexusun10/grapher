@@ -66,8 +66,25 @@ Online publication/completion and workspace-cleanup retries retire disposable
 workspace roots under the owning Run mutex instead of recursively deleting them
 there. The same generation, writer/recovery, sharing, path and source-protection
 checks still apply, including on startup/retry: active Mergers and result
-processes block cleanup, and managed layouts, pending recovery/feedback and
-undelivered private results remain owned until their retention requirements end.
+processes block cleanup, and explicit fixed-layout managed policies, active/failed
+result executions, current published `automatic-lazy` entries that bound a fixed
+native environment, pending recovery/feedback and undelivered private results
+remain owned until their retention requirements end. Unbound `automatic-lazy`
+Runs (or Runs whose earlier managed result was superseded by a later batch)
+retire their workspace roots normally on completion. After an intermediate batch `PublicationCompleted` (or an approved idle graph
+revision), excess idle slots, installed `publication-files-*` /
+`publication-view-*` temporary directories (together with their `.grapher-git/`
+and `.grapher-state/` metadata, pruning empty metadata containers) are retired
+via the same detached receipt queue into `.grapher-worktrees/.grapher-cleanup-<UUID>`,
+retaining only slots needed for live work, recovery, feedback, bound fixed
+layouts, uninstalled publication journals, failed Mergers, or the immediately
+ready next private batch. Once a Graph Run settles, obsolete environment
+snapshots (`versions/`, `blobs/`, `launches/`) under `.grapher/environments/<run>/`
+that are unreachable from a current published result (or explicit baseline) are
+pruned automatically. Offline `--cleanup-workspaces` also supports
+`--stale-days DAYS` to preview and optionally reclaim abandoned incomplete Run
+workspace directories (preserving conversation history and source projects) and
+drains pending detached receipts on `--apply`.
 A retained generation is acknowledged without discarding its ownership records;
 explicit conversation deletion still handles those resources. Each eligible root
 gets an independent SQLite

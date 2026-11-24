@@ -149,50 +149,181 @@ fn matches_entries(
     Ok(blob == entry.blob || candidates.any(|candidate| blob == candidate.blob))
 }
 
-fn same_publication_path(left: &str, right: &str, case_insensitive: bool) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if !case_insensitive && left.is_ascii() && right.is_ascii() {
-            return false;
-        }
-        return crate::path_identity::macos_equivalent_path(
-            Path::new(left),
-            Path::new(right),
-            case_insensitive,
-        );
-    }
-    #[cfg(windows)]
-    {
-        return case_insensitive && left.eq_ignore_ascii_case(right);
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
+struct PublicationAliasIndex<'a> {
+    entries: &'a BTreeMap<String, Entry>,
+    #[cfg(any(target_os = "macos", windows))]
+    case_insensitive: bool,
+    #[cfg(any(target_os = "macos", windows))]
+    by_folded: std::collections::HashMap<String, Vec<(&'a String, &'a Entry)>>,
+}
+
+impl<'a> PublicationAliasIndex<'a> {
+    fn new(entries: &'a BTreeMap<String, Entry>, case_insensitive: bool) -> Self {
+        #[cfg(any(target_os = "macos", windows))]
+        let by_folded = {
+            let mut map: std::collections::HashMap<String, Vec<(&'a String, &'a Entry)>> =
+                std::collections::HashMap::with_capacity(entries.len());
+            for (key, entry) in entries {
+                let folded = crate::path_identity::fold_relative_path(key, case_insensitive);
+                map.entry(folded).or_default().push((key, entry));
+            }
+            map
+        };
+        #[cfg(not(any(target_os = "macos", windows)))]
         let _ = case_insensitive;
-        false
+        Self {
+            entries,
+            #[cfg(any(target_os = "macos", windows))]
+            case_insensitive,
+            #[cfg(any(target_os = "macos", windows))]
+            by_folded,
+        }
+    }
+
+    fn get(&self, relative: &str) -> Option<(&'a String, &'a Entry)> {
+        if let Some((key, exact)) = self.entries.get_key_value(relative) {
+            return Some((key, exact));
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            if cfg!(target_os = "macos") && !self.case_insensitive && relative.is_ascii() {
+                return None;
+            }
+            let folded = crate::path_identity::fold_relative_path(relative, self.case_insensitive);
+            let matches = self.by_folded.get(&folded)?;
+            (matches.len() == 1).then(|| matches[0])
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        None
     }
 }
 
-fn alias_entry<'a>(
-    entries: &'a BTreeMap<String, Entry>,
-    relative: &str,
-    case_insensitive: bool,
-) -> Option<(&'a String, &'a Entry)> {
-    if let Some((key, exact)) = entries.get_key_value(relative) {
-        return Some((key, exact));
+#[derive(Serialize, Deserialize)]
+struct PendingReplace {
+    relative: String,
+    temporary_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PendingDirRename {
+    hop_relative: String,
+    target_relative: String,
+}
+
+fn save_atomic_replace(path: &Path, value: &[u8]) -> Result<(), String> {
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|e| e.to_string())?;
+    let write_res = file.write_all(value).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = write_res {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
     }
-    let mut matched: Option<(&'a String, &'a Entry)> = None;
-    for (candidate, entry) in entries {
-        if same_publication_path(candidate, relative, case_insensitive) {
-            if matched.is_some() {
-                return None;
+    fs::rename(&temporary, path).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        e.to_string()
+    })
+}
+
+fn load_owners(journal: &Path) -> Result<BTreeMap<String, String>, String> {
+    match read_optional(&journal.join("owners.json"))? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+fn temporary_name_for_key(journal_key: &Path, relative: &str) -> String {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    journal_key.hash(&mut hash);
+    relative.hash(&mut hash);
+    format!(".grapher-publish-{:016x}.tmp", hash.finish())
+}
+
+fn reserve_owners(
+    repository: &Path,
+    journal: &Path,
+    journal_key: &Path,
+    new: &BTreeMap<String, Entry>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut owners = load_owners(journal)?;
+    let mut dirty = false;
+    for relative in new.keys() {
+        let temp_name = temporary_name_for_key(journal_key, relative);
+        if let Some(existing) = owners.get(&temp_name) {
+            if existing != relative {
+                return Err("Publication temporary ownership does not match".into());
             }
-            matched = Some((candidate, entry));
+            continue;
         }
+        // Adopt any legacy per-file `.owner` record from an older attempt.
+        let legacy_record = journal.join(&temp_name).with_extension("owner");
+        if let Some(bytes) = read_optional(&legacy_record)? {
+            if bytes != relative.as_bytes() {
+                return Err("Publication temporary ownership does not match".into());
+            }
+            owners.insert(temp_name, relative.clone());
+            dirty = true;
+            continue;
+        }
+        let target = repository.join(relative);
+        let parent = target.parent().ok_or("Missing publication parent")?;
+        let parent_exists = parent == repository
+            || matches!(
+                crate::path_safety::real_child_path(repository, parent, false),
+                Ok(Some(_))
+            );
+        if parent_exists {
+            let temporary = parent.join(&temp_name);
+            match fs::symlink_metadata(&temporary) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+                Ok(_) => {
+                    return Err(format!(
+                        "Unowned publication temporary already exists: {}",
+                        temporary.display()
+                    ));
+                }
+            }
+        }
+        owners.insert(temp_name, relative.clone());
+        dirty = true;
     }
-    matched
+    if dirty {
+        let bytes = serde_json::to_vec(&owners).map_err(|e| e.to_string())?;
+        save_atomic_replace(&journal.join("owners.json"), &bytes)?;
+    }
+    Ok(owners)
+}
+
+fn copy_and_sync_regular(staged: &Path, temporary: &Path) -> Result<(), String> {
+    let staged_perms = fs::metadata(staged)
+        .map_err(|e| e.to_string())?
+        .permissions();
+    let kind = crate::native_copy::copy(staged, temporary)?;
+    // macOS `clonefile` preserves POSIX mode bits, whereas Linux `FICLONE` and
+    // byte-copy fallbacks create the destination with default mode bits.
+    if kind == crate::native_copy::CopyKind::Bytes || cfg!(target_os = "linux") {
+        fs::set_permissions(temporary, staged_perms).map_err(|e| e.to_string())?;
+    }
+    #[cfg(unix)]
+    {
+        fs::File::open(temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
+    if kind != crate::native_copy::CopyKind::Clone {
+        OpenOptions::new()
+            .write(true)
+            .open(temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -367,7 +498,7 @@ fn verify_target(
     verify_target_candidates(repository, relative, &[old, new])
 }
 
-fn ensure_parent(repository: &Path, relative: &Path) -> Result<PathBuf, String> {
+fn ensure_parent(repository: &Path, journal: &Path, relative: &Path) -> Result<PathBuf, String> {
     let mut parent = repository.to_path_buf();
     if let Some(ancestors) = relative.parent() {
         for component in ancestors.components() {
@@ -403,15 +534,37 @@ fn ensure_parent(repository: &Path, relative: &Path) -> Result<PathBuf, String> 
                                 let _ = crate::workspace_cleanup::clear_macos_immutable_flags(
                                     &actual, &meta,
                                 );
-                                fs::rename(&actual, &hop).map_err(|e| e.to_string())?;
-                                if let Err(error) = fs::rename(&hop, &parent) {
-                                    let _ = fs::rename(&hop, &actual);
+                                let repo_actual = crate::path_identity::actual_path(repository)
+                                    .unwrap_or_else(|_| repository.to_path_buf());
+                                let pending_dir = journal.join("renaming-dir.json");
+                                if let (Ok(hop_rel), Ok(target_rel)) = (
+                                    hop.strip_prefix(&repo_actual),
+                                    parent.strip_prefix(repository),
+                                ) {
+                                    let record = PendingDirRename {
+                                        hop_relative: hop_rel.to_string_lossy().replace('\\', "/"),
+                                        target_relative: target_rel
+                                            .to_string_lossy()
+                                            .replace('\\', "/"),
+                                    };
+                                    let bytes =
+                                        serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+                                    save_atomic_replace(&pending_dir, &bytes)?;
+                                }
+                                if let Err(error) = fs::rename(&actual, &hop) {
+                                    let _ = fs::remove_file(&pending_dir);
                                     return Err(error.to_string());
                                 }
+                                if let Err(error) = fs::rename(&hop, &parent) {
+                                    let _ = fs::rename(&hop, &actual);
+                                    let _ = fs::remove_file(&pending_dir);
+                                    return Err(error.to_string());
+                                }
+                                let _ = fs::remove_file(&pending_dir);
                             }
                         }
                     }
-                    let _ = (&enclosing, &meta);
+                    let _ = (&enclosing, &meta, journal);
                 }
             }
             crate::path_safety::real_child_path(repository, &parent, false)?
@@ -421,13 +574,11 @@ fn ensure_parent(repository: &Path, relative: &Path) -> Result<PathBuf, String> 
     Ok(parent)
 }
 
+#[cfg(test)]
 fn temporary_path(parent: &Path, journal: &Path, relative: &str) -> PathBuf {
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    crate::path_identity::actual_path(journal)
-        .unwrap_or_else(|_| journal.to_path_buf())
-        .hash(&mut hash);
-    relative.hash(&mut hash);
-    parent.join(format!(".grapher-publish-{:016x}.tmp", hash.finish()))
+    let journal_key =
+        crate::path_identity::actual_path(journal).unwrap_or_else(|_| journal.to_path_buf());
+    parent.join(temporary_name_for_key(&journal_key, relative))
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
@@ -449,41 +600,59 @@ pub(super) fn install_file(
     mode: &str,
     before_rename: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    install_file_with_tracked(repository, journal, staged, relative, mode, None, before_rename)
+    let journal_key =
+        crate::path_identity::actual_path(journal).unwrap_or_else(|_| journal.to_path_buf());
+    install_file_with_tracked(
+        repository,
+        journal,
+        &journal_key,
+        staged,
+        relative,
+        mode,
+        None,
+        false,
+        None,
+        before_rename,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_file_with_tracked(
     repository: &Path,
     journal: &Path,
+    journal_key: &Path,
     staged: &Path,
     relative: &str,
     mode: &str,
     tracked: Option<&std::cell::OnceCell<BTreeSet<String>>>,
+    pre_reserved: bool,
+    dirty_parents: Option<&mut BTreeSet<PathBuf>>,
     before_rename: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let parent = ensure_parent(repository, Path::new(relative))?;
+    let parent = ensure_parent(repository, journal, Path::new(relative))?;
     let target = repository.join(relative);
-    let temporary = temporary_path(&parent, journal, relative);
-    // Reserve ownership before creating a temporary. A predictable filename
-    // alone is not evidence that an existing file belongs to this publication.
-    let record = journal
-        .join(temporary.file_name().ok_or("Missing temporary name")?)
-        .with_extension("owner");
-    match read_optional(&record)? {
-        Some(bytes) if bytes == relative.as_bytes() => {}
-        Some(_) => return Err("Publication temporary ownership does not match".into()),
-        None => {
-            match fs::symlink_metadata(&temporary) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.to_string()),
-                Ok(_) => {
-                    return Err(format!(
-                        "Unowned publication temporary already exists: {}",
-                        temporary.display()
-                    ))
+    let temp_name = temporary_name_for_key(journal_key, relative);
+    let temporary = parent.join(&temp_name);
+    if !pre_reserved {
+        // Reserve ownership before creating a temporary. A predictable filename
+        // alone is not evidence that an existing file belongs to this publication.
+        let record = journal.join(&temp_name).with_extension("owner");
+        match read_optional(&record)? {
+            Some(bytes) if bytes == relative.as_bytes() => {}
+            Some(_) => return Err("Publication temporary ownership does not match".into()),
+            None => {
+                match fs::symlink_metadata(&temporary) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                    Ok(_) => {
+                        return Err(format!(
+                            "Unowned publication temporary already exists: {}",
+                            temporary.display()
+                        ))
+                    }
                 }
+                save_once(&record, relative.as_bytes())?;
             }
-            save_once(&record, relative.as_bytes())?;
         }
     }
     // Never follow a temporary link; a stopped owned copy is disposable.
@@ -498,17 +667,7 @@ fn install_file_with_tracked(
         let link = crate::workspace_symlinks::capture(repository, staged, &metadata)?;
         crate::workspace_symlinks::materialize(repository, &temporary, &link)?;
     } else if matches!(mode, "100644" | "100755") {
-        let mut input = fs::File::open(staged).map_err(|e| e.to_string())?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|e| e.to_string())?;
-        std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
-        output
-            .set_permissions(input.metadata().map_err(|e| e.to_string())?.permissions())
-            .and_then(|_| output.sync_all())
-            .map_err(|e| e.to_string())?;
+        copy_and_sync_regular(staged, &temporary)?;
     } else {
         return Err(format!("Unsupported publication entry mode: {mode}"));
     }
@@ -524,11 +683,20 @@ fn install_file_with_tracked(
     {
         remove_publication_dir(repository, &target, tracked).map_err(|e| e.to_string())?;
     }
+    let replacing_marker = journal.join("replacing.json");
+    let mut recorded_replace = false;
     #[cfg(target_os = "macos")]
     if let Ok(metadata) = fs::symlink_metadata(&target) {
         crate::workspace_cleanup::clear_macos_immutable_flags(&target, &metadata)
             .map_err(|e| e.to_string())?;
         if !disk_relative_matches(repository, &target, relative) {
+            let bytes = serde_json::to_vec(&PendingReplace {
+                relative: relative.to_string(),
+                temporary_name: temp_name.clone(),
+            })
+            .map_err(|e| e.to_string())?;
+            save_atomic_replace(&replacing_marker, &bytes)?;
+            recorded_replace = true;
             crate::workspace_symlinks::remove(&target)?;
         }
     }
@@ -540,6 +708,13 @@ fn install_file_with_tracked(
                 && fs::symlink_metadata(&temporary)
                     .is_ok_and(|temp| crate::workspace_symlinks::is_link(&temp) && temp.is_dir())
         {
+            let bytes = serde_json::to_vec(&PendingReplace {
+                relative: relative.to_string(),
+                temporary_name: temp_name.clone(),
+            })
+            .map_err(|e| e.to_string())?;
+            save_atomic_replace(&replacing_marker, &bytes)?;
+            recorded_replace = true;
             crate::workspace_symlinks::remove(&target)?;
         } else {
             crate::workspace_cleanup::clear_readonly_attribute(&target, &metadata)
@@ -548,12 +723,22 @@ fn install_file_with_tracked(
     }
     fs::rename(&temporary, &target)
         .map_err(|e| format!("Cannot atomically install '{relative}': {e}"))?;
-    sync_directory(&parent)
+    if recorded_replace {
+        let _ = fs::remove_file(&replacing_marker);
+    }
+    if let Some(dirty) = dirty_parents {
+        dirty.insert(parent);
+        Ok(())
+    } else {
+        sync_directory(&parent)
+    }
 }
 
 /// Remove only this journal's reserved adjacent temporaries before capturing
 /// the live tree. Collection intentionally includes ordinary dotfiles, so a
-/// stopped copy must not be mistaken for an unrelated source edit.
+/// stopped copy must not be mistaken for an unrelated source edit. Also finish
+/// any journaled directory-spelling hop or symlink replacement interrupted
+/// between unlink and rename.
 pub(super) fn cleanup_temporaries(
     repository: &Path,
     journal: &Path,
@@ -563,7 +748,67 @@ pub(super) fn cleanup_temporaries(
     if read_optional(&journal.join("applying"))?.as_deref() != Some(b"atomic-files-v1\n") {
         return Ok(());
     }
-    for relative in diff_paths(repository, input, result)? {
+    // Recover an interrupted two-step directory case/Unicode rename before any
+    // path checks or live-tree scans observe the temporary hop name.
+    let renaming_dir = journal.join("renaming-dir.json");
+    if let Some(bytes) = read_optional(&renaming_dir)? {
+        let pending: PendingDirRename =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        validate_relative(&pending.hop_relative)?;
+        validate_relative(&pending.target_relative)?;
+        let hop = repository.join(&pending.hop_relative);
+        let target = repository.join(&pending.target_relative);
+        if fs::symlink_metadata(&hop).is_ok() && fs::symlink_metadata(&target).is_err() {
+            fs::rename(&hop, &target).map_err(|e| e.to_string())?;
+            if let Some(parent) = target.parent() {
+                sync_directory(parent)?;
+            }
+        }
+        let _ = fs::remove_file(&renaming_dir);
+    }
+    let changed = diff_paths(repository, input, result)?;
+    let journal_key =
+        crate::path_identity::actual_path(journal).unwrap_or_else(|_| journal.to_path_buf());
+    let owners = load_owners(journal)?;
+    // Recover an interrupted unlink-then-rename replacement (for example a
+    // Windows symlink replacement killed between remove and rename) when the
+    // owned temporary already holds the verified final entry.
+    let replacing_marker = journal.join("replacing.json");
+    if let Some(bytes) = read_optional(&replacing_marker)? {
+        let pending: PendingReplace =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        validate_relative(&pending.relative)?;
+        let target = repository.join(&pending.relative);
+        let parent = target.parent().ok_or("Missing publication parent")?;
+        let owned = owners.get(&pending.temporary_name).map(String::as_str)
+            == Some(pending.relative.as_str())
+            || read_optional(&journal.join(&pending.temporary_name).with_extension("owner"))?
+                .as_deref()
+                == Some(pending.relative.as_bytes());
+        if owned && fs::symlink_metadata(&target).is_err() {
+            let temporary = parent.join(&pending.temporary_name);
+            if fs::symlink_metadata(&temporary).is_ok() && changed.contains(&pending.relative) {
+                let single = BTreeSet::from([pending.relative.clone()]);
+                let expected = entries(repository, result, &single)?;
+                let temp_rel = match Path::new(&pending.relative).parent() {
+                    Some(prefix) if !prefix.as_os_str().is_empty() => format!(
+                        "{}/{}",
+                        prefix.to_string_lossy().replace('\\', "/"),
+                        pending.temporary_name
+                    ),
+                    _ => pending.temporary_name.clone(),
+                };
+                if let Some(entry) = expected.get(&pending.relative) {
+                    if matches_entries(repository, &temp_rel, &[Some(entry)])? {
+                        fs::rename(&temporary, &target).map_err(|e| e.to_string())?;
+                        sync_directory(parent)?;
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_file(&replacing_marker);
+    }
+    for relative in changed {
         let target = repository.join(&relative);
         let parent = target.parent().ok_or("Missing publication parent")?;
         if parent != repository
@@ -576,13 +821,14 @@ pub(super) fn cleanup_temporaries(
             // ancestor position; there cannot be an owned temp beneath it.
             continue;
         }
-        let temporary = temporary_path(parent, journal, &relative);
-        let record = journal
-            .join(temporary.file_name().ok_or("Missing temporary name")?)
-            .with_extension("owner");
-        if read_optional(&record)?.as_deref() != Some(relative.as_bytes()) {
+        let temp_name = temporary_name_for_key(&journal_key, &relative);
+        let owned = owners.get(&temp_name).map(String::as_str) == Some(relative.as_str())
+            || read_optional(&journal.join(&temp_name).with_extension("owner"))?.as_deref()
+                == Some(relative.as_bytes());
+        if !owned {
             continue;
         }
+        let temporary = parent.join(&temp_name);
         if fs::symlink_metadata(&temporary).is_ok() {
             crate::workspace_symlinks::remove(&temporary)?;
         }
@@ -711,6 +957,10 @@ fn install_with(
     let old = entries(repository, input, &changed)?;
     let new = entries(repository, result, &changed)?;
     let case_insensitive = crate::path_identity::case_insensitive_volume(repository);
+    let old_index = PublicationAliasIndex::new(&old, case_insensitive);
+    let new_index = PublicationAliasIndex::new(&new, case_insensitive);
+    let journal_key =
+        crate::path_identity::actual_path(journal).unwrap_or_else(|_| journal.to_path_buf());
     // `new` contains only changed result entries; deleted paths have no entry.
     // Neither the staging index nor checkout needs unrelated project files.
     let staged = stage_entries(repository, journal, &new)?;
@@ -723,6 +973,7 @@ fn install_with(
         .collect();
     removed.sort_by_key(|path| std::cmp::Reverse(path.len()));
     let tracked_cell = std::cell::OnceCell::new();
+    let mut dirty_removed_parents: BTreeSet<PathBuf> = BTreeSet::new();
     for relative in removed {
         crate::process_control::check_current_owner_stop()?;
         let target = repository.join(relative);
@@ -733,7 +984,7 @@ fn install_with(
         let mut replaced_ancestor = false;
         for ancestor in Path::new(relative).ancestors().skip(1) {
             if let Some(name) = ancestor.to_str().filter(|name| !name.is_empty()) {
-                if let Some((matched_name, entry)) = alias_entry(&new, name, case_insensitive) {
+                if let Some((matched_name, entry)) = new_index.get(name) {
                     if matches_entries(repository, matched_name, &[Some(entry)])? {
                         replaced_ancestor = true;
                         break;
@@ -749,7 +1000,7 @@ fn install_with(
         {
             continue;
         }
-        let new_candidate = alias_entry(&new, relative, case_insensitive);
+        let new_candidate = new_index.get(relative);
         verify_target_candidates(
             repository,
             relative,
@@ -766,7 +1017,7 @@ fn install_with(
                 if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) =>
             {
                 crate::workspace_symlinks::remove(&target)?;
-                sync_directory(parent)?;
+                dirty_removed_parents.insert(parent.to_path_buf());
             }
             Ok(_) => {} // Already replaced by a directory in an earlier partial attempt.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -776,12 +1027,25 @@ fn install_with(
         while empty != repository
             && remove_publication_dir(repository, empty, Some(&tracked_cell)).is_ok()
         {
+            dirty_removed_parents.remove(empty);
             empty = empty.parent().ok_or("Missing publication ancestor")?;
+            dirty_removed_parents.insert(empty.to_path_buf());
         }
     }
+    for parent in dirty_removed_parents {
+        if parent.is_dir() {
+            sync_directory(&parent)?;
+        }
+    }
+    // Reserve ownership for every changed result temporary in one synced
+    // manifest instead of creating and fsyncing a separate `.owner` per file.
+    if !new.is_empty() {
+        reserve_owners(repository, journal, &journal_key, &new)?;
+    }
+    let mut dirty_installed_parents: BTreeSet<PathBuf> = BTreeSet::new();
     for relative in changed.iter().filter(|p| new.contains_key(*p)) {
         crate::process_control::check_current_owner_stop()?;
-        let old_alias = alias_entry(&old, relative, case_insensitive).map(|(_, entry)| entry);
+        let old_alias = old_index.get(relative).map(|(_, entry)| entry);
         // Validate before copying and again afterward, including files that
         // have already reached the result during an interrupted attempt.
         // A missing parent is created by install_file only after this check.
@@ -793,10 +1057,13 @@ fn install_with(
         install_file_with_tracked(
             repository,
             journal,
+            &journal_key,
             &staged.join(relative),
             relative,
             &new[relative].mode,
             Some(&tracked_cell),
+            true,
+            Some(&mut dirty_installed_parents),
             &mut |temporary| {
                 before_rename(temporary)?;
                 verify_target_candidates(
@@ -806,6 +1073,9 @@ fn install_with(
                 )
             },
         )?;
+    }
+    for parent in dirty_installed_parents {
+        sync_directory(&parent)?;
     }
     Ok(())
 }
@@ -1539,5 +1809,68 @@ mod tests {
             "now a file"
         );
         assert!(disk_relative_matches(&source, &source.join(target_file), target_file));
+    }
+
+    #[test]
+    fn cleanup_temporaries_recovers_interrupted_replace_and_dir_rename() {
+        let (_temp, source, node, journal, _input) = fixture();
+        fs::create_dir(source.join("sub")).unwrap();
+        fs::write(source.join("sub/item.txt"), "old").unwrap();
+        let input = workspace::snapshot_repository(&source).unwrap();
+        let node = node.with_file_name("recover-node");
+        workspace::prepare(&source, &node, &input, &[]).unwrap();
+        fs::write(node.join("file.txt"), "new-file").unwrap();
+        fs::write(node.join("sub/item.txt"), "new-item").unwrap();
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+
+        fs::write(journal.join("applying"), b"atomic-files-v1\n").unwrap();
+        let journal_key = crate::path_identity::actual_path(&journal).unwrap();
+        let temp_name = temporary_name_for_key(&journal_key, "file.txt");
+        let mut owners = BTreeMap::new();
+        owners.insert(temp_name.clone(), "file.txt".to_string());
+        fs::write(
+            journal.join("owners.json"),
+            serde_json::to_vec(&owners).unwrap(),
+        )
+        .unwrap();
+
+        // Simulate crash between unlinking `file.txt` and renaming its verified temporary.
+        fs::remove_file(source.join("file.txt")).unwrap();
+        fs::write(source.join(&temp_name), "new-file").unwrap();
+        fs::write(
+            journal.join("replacing.json"),
+            serde_json::to_vec(&PendingReplace {
+                relative: "file.txt".into(),
+                temporary_name: temp_name.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Simulate crash between step 1 (`sub` -> hop) and step 2 (hop -> `sub`) of dir rename.
+        let hop_name = ".grapher-publish-rename-test-hop";
+        fs::rename(source.join("sub"), source.join(hop_name)).unwrap();
+        fs::write(
+            journal.join("renaming-dir.json"),
+            serde_json::to_vec(&PendingDirRename {
+                hop_relative: hop_name.into(),
+                target_relative: "sub".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        cleanup_temporaries(&source, &journal, &input, &result).unwrap();
+        assert_eq!(fs::read_to_string(source.join("file.txt")).unwrap(), "new-file");
+        assert!(!source.join(&temp_name).exists());
+        assert!(!journal.join("replacing.json").exists());
+        assert!(source.join("sub").is_dir());
+        assert!(!source.join(hop_name).exists());
+        assert!(!journal.join("renaming-dir.json").exists());
+        assert_eq!(fs::read_to_string(source.join("sub/item.txt")).unwrap(), "old");
+
+        // Subsequent install finishes cleanly.
+        install(&source, &journal, &input, &result).unwrap();
+        assert_eq!(fs::read_to_string(source.join("sub/item.txt")).unwrap(), "new-item");
     }
 }

@@ -368,7 +368,19 @@ export function repairStreamingMarkdown(text: string): string {
 }
 
 type InlineEntry = { context: string; tokens: Token[]; state: InstanceType<typeof marked.Lexer>["state"] };
-type BlockEntry = { token: Token; html: string };
+type BlockEntry = { token: Token; html: string; sanitized?: string };
+
+function tokenContainsRawHtml(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(tokenContainsRawHtml);
+  const record = value as Record<string, unknown>;
+  if (record.type === "html") return true;
+  if (typeof record.raw === "string" && !record.raw.includes("<")) return false;
+  for (const key of ["tokens", "items", "header", "rows"]) {
+    if (record[key] !== undefined && tokenContainsRawHtml(record[key])) return true;
+  }
+  return false;
+}
 
 /** Re-lex block structure so appended tables, setext headings and reference definitions
  * remain authoritative. Cache unchanged inline work and block HTML, not a guessed "stable"
@@ -380,7 +392,7 @@ export class StreamingMarkdownCache {
   private links = "";
   readonly stats = { inlineCharacters: 0, parsedBlocks: 0 };
 
-  render(content: string, streaming: boolean): string {
+  renderBlocks(content: string, streaming: boolean): { html: string; blocks: string[] | null } {
     const source = (streaming ? repairStreamingMarkdown(content) : content).replace(/\r\n|\r/g, "\n");
     const options = { ...marked.defaults, gfm: true, breaks: true };
     const lexer = new marked.Lexer(options);
@@ -406,17 +418,22 @@ export class StreamingMarkdownCache {
       if (entries) entries.push(saved); else nextInline.set(entry.src, [saved]);
     }
     this.inline = nextInline;
+    const hasRawHtml = tokenContainsRawHtml(lexer.tokens);
     const parser = new marked.Parser(options);
     const nextBlocks = new Map<string, BlockEntry>();
-    const html: string[] = [];
+    const rawHtmlParts: string[] = [];
+    const sanitizedParts: string[] = [];
     for (let index = 0; index < lexer.tokens.length; index++) {
       const token = lexer.tokens[index];
+      if (token.type === "space") continue;
       // Marked joins adjacent text tokens into one paragraph; keep that exact rule.
       if (token.type === "text") {
         const group = [token];
         while (lexer.tokens[index + 1]?.type === "text") group.push(lexer.tokens[++index]);
-        html.push(parser.parse(group));
+        const rendered = parser.parse(group);
         this.stats.parsedBlocks++;
+        if (hasRawHtml) rawHtmlParts.push(rendered);
+        else sanitizedParts.push(sanitizeHtml(rendered));
         continue;
       }
       const key = `${token.type}\0${token.raw}`;
@@ -424,11 +441,23 @@ export class StreamingMarkdownCache {
       const same = cached && shareJson(cached.token, token) === cached.token;
       const rendered = same ? cached.html : parser.parse([token]);
       if (!same) this.stats.parsedBlocks++;
-      nextBlocks.set(key, { token: same ? cached.token : token, html: rendered });
-      html.push(rendered);
+      let sanitized = same ? cached.sanitized : undefined;
+      if (!hasRawHtml && sanitized === undefined) {
+        sanitized = sanitizeHtml(rendered);
+      }
+      nextBlocks.set(key, { token: same ? cached.token : token, html: rendered, sanitized });
+      if (hasRawHtml) rawHtmlParts.push(rendered);
+      else sanitizedParts.push(sanitized!);
     }
     this.blocks = nextBlocks;
-    // Sanitize the joined HTML, not individual blocks: dangerous tags can span blocks.
-    return sanitizeHtml(html.join(""));
+    // When raw HTML tokens exist, dangerous tags can span blocks so sanitize joined HTML.
+    if (hasRawHtml) {
+      return { html: sanitizeHtml(rawHtmlParts.join("")), blocks: null };
+    }
+    return { html: sanitizedParts.join(""), blocks: sanitizedParts };
+  }
+
+  render(content: string, streaming: boolean): string {
+    return this.renderBlocks(content, streaming).html;
   }
 }

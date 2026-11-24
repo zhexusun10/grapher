@@ -56,7 +56,16 @@ export function registerWorkspaceTools(
   workspaceGetter: () => string = () => workspace,
   options: CaseSensitivityOptions = {},
 ) {
-  const physical = (input: string) => workspacePathMapper(workspaceGetter(), project, alias, options)(input);
+  let cachedWorkspace: string | undefined;
+  let cachedMapper: ((input: string) => string) | undefined;
+  const physical = (input: string) => {
+    const current = workspaceGetter();
+    if (!cachedMapper || current !== cachedWorkspace) {
+      cachedWorkspace = current;
+      cachedMapper = workspacePathMapper(current, project, alias, options);
+    }
+    return cachedMapper(input);
+  };
   // ls/find/grep are deliberately absent for every project and role: search and
   // listing go through Bash, so the model-facing tool surface stays read/write/edit.
   for (const factory of [createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition]) {

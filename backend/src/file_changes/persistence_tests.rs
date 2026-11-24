@@ -20,7 +20,9 @@ fn summary(path: &str, source: &str, additions: usize) -> FileChangeSummary {
 }
 
 fn put(run: &str, execution: &str, path: &str, additions: usize) {
-    cache().lock().unwrap().git_changes.insert(
+    let mut guard = cache().lock().unwrap();
+    guard.note_mutation(run);
+    guard.git_changes.insert(
         (run.into(), execution.into()),
         summary(path, "git", additions),
     );
@@ -292,4 +294,54 @@ fn failed_save_keeps_prior_sidecar_and_releases_the_writer_for_retry() {
     persist(temp.path(), &run).unwrap();
     assert_eq!(read_persisted(&path).executions.len(), 2);
     invalidate_run(&run);
+}
+
+#[test]
+fn clean_hydrated_runs_are_lru_bounded_without_dropping_dirty_runs_or_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let dirty_run = uuid::Uuid::new_v4().to_string();
+    put(&dirty_run, "exec", "dirty.txt", 9);
+
+    let mut clean_runs = Vec::new();
+    for idx in 0..(MAX_CLEAN_HYDRATED_RUNS + 5) {
+        let run = uuid::Uuid::new_v4().to_string();
+        put(&run, "exec", &format!("file-{idx}.txt"), idx + 1);
+        persist(temp.path(), &run).unwrap();
+        clean_runs.push(run);
+    }
+
+    {
+        let guard = cache().lock().unwrap();
+        let retained_clean = clean_runs
+            .iter()
+            .filter(|run| guard.hydrated_runs.contains(*run))
+            .count();
+        assert!(
+            retained_clean <= MAX_CLEAN_HYDRATED_RUNS,
+            "clean hydrated runs should be bounded ({retained_clean})"
+        );
+        assert!(
+            !guard.hydrated_runs.contains(&clean_runs[0]),
+            "oldest clean run should be evicted first"
+        );
+        assert!(
+            guard.git_changes.contains_key(&(dirty_run.clone(), "exec".into())),
+            "unpersisted dirty run must never be evicted"
+        );
+    }
+
+    // Re-accessing an evicted run seamlessly restores its durable sidecar.
+    hydrate_run(temp.path(), &clean_runs[0]);
+    assert!(
+        cache()
+            .lock()
+            .unwrap()
+            .log_changes
+            .contains_key(&(clean_runs[0].clone(), "exec".into()))
+    );
+
+    invalidate_run(&dirty_run);
+    for run in clean_runs {
+        invalidate_run(&run);
+    }
 }

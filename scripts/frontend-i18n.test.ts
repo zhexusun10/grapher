@@ -138,7 +138,13 @@ test("provider errors include actionable hints and role localization", () => {
 
   const authZh = localizeError("Planner failed: 401: Invalid API Key", "zh-CN");
   assert.ok(authZh.includes("任务规划器 (Planner) 失败:"));
-  assert.ok(authZh.includes("认证失败或 API Key 无效"));
+  assert.ok(authZh.includes("认证失败或凭据无效/已过期"));
+  assert.ok(authZh.includes("重新登录"));
+
+  const oauthZh = localizeError("Authentication failed. Check provider configuration and try again.", "zh-CN");
+  assert.ok(oauthZh.includes("凭据无效/已过期"));
+  assert.ok(oauthZh.includes("重新登录"));
+  assert.ok(!oauthZh.includes("API Key 无效"), "OAuth failures should not be presented as API-key-only issues");
 
   const abortZh = localizeError("Partitioner failed: Pi exited with exit code: 0xc0000409", "zh-CN");
   assert.ok(abortZh.includes("子进程异常退出 (0xc0000409)"));

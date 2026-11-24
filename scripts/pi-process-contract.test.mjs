@@ -14,6 +14,16 @@ import { root, lock } from './pi-baseline.mjs';
 // CLI flags and DTO drift that a types-only compatibility probe cannot see.
 const resolverUrl = pathToFileURL(join(root, 'pi/packages/coding-agent/src/experimental/source-resolver.ts')).href;
 
+// Ensure direct `node --test scripts/pi-process-contract.test.mjs` runs inside
+// an outer Grapher/Pi shell do not leak outer Run/session bindings into child probes.
+for (const key of Object.keys(process.env)) {
+  const upper = key.toUpperCase();
+  if ((upper.startsWith('GRAPHER_') && !['GRAPHER_TRUSTED_GIT', 'GRAPHER_TRUSTED_NODE', 'GRAPHER_NODE_PATH', 'GRAPHER_MANAGED_GIT_PATH'].includes(upper)) ||
+      /^PI_(?:SESSION_ID|SESSION_FILE|CODING_AGENT_DIR|CODING_AGENT|MODEL|PROVIDER|REASONING_LEVEL|THINKING)$/i.test(key)) {
+    delete process.env[key];
+  }
+}
+
 function settleRpc(child, role) {
   // Match Rust's Planner/Node/Merger handoff window. Immediate EOF can race extension
   // and source-loader cleanup on Windows/Node 24 (UV_HANDLE_CLOSING assertion).
@@ -118,6 +128,63 @@ test('Provider/Auth Codex browser login exposes method and callback prompts and 
     await call({ operation: 'cancel', id: restarted.id });
     await pollUntil(restarted.id, state => state.status === 'cancelled');
     assert.equal(readFileSync(auth, 'utf8'), original, 'starting and cancelling login never stores credentials');
+    child.stdin.end();
+    assert.equal(await exit, 0, diagnostics);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exit;
+    lines.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Provider/Auth OpenAI OAuth exposes its browser URL and callback prompt', { timeout: 30000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-openai-login-'));
+  const auth = join(directory, 'auth.json');
+  writeFileSync(auth, '{}\n');
+  const child = spawn(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
+    cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: directory, GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exit = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  const lines = createInterface({ input: child.stdout });
+  const replies = lines[Symbol.asyncIterator]();
+  let diagnostics = '';
+  child.stderr.on('data', bytes => { diagnostics += bytes; });
+  async function call(fields) {
+    child.stdin.write(`${JSON.stringify({ version: 1, ...fields })}\n`);
+    const next = await replies.next();
+    assert.equal(next.done, false, diagnostics);
+    const reply = JSON.parse(next.value);
+    assert.ok(reply.result, 'Provider/Auth must not return a transport error');
+    return reply.result;
+  }
+  try {
+    const started = await call({ operation: 'login', provider: 'openai', method: 'oauth' });
+    let state;
+    for (let attempt = 0; attempt < 150; attempt++) {
+      state = await call({ operation: 'poll', id: started.id });
+      if (state.status !== 'pending' || (state.prompt?.type === 'manual_code' && state.events.some(event => event.type === 'auth_url'))) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (state.status === 'failed' && /1455/.test(state.error || '')) {
+      assert.match(state.error, /1455/, 'an occupied OAuth callback port is reported clearly');
+      child.stdin.end();
+      assert.equal(await exit, 0, diagnostics);
+      return;
+    }
+    assert.equal(state.status, 'pending', state.error || 'OpenAI OAuth should remain interactive');
+    assert.equal(state.prompt?.type, 'manual_code');
+    const authorization = state.events.find(event => event.type === 'auth_url');
+    assert.equal(new URL(authorization.url).origin, 'https://auth.openai.com');
+    await call({ operation: 'cancel', id: started.id });
+    for (let attempt = 0; attempt < 150; attempt++) {
+      state = await call({ operation: 'poll', id: started.id });
+      if (state.status === 'cancelled') break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(state.status, 'cancelled');
+    assert.equal(readFileSync(auth, 'utf8'), '{}\n');
     child.stdin.end();
     assert.equal(await exit, 0, diagnostics);
   } finally {

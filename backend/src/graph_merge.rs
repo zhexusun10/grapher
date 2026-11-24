@@ -269,6 +269,15 @@ fn compose_graph_scoped(
             )?;
         }
     }
+    // Verify common project-view ancestry before performing any merges or
+    // invoking a Merger agent so missing/ambiguous evidence fails immediately
+    // instead of after expensive conflict resolution.
+    let preflight_base = git(repository, &["rev-parse", "refs/grapher/base"])
+        .ok()
+        .filter(|base| crate::workspace_view::has_record(source, base));
+    if let Some(base) = preflight_base.as_deref() {
+        crate::workspace_view::composition_base(source, base, heads)?;
+    }
     if let Some(head) = pending(repository) {
         if !heads.contains(&head) {
             return Err(

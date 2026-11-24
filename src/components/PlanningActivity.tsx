@@ -19,7 +19,7 @@ import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, SUMMARY_INITIAL_TRANS
 import { utf8Bytes } from "../lib/BoundedLruCache";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 import type { CardsTransitionPhase } from "./ActivitySummaryRow";
-import { collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem, type HydratedCardPatch } from "../services/cardHydration";
+import { collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem, isItemHydrated, type HydratedCardPatch } from "../services/cardHydration";
 export { planningTranscriptCache } from "../services/transcriptCache";
 export { activePlannerOutput } from "../lib/plannerOutput";
 
@@ -495,7 +495,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     for (const item of targetItems) {
       if (!item.bodyOmitted) continue;
       const itemKey = hydrationKeyForItem(item);
-      if (!itemKey || hydratedCardsRef.current.has(itemKey) || hydratingKeysRef.current.has(itemKey)) continue;
+      if (!itemKey || isItemHydrated(item, hydratedCardsRef.current.get(itemKey)) || hydratingKeysRef.current.has(itemKey)) continue;
       const planningId = item.source && planningIds.includes(item.source) ? item.source : planningIds.at(-1);
       if (!planningId) continue;
       const group = byPlanning.get(planningId) ?? { items: [], keys: [] };

@@ -66,6 +66,43 @@ fn safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+pub(crate) fn is_publication_workspace_checkout(checkout: &str) -> bool {
+    let is_hex16 = |value: &str| value.len() == 16 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if let Some(rest) = checkout.strip_prefix("publication-files-") {
+        if let Some(hex) = rest.strip_suffix(".publication") {
+            return is_hex16(hex);
+        }
+        return is_hex16(rest);
+    }
+    if let Some(hex) = checkout.strip_prefix("publication-view-") {
+        return is_hex16(hex);
+    }
+    false
+}
+
+pub(crate) fn valid_workspace_checkout(checkout: &str) -> bool {
+    if let Some(git) = checkout.strip_prefix(".grapher-git/") {
+        return git
+            .strip_suffix(".git")
+            .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+    if let Some(state) = checkout.strip_prefix(".grapher-state/") {
+        return state.len() == 16 && state.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    if is_publication_workspace_checkout(checkout) {
+        return true;
+    }
+    !checkout.is_empty()
+        && checkout != "."
+        && checkout != ".."
+        && !checkout.contains(['/', '\\', '\0'])
+        && !checkout.starts_with(".grapher-cleanup-")
+        && checkout != ".files"
+        && checkout != ".grapher-git"
+        && checkout != ".grapher-state"
+        && !checkout.starts_with("publication-")
+}
+
 impl Target {
     pub fn data(bucket: &str, id: &str) -> Self {
         Self::Data {
@@ -102,11 +139,18 @@ impl Target {
                     || bucket != ".grapher-worktrees"
                     || Uuid::parse_str(owner).is_err()
                     || owner != run_id
-                    || checkout.is_some()
+                    || checkout
+                        .as_deref()
+                        .is_some_and(|slot| !valid_workspace_checkout(slot))
                 {
                     return Err("Invalid owned workspace directory".into());
                 }
-                (parent.clone(), parent.join(bucket).join(owner))
+                let run_dir = parent.join(bucket).join(owner);
+                let target = match checkout {
+                    Some(slot) => run_dir.join(slot),
+                    None => run_dir,
+                };
+                (parent.clone(), target)
             }
             Self::Shadow { root, name, .. } => {
                 let valid = name
@@ -150,6 +194,19 @@ impl Target {
             bucket: bucket.into(),
             owner: run_id.into(),
             checkout: None,
+        }
+    }
+
+    pub(crate) fn workspace_checkout(
+        parent: &Path,
+        run_id: &str,
+        checkout: impl Into<String>,
+    ) -> Self {
+        Self::Workspace {
+            parent: parent.to_path_buf(),
+            bucket: ".grapher-worktrees".into(),
+            owner: run_id.into(),
+            checkout: Some(checkout.into()),
         }
     }
 }
@@ -353,7 +410,10 @@ pub(crate) fn validate(root: &Path, run_id: &str, manifest: &Manifest) -> Result
 /// Commits that another live Run may still resolve while its node results are
 /// prepared. They keep their `refs/grapher/heads/*` pins during a deleted Run's
 /// object reclamation even if no current ref points at them yet.
-fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<String>, String> {
+pub(crate) fn protected_shadow_objects(
+    store: &Store,
+    excluded: &str,
+) -> Result<BTreeSet<String>, String> {
     let mut protected = BTreeSet::new();
     for id in store.runs()? {
         if id == excluded {
@@ -409,16 +469,63 @@ fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<St
     }
     Ok(protected)
 }
-/// Lifetime checks shared by normal completion and durable cleanup retries.
-/// A matching event sequence proves freshness, not that recovery/result files
-/// are disposable. Retrying an older queued task must honor today's policy.
-pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
-    if state
+fn latest_batch_result_is_current(state: &Snapshot) -> bool {
+    if state.plan_type.as_deref() == Some("serial") {
+        return true;
+    }
+    state
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ResultPublished { .. } => Some(true),
+            EventKind::ExecutionBatchStarted { .. } => Some(false),
+            _ => None,
+        })
+        != Some(false)
+}
+
+/// Explicit fixed-layout policies retain workspaces across completion.
+/// Automatic discovery policies (`automatic-lazy`) only retain workspaces when
+/// an active/failed result execution or a current published result actually
+/// bound a fixed-layout native environment (`launch.environment.is_some()`).
+pub(crate) fn retains_managed_environment_workspaces(root: &Path, state: &Snapshot) -> bool {
+    let Some(policy) = state
         .config
         .as_ref()
         .and_then(|config| config.environment.as_ref())
-        .is_some()
+    else {
+        return false;
+    };
+    if !policy.discovery {
+        return true;
+    }
+    if state
+        .result_execution
+        .as_ref()
+        .is_some_and(|execution| matches!(execution.status.as_str(), "running" | "failed"))
     {
+        return true;
+    }
+    let Some(descriptor) = state.published_result.as_ref() else {
+        return false;
+    };
+    if !latest_batch_result_is_current(state) {
+        return false;
+    }
+    let Ok(store) = crate::environment::Environments::new(root, &state.run_id, policy) else {
+        return true;
+    };
+    std::iter::once(&descriptor.result)
+        .chain(descriptor.entries.iter().map(|entry| &entry.result))
+        .any(|result| store.requires_fixed_layout(&result.launch_ref).unwrap_or(true))
+}
+
+/// Lifetime checks shared by normal completion and durable cleanup retries.
+/// A matching event sequence proves freshness, not that recovery/result files
+/// are disposable. Retrying an older queued task must honor today's policy.
+pub(crate) fn retains_workspaces(root: &Path, state: &Snapshot) -> bool {
+    if retains_managed_environment_workspaces(root, state) {
         return true;
     }
     let serial = state.plan_type.as_deref() == Some("serial");
@@ -480,7 +587,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
             {
                 return Err("Run is active; workspace cleanup is deferred".into());
             }
-            if retains_workspaces(&state) {
+            if retains_workspaces(root, &state) {
                 // Handle/cancel this cleanup generation without dropping its
                 // ownership records. Explicit conversation deletion still owns
                 // eventual removal; a later publication can queue a new task.

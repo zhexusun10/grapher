@@ -27,6 +27,7 @@ import { CreateNodeForm } from "./CreateNodeForm";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { getDesktopTitlebarInset } from "../../services/apiBase";
+import { copyTextToClipboard } from "../../services/externalLink";
 import { deduceRouteType, shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, buildConversationTurns, localMessagesAfterEdit, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
@@ -311,9 +312,8 @@ function NodeErrorPanel({ error, paused }: { error: string; paused?: boolean }) 
   }, []);
   const detail = useMemo(() => localizeError(error), [error]);
   const copy = useCallback(() => {
-    if (!navigator.clipboard?.writeText) return;
-    void navigator.clipboard.writeText(detail).then(() => {
-      if (!mountedRef.current) return;
+    void copyTextToClipboard(detail).then((ok) => {
+      if (!ok || !mountedRef.current) return;
       setCopied(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => {
@@ -1518,7 +1518,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     const scrollbarGesture = scrollbarGestureRef.current;
     if (scrollbarGesture) {
-      if (isScrollingUp) scrollbarGesture.movedUp = true;
+      if (isScrollingUp) {
+        if (distanceFromBottom <= 2 && scrollHeight < prevScrollHeightRef.current) {
+          // Browser bottom-clamp after content shrank while still at the bottom
+          // is not an upward scrollbar drag; rebase the gesture baseline.
+          scrollbarGesture.startTop = scrollTop;
+        } else {
+          scrollbarGesture.movedUp = true;
+        }
+      }
+      prevScrollHeightRef.current = scrollHeight;
       // Keep the gesture locked until pointerup, including the first few
       // pixels inside the bottom threshold and output arriving during a drag.
       setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
@@ -1771,7 +1780,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     };
     // Row-height compensation is not the reader scrolling down. Record its
     // position before the browser dispatches the resulting scroll event.
-    const onTranscriptScrollAdjusted = () => { lastScrollTopRef.current = el.scrollTop; };
+    const onTranscriptScrollAdjusted = () => {
+      lastScrollTopRef.current = el.scrollTop;
+      if (scrollbarGestureRef.current) {
+        scrollbarGestureRef.current.startTop = el.scrollTop;
+      }
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
       if (isNestedScrollGesture(event, el)) return;
@@ -1846,7 +1860,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (!gesture || gesture.pointerId !== event.pointerId) return;
       scrollbarGestureRef.current = null;
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const movedUp = gesture.movedUp || el.scrollTop < gesture.startTop - 1;
+      const clampedAtBottom = gesture.wasFollowing && !gesture.movedUp && distance <= 2;
+      const movedUp = gesture.movedUp || (!clampedAtBottom && el.scrollTop < gesture.startTop - 1);
       const reachedBottom = el.scrollTop > gesture.startTop + 1 && distance <= CONVERSATION_BOTTOM_THRESHOLD;
       if ((gesture.wasFollowing && !movedUp) || reachedBottom) {
         historyReadingRef.current = false;
@@ -1907,8 +1922,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // is already following the newest output.
     const followOutput = !insideActivitySummary && shouldFollowOutput();
     suppressAutoScrollRef.current = true;
-    if (isActivitySummary) {
-      if (expanded) userScrolledAwayRef.current = true;
+    if (insideActivitySummary) {
+      if (expanded) {
+        userScrolledAwayRef.current = true;
+        userGestureUpRef.current = true;
+      }
       setUserScrolledUp(true);
     } else if (!followOutput) {
       setUserScrolledUp(true);
@@ -1930,12 +1948,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         prevScrollHeightRef.current = scroll.scrollHeight;
       }
       suppressAutoScrollRef.current = false;
-      if (isActivitySummary && expanded && scroll) {
+      if (insideActivitySummary && expanded && scroll) {
         const distanceFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-        if (distanceFromBottom > 1) {
-          setScrollBottomVisible(!isUnrunNode && distanceFromBottom > scroll.clientHeight / 2);
-          return;
-        }
+        setScrollBottomVisible(!isUnrunNode && distanceFromBottom > scroll.clientHeight / 2);
+        return;
       }
       handleChatScroll();
     };
@@ -2677,7 +2693,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const {
     summary: workspaceChangesSummary,
     isLoaded: workspaceChangesLoaded,
-    isRefreshing: workspaceChangesRefreshing,
     refreshVersion: workspaceChangesRefreshVersion,
     refresh: refreshWorkspaceChanges,
   } = useWorkspaceChanges({
@@ -2686,6 +2701,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     scopedExecutions: inNodeScope ? attempts : null,
     isWorking: isCurrentViewWorking,
   });
+
+  const changesViewScopeKey = inNodeScope ? `${state.runId}:${selectedNode}` : state.runId;
+  const wasShowingChangesPaneRef = useRef(showingChangesPane);
+  useEffect(() => {
+    const opened = showingChangesPane && !wasShowingChangesPaneRef.current;
+    wasShowingChangesPaneRef.current = showingChangesPane;
+    if (opened) refreshWorkspaceChanges();
+  }, [showingChangesPane, refreshWorkspaceChanges]);
 
   // File-change reads run independently and must not hold up the transcript.
   const revealConversation = useCallback(() => {
@@ -2890,14 +2913,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const [cardsTransition, setCardsTransition] = useState<CardsTransitionPhase>("idle");
   const cardsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cardsSuppressingScrollRef = useRef(false);
+  const releaseCardsScrollSuppression = useCallback((syncScrollState = true) => {
+    if (!cardsSuppressingScrollRef.current) return;
+    cardsSuppressingScrollRef.current = false;
+    suppressAutoScrollRef.current = false;
+    if (syncScrollState && chatScrollRef.current) {
+      lastScrollTopRef.current = chatScrollRef.current.scrollTop;
+      prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      handleChatScroll();
+    }
+  }, [handleChatScroll]);
   const clearCardsTransition = useCallback(() => {
     if (cardsTransitionTimerRef.current !== null) {
       clearTimeout(cardsTransitionTimerRef.current);
       cardsTransitionTimerRef.current = null;
     }
     cancelCardsTransitionAnchor();
+    releaseCardsScrollSuppression(false);
     setCardsTransition("idle");
-  }, []);
+  }, [releaseCardsScrollSuppression]);
   useEffect(() => {
     clearCardsTransition();
     return () => {
@@ -2906,13 +2941,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         cardsTransitionTimerRef.current = null;
       }
       cancelCardsTransitionAnchor();
+      if (cardsSuppressingScrollRef.current) {
+        cardsSuppressingScrollRef.current = false;
+        suppressAutoScrollRef.current = false;
+      }
     };
   }, [conversationViewKey, clearCardsTransition]);
   useLayoutEffect(() => {
     if (cardsTransition === "idle") {
       finishCardsTransitionAnchor();
+      releaseCardsScrollSuppression(true);
     }
-  }, [cardsTransition]);
+  }, [cardsTransition, releaseCardsScrollSuppression]);
   const effectiveCardsCollapsed = cardsCollapsed || cardsTransition === "expanding";
   const toggleCardsCollapsed = useCallback((event?: React.MouseEvent<HTMLButtonElement>) => {
     const el = chatScrollRef.current;
@@ -2933,18 +2973,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       cardsTransitionTimerRef.current = null;
     }
     if (!reduceMotion) {
-      beginCardsTransitionAnchor(el, triggerEl, pinToBottom);
-      setCardsTransition(nextCollapsed ? "collapsing" : "expanding");
-      cardsTransitionTimerRef.current = setTimeout(() => {
-        cardsTransitionTimerRef.current = null;
+      suppressAutoScrollRef.current = true;
+      cardsSuppressingScrollRef.current = true;
+      const finish = () => {
+        if (cardsTransitionTimerRef.current !== null) {
+          clearTimeout(cardsTransitionTimerRef.current);
+          cardsTransitionTimerRef.current = null;
+        }
         setCardsTransition("idle");
-      }, CARDS_TRANSITION_DURATION_MS + 20);
+      };
+      beginCardsTransitionAnchor(el, triggerEl, pinToBottom, finish, () => {
+        releaseCardsScrollSuppression(true);
+      });
+      setCardsTransition(nextCollapsed ? "collapsing" : "expanding");
+      cardsTransitionTimerRef.current = setTimeout(finish, CARDS_TRANSITION_DURATION_MS + 400);
     } else {
       cancelCardsTransitionAnchor();
+      releaseCardsScrollSuppression(true);
       setCardsTransition("idle");
     }
     setCollapseCards(nextCollapsed);
-  }, [cardsCollapsed, reduceMotion, setUserScrolledUp]);
+  }, [cardsCollapsed, reduceMotion, releaseCardsScrollSuppression, setUserScrolledUp]);
 
   const scopedAttemptIdsKey = useMemo(
     () => (inNodeScope ? attempts.map(execution => execution.id).join("\0") : ""),
@@ -3751,6 +3800,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   }],
                                 }}
                                 transitionPhase={cardsTransition}
+                                defaultThinkingExpanded={true}
                                 onExpandedChange={handleExpandableContentChange}
                                 onChildResize={handleExpandableContentChange}
                               />
@@ -4127,12 +4177,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <WorkspaceChangesPane
                           id={changesPanelId}
                           runId={state.runId}
+                          viewScopeKey={changesViewScopeKey}
                           scopedExecutionIds={scopedChangeExecutionIds}
                           summary={workspaceChangesSummary}
                           isLoaded={workspaceChangesLoaded}
-                          isRefreshing={workspaceChangesRefreshing}
                           refreshVersion={workspaceChangesRefreshVersion}
-                          onRefresh={refreshWorkspaceChanges}
                           hasGraphPane={hasGraphPane}
                           onSelectGraph={closeChangesPane}
                           onClose={closeChangesPane}
@@ -4146,12 +4195,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <WorkspaceChangesPane
                   id={changesPanelId}
                   runId={state.runId}
+                  viewScopeKey={changesViewScopeKey}
                   scopedExecutionIds={scopedChangeExecutionIds}
                   summary={workspaceChangesSummary}
                   isLoaded={workspaceChangesLoaded}
-                  isRefreshing={workspaceChangesRefreshing}
                   refreshVersion={workspaceChangesRefreshVersion}
-                  onRefresh={refreshWorkspaceChanges}
                   hasGraphPane={false}
                   onSelectGraph={closeChangesPane}
                   onClose={closeChangesPane}

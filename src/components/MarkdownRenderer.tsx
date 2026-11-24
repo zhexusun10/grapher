@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { StreamingMarkdownCache } from "../services/streamingMarkdown";
 import { observeElementResize } from "../services/sharedResizeObserver";
+import { copyTextToClipboard } from "../services/externalLink";
 import { t } from "../i18n";
 import { useWorkspaceImages } from "./WorkspaceImages";
 
@@ -42,6 +43,65 @@ function syncMarkdownDom(container: HTMLElement, html: string, prevKeys: string[
   return nextKeys;
 }
 
+type DomSyncState =
+  | { mode: "raw"; keys: string[] }
+  | { mode: "blocks"; blocks: string[]; counts: number[] };
+
+function syncMarkdownBlocks(
+  container: HTMLElement,
+  nextBlocks: string[],
+  prev: DomSyncState,
+): DomSyncState {
+  const prevBlocks = prev.mode === "blocks" ? prev.blocks : [];
+  const prevCounts = prev.mode === "blocks" ? prev.counts : [];
+  let prefix = 0;
+  let keepNodes = 0;
+  const maxPrefix = Math.min(prevBlocks.length, nextBlocks.length);
+  while (prefix < maxPrefix && prevBlocks[prefix] === nextBlocks[prefix]) {
+    keepNodes += prevCounts[prefix];
+    prefix++;
+  }
+  if (container.childNodes.length < keepNodes) {
+    prefix = 0;
+    keepNodes = 0;
+  }
+  while (container.childNodes.length > keepNodes) {
+    container.removeChild(container.lastChild!);
+  }
+  const counts = prevCounts.slice(0, prefix);
+  if (prefix < nextBlocks.length) {
+    const template = document.createElement("template");
+    const fragment = document.createDocumentFragment();
+    for (let i = prefix; i < nextBlocks.length; i++) {
+      template.innerHTML = nextBlocks[i];
+      counts.push(template.content.childNodes.length);
+      fragment.appendChild(template.content);
+    }
+    container.appendChild(fragment);
+  }
+  return { mode: "blocks", blocks: nextBlocks, counts };
+}
+
+const STREAMING_CURSOR_TAG_RE = /<\/(?:p|li|code|h[1-6]|blockquote|td)>/i;
+
+function injectCursorIntoBlocks(blocks: string[], cursorHtml: string): string[] {
+  if (blocks.length === 0) return [cursorHtml];
+  const next = blocks.slice();
+  for (let i = next.length - 1; i >= 0; i--) {
+    if (STREAMING_CURSOR_TAG_RE.test(next[i])) {
+      next[i] = injectStreamingCursor(next[i], cursorHtml);
+      return next;
+    }
+  }
+  for (let i = next.length - 1; i >= 0; i--) {
+    if (next[i].includes("</")) {
+      next[i] = injectStreamingCursor(next[i], cursorHtml);
+      return next;
+    }
+  }
+  next[next.length - 1] += cursorHtml;
+  return next;
+}
 interface MarkdownRendererProps {
   content: string;
   className?: string;
@@ -79,25 +139,37 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       copyTimers.current.clear();
     }, []);
 
-    const sanitizedHtml = useMemo(() => {
+    const renderedResult = useMemo(() => {
+      const cursorHtml = '<span class="thinking-streaming-cursor"></span>';
       try {
-        const rendered = cache.current!.render(content, isStreaming);
+        const { html: rendered, blocks } = cache.current!.renderBlocks(content, isStreaming);
+        if (blocks !== null) {
+          const withCursor = isStreaming && streamingCursor
+            ? injectCursorIntoBlocks(blocks, cursorHtml)
+            : blocks;
+          const decoratedBlocks = withCursor.map(block =>
+            block.includes("<pre") ? addCodeCopyButtons(block, copyLabel) : block
+          );
+          return { html: decoratedBlocks.join(""), blocks: decoratedBlocks };
+        }
         const html = isStreaming && streamingCursor
-          ? injectStreamingCursor(rendered, '<span class="thinking-streaming-cursor"></span>')
+          ? injectStreamingCursor(rendered, cursorHtml)
           : rendered;
-        return addCodeCopyButtons(html, copyLabel);
+        return { html: addCodeCopyButtons(html, copyLabel), blocks: null };
       } catch (err) {
         console.error("Markdown parse error:", err);
         const fallback = `<p>${escapeHtml(content)}</p>`;
-        return isStreaming && streamingCursor
-          ? injectStreamingCursor(fallback, '<span class="thinking-streaming-cursor"></span>')
+        const html = isStreaming && streamingCursor
+          ? injectStreamingCursor(fallback, cursorHtml)
           : fallback;
+        return { html, blocks: [html] };
       }
     }, [content, isStreaming, streamingCursor, copyLabel]);
+    const sanitizedHtml = renderedResult.html;
 
     const imageScopeKey = useWorkspaceImages(root, sanitizedHtml);
     const hasCodeBlocks = sanitizedHtml.includes("code-block-wrapper");
-    const prevNodeKeysRef = useRef<string[]>([]);
+    const domSyncRef = useRef<DomSyncState>({ mode: "blocks", blocks: [], counts: [] });
     const lastContainerRef = useRef<HTMLDivElement | null>(null);
 
     useLayoutEffect(() => {
@@ -105,11 +177,16 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       if (!container) return;
       if (lastContainerRef.current !== container) {
         lastContainerRef.current = container;
-        prevNodeKeysRef.current = [];
+        domSyncRef.current = { mode: "blocks", blocks: [], counts: [] };
       }
-      prevNodeKeysRef.current = syncMarkdownDom(container, sanitizedHtml, prevNodeKeysRef.current);
+      if (renderedResult.blocks !== null) {
+        domSyncRef.current = syncMarkdownBlocks(container, renderedResult.blocks, domSyncRef.current);
+      } else {
+        const prevKeys = domSyncRef.current.mode === "raw" ? domSyncRef.current.keys : [];
+        domSyncRef.current = { mode: "raw", keys: syncMarkdownDom(container, sanitizedHtml, prevKeys) };
+      }
       if (hasCodeBlocks) syncCodeBlockOverflow(container);
-    }, [sanitizedHtml, imageScopeKey, hasCodeBlocks]);
+    }, [renderedResult, sanitizedHtml, imageScopeKey, hasCodeBlocks]);
 
     useEffect(() => {
       if (!hasCodeBlocks) return;
@@ -123,12 +200,12 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       const copyBtn = target instanceof Element ? target.closest<HTMLButtonElement>("button.code-copy-btn") : null;
       if (!copyBtn || !event.currentTarget.contains(copyBtn)) return;
       const codeBlock = copyBtn.closest(".code-block-wrapper")?.querySelector("pre code");
-      if (!codeBlock || !navigator.clipboard?.writeText) return;
+      if (!codeBlock) return;
       event.preventDefault();
       event.stopPropagation();
 
       try {
-        await navigator.clipboard.writeText(codeBlock.textContent || "");
+        if (!await copyTextToClipboard(codeBlock.textContent || "")) return;
         if (!copyBtn.isConnected) return;
         clearTimeout(copyTimers.current.get(copyBtn));
         copyBtn.classList.add("copied");

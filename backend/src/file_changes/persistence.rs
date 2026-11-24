@@ -111,9 +111,10 @@ fn persist_with(root: &Path, run: &str, after_capture: impl FnOnce()) -> Result<
     let lock = write_lock(root, run)?;
     let _writer = lock.lock().map_err(|e| e.to_string())?;
     let previous = read_persisted(&path);
-    let captured = {
+    let (captured, captured_seq) = {
         let guard = cache().lock().map_err(|e| e.to_string())?;
-        CacheSnapshot::capture(&guard, run)
+        let seq = guard.mutation_seq.get(run).copied().unwrap_or(0);
+        (CacheSnapshot::capture(&guard, run), seq)
     };
     after_capture();
     let persisted = captured.merge_into(previous);
@@ -131,6 +132,9 @@ fn persist_with(root: &Path, run: &str, after_capture: impl FnOnce()) -> Result<
     let temporary = path.with_file_name("changes.json.tmp");
     fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
     fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = cache().lock() {
+        guard.mark_persisted_if_unchanged(run, captured_seq);
+    }
     Ok(())
 }
 

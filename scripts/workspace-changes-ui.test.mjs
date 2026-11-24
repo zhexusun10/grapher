@@ -496,7 +496,7 @@ for (const mode of ["serial", "planner"]) {
   });
 }
 
-test("expanding a file row lazy-loads its unified diff, caches re-expansions, and refreshes on demand", { timeout: 30_000 }, async () => {
+test("expanding a file row lazy-loads its unified diff, caches re-expansions, and refreshes on panel reopen", { timeout: 30_000 }, async () => {
   const diffRequests = [];
   let changeRequests = 0;
   const { page, context, errors } = await fixture(
@@ -559,12 +559,42 @@ test("expanding a file row lazy-loads its unified diff, caches re-expansions, an
     await panel.locator('[data-file-path="src/assets/logo.bin"] .changed-file-row').click();
     await expect(panel.locator('[data-file-path="src/assets/logo.bin"]')).toContainText("Binary file");
 
-    // Clicking Refresh forces both summary & expanded diff reloads.
+    // Reopening the pane refreshes the summary and invalidates stale diff data.
     const beforeChangeReads = changeRequests;
     const beforeDiffReads = diffRequests.length;
-    await page.getByTestId("workspace-changes-refresh").click();
+    await trigger.click();
+    await expect(page.getByTestId("workspace-changes-pane")).toHaveCount(0);
+    await trigger.click();
     await expect.poll(() => changeRequests).toBeGreaterThan(beforeChangeReads);
+    await panel.locator('[data-file-path="src/components/Button.tsx"] .changed-file-row').click();
     await expect.poll(() => diffRequests.length).toBeGreaterThan(beforeDiffReads);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("an expanded file diff survives live updates that add an execution attempt", { timeout: 30_000 }, async () => {
+  const changeRequests = [];
+  const diffRequests = [];
+  const { page, context, errors } = await fixture("node&metadata=1&grow-attempts=1", undefined, body => {
+    changeRequests.push(body);
+    return changesResult(["src/live.ts"]);
+  }, undefined, "networkidle", body => {
+    diffRequests.push(body);
+    return defaultDiffFor(body);
+  });
+  try {
+    await page.getByTestId("workspace-changes-trigger").click();
+    const panel = page.getByTestId("workspace-changes-panel");
+    const item = panel.locator('[data-file-path="src/live.ts"]');
+    const row = item.locator(".changed-file-row");
+    await row.click();
+    await expect(row).toHaveAttribute("aria-expanded", "true");
+
+    await page.evaluate(() => window.changesAudit.update());
+    await expect.poll(() => changeRequests.some(request => request.executionIds?.includes("execution-prior"))).toBe(true);
+    await expect(row).toHaveAttribute("aria-expanded", "true");
+    await expect(item.getByTestId("changed-file-diff")).toBeVisible();
+    await expect.poll(() => diffRequests.some(request => request.executionIds?.includes("execution-prior"))).toBe(true);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1914,26 +1944,44 @@ test("live collapsed summary strip stays compact without stretching horizontally
     const trigger = page.getByTestId("activity-summary-trigger").first();
     await expect(trigger).toBeVisible();
     await expect(trigger).toContainText("Running 1 command");
-    const w1 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+    await trigger.click();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const expandedPosition = await trigger.evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    });
+    const w1 = Math.round(expandedPosition.width);
 
     currentLog = step2;
     await page.evaluate(() => window.changesAudit.update());
     await page.waitForTimeout(450);
     await expect(trigger).toContainText("Running 1 command");
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
     const w2 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
 
     currentLog = step3;
     await page.evaluate(() => window.changesAudit.update());
     await expect(trigger).toContainText("Ran 1 command");
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
     const w3 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
 
     currentLog = step4;
     await page.evaluate(() => window.changesAudit.update());
     await expect(trigger).toContainText("Ran 2 commands");
-    const w4 = await trigger.evaluate(el => Math.round(el.getBoundingClientRect().width));
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const afterPosition = await trigger.evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    });
+    const w4 = Math.round(afterPosition.width);
 
+    const rowWidth = await trigger.evaluate(el => Math.round(el.parentElement.getBoundingClientRect().width));
+    assert.ok(w1 < rowWidth * 0.6, `collapsed summary trigger should stay compact to its label instead of spanning the full row: ${JSON.stringify({ w1, rowWidth })}`);
+    assert.ok(Math.abs(afterPosition.left - expandedPosition.left) <= 1.5,
+      `expanded summary jumped horizontally after live updates: ${JSON.stringify({ expandedPosition, afterPosition })}`);
     assert.ok(w2 <= w1 + 20, `single running tool stretched strip horizontally: ${JSON.stringify({ w1, w2, w3, w4 })}`);
     assert.ok(w3 <= w1 + 20, `single completed tool in open live group stretched strip horizontally: ${JSON.stringify({ w1, w2, w3, w4 })}`);
+    assert.ok(w4 <= w1 + 30, `summary strip stretched unexpectedly when another tool arrived: ${JSON.stringify({ w1, w2, w3, w4 })}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -2037,3 +2085,484 @@ test("expanding all cards does not replay the expand animation for already-opene
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("live updates after expanding a collapsed summary strip never remount it, jump back to the strip, or close open tool output", { timeout: 30_000 }, async () => {
+  const longOutput = Array.from({ length: 60 }, (_, idx) => `tool-1 output line ${idx + 1}: verifying scroll stability`).join("\n");
+  const step1 = [
+    JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+    }),
+    JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Inspecting workspace files before editing." },
+    }),
+    JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
+    }),
+  ].join("\n") + "\n";
+  const step2 = step1 + [
+    JSON.stringify({ type: "tool_execution_start", toolCallId: "live-t1", toolName: "bash", args: { command: "cat build.log" } }),
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "live-t1",
+      toolName: "bash",
+      isError: false,
+      result: { content: [{ type: "text", text: longOutput }], details: { exitCode: 0 } },
+    }),
+    JSON.stringify({ type: "tool_execution_start", toolCallId: "live-t2", toolName: "bash", args: { command: "npm test" } }),
+  ].join("\n") + "\n";
+  // Tool 2 finishes: hasRunning flips true -> false at index === 0!
+  const step3 = step2 + JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "live-t2",
+    toolName: "bash",
+    isError: false,
+    result: { content: [{ type: "text", text: "LIVE_T2_DONE_OK" }], details: { exitCode: 0 } },
+  }) + "\n";
+  // Tool 3 starts: hasRunning flips false -> true!
+  const step4 = step3 + JSON.stringify({
+    type: "tool_execution_start",
+    toolCallId: "live-t3",
+    toolName: "bash",
+    args: { command: "git status" },
+  }) + "\n";
+  // Tool 3 finishes and assistant text arrives after the group!
+  const step5 = step4 + [
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "live-t3",
+      toolName: "bash",
+      isError: false,
+      result: { content: [{ type: "text", text: "On branch main" }], details: { exitCode: 0 } },
+    }),
+    JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "All checks completed cleanly.\n\n".repeat(12) }],
+      },
+    }),
+  ].join("\n") + "\n";
+
+  let currentLog = step1;
+  let running = true;
+  const context = await browser.newContext({ viewport: { width: 1280, height: 640 }, locale: "en-US" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "get_execution_output") {
+      const bytes = Buffer.from(currentLog);
+      const startOffset = body.tail ? 0 : Math.min(body.offset ?? 0, bytes.length);
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: bytes.subarray(startOffset).toString(),
+        startOffset, nextOffset: bytes.length, totalBytes: bytes.length,
+        complete: true, status: running ? "running" : "completed",
+      } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null, executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=serial&settled=0&bytes=${Buffer.byteLength(step1)}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+
+    const trigger = page.getByTestId("activity-summary-trigger").first();
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await page.waitForTimeout(340);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    // Tag the mounted ActivitySummaryRow DOM node so any unmount/remount is caught.
+    await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="activity-summary-row"]');
+      if (row) row.dataset.mountToken = "keep-alive";
+    });
+
+    // Update 1: Thinking-only group receives its first tool calls (tool 1 done + tool 2 running).
+    currentLog = step2;
+    await page.evaluate(() => window.changesAudit.update());
+    const toolCards = page.getByTestId("activity-summary-cards").getByTestId("tool-call-card");
+    await expect(toolCards).toHaveCount(2);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    assert.equal(
+      await page.evaluate(() => document.querySelector('[data-testid="activity-summary-row"]')?.dataset.mountToken),
+      "keep-alive",
+      "expanding a thinking-only summary must not unmount when the first tool call arrives",
+    );
+
+    // Open tool 1 to inspect its output, tag its DOM node, and scroll inside both the
+    // conversation scroller and the tool output <pre> so the user is actively reading it.
+    const tool1Header = toolCards.nth(0).locator(".tool-call-header");
+    await tool1Header.click();
+    await page.waitForTimeout(450);
+    await expect(tool1Header).toHaveAttribute("aria-expanded", "true");
+    await expect(toolCards.nth(0).locator("pre.tool-result-code")).toBeVisible();
+
+    const readingPosition = await page.evaluate(() => {
+      const card = document.querySelectorAll('[data-testid="activity-summary-cards"] [data-testid="tool-call-card"]')[0];
+      card.dataset.toolMountToken = "tool1-alive";
+      const pre = card.querySelector("pre.tool-result-code");
+      if (pre && pre.scrollHeight > pre.clientHeight) pre.scrollTop = 120;
+      const scroller = document.querySelector(".initial-query-scroll");
+      if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+        scroller.scrollTop = Math.min(scroller.scrollHeight - scroller.clientHeight, Math.max(scroller.scrollTop, 90));
+      }
+      return {
+        scrollerTop: scroller ? Math.round(scroller.scrollTop) : 0,
+        preTop: pre ? Math.round(pre.scrollTop) : 0,
+        cardTop: Math.round(card.getBoundingClientRect().top),
+      };
+    });
+
+    // Apply each live update: tool 2 ends, tool 3 starts, tool 3 ends + text arrives, and execution settles.
+    for (const [label, nextLog, nextRunning] of [
+      ["tool-2-ends", step3, true],
+      ["tool-3-starts", step4, true],
+      ["tool-3-ends-and-text", step5, true],
+      ["execution-settles", step5, false],
+    ]) {
+      currentLog = nextLog;
+      running = nextRunning;
+      await page.evaluate(() => window.changesAudit.update());
+      await page.waitForTimeout(180);
+
+      const snapshot = await page.evaluate(() => {
+        const row = document.querySelector('[data-testid="activity-summary-row"]');
+        const trig = document.querySelector('[data-testid="activity-summary-trigger"]');
+        const card = document.querySelectorAll('[data-testid="activity-summary-cards"] [data-testid="tool-call-card"]')[0];
+        const header = card?.querySelector(".tool-call-header");
+        const pre = card?.querySelector("pre.tool-result-code");
+        const scroller = document.querySelector(".initial-query-scroll");
+        return {
+          summaryMounted: row?.dataset.mountToken ?? null,
+          summaryExpanded: trig?.getAttribute("aria-expanded") ?? null,
+          toolMounted: card?.dataset.toolMountToken ?? null,
+          toolExpanded: header?.getAttribute("aria-expanded") ?? null,
+          scrollerTop: scroller ? Math.round(scroller.scrollTop) : 0,
+          preTop: pre ? Math.round(pre.scrollTop) : 0,
+          cardTop: card ? Math.round(card.getBoundingClientRect().top) : null,
+        };
+      });
+      assert.equal(snapshot.summaryMounted, "keep-alive", `${label}: summary row remounted`);
+      assert.equal(snapshot.summaryExpanded, "true", `${label}: summary row collapsed`);
+      assert.equal(snapshot.toolMounted, "tool1-alive", `${label}: open tool card remounted`);
+      assert.equal(snapshot.toolExpanded, "true", `${label}: open tool card collapsed`);
+      assert.ok(
+        Math.abs(snapshot.preTop - readingPosition.preTop) <= 2,
+        `${label}: inner tool output scroll position jumped (${readingPosition.preTop} -> ${snapshot.preTop})`,
+      );
+      assert.ok(
+        Math.abs(snapshot.scrollerTop - readingPosition.scrollerTop) <= 2,
+        `${label}: conversation scroller jumped (${readingPosition.scrollerTop} -> ${snapshot.scrollerTop})`,
+      );
+      assert.ok(
+        snapshot.cardTop !== null && Math.abs(snapshot.cardTop - readingPosition.cardTop) <= 2,
+        `${label}: open tool card shifted visually (${readingPosition.cardTop} -> ${snapshot.cardTop})`,
+      );
+    }
+
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("already-expanded running tool card inside a collapsed summary auto-hydrates its omitted result on completion", { timeout: 30_000 }, async () => {
+  const step1Summary = [
+    JSON.stringify({ type: "tool_execution_start", toolCallId: "hyd-t1", toolName: "bash", args: { command: "echo first" } }),
+    JSON.stringify({
+      type: "tool_execution_end",
+      toolCallId: "hyd-t1",
+      toolName: "bash",
+      isError: false,
+      result: { details: { exitCode: 0 } },
+      grapherBodyOmitted: true,
+      grapherRawRange: [100, 220],
+    }),
+    JSON.stringify({ type: "tool_execution_start", toolCallId: "hyd-t2", toolName: "bash", args: { command: "npm run verify" } }),
+  ].join("\n") + "\n";
+  const step2Suffix = JSON.stringify({
+    type: "tool_execution_end",
+    toolCallId: "hyd-t2",
+    toolName: "bash",
+    isError: false,
+    result: { details: { exitCode: 0 } },
+    grapherBodyOmitted: true,
+    grapherRawRange: [300, 480],
+  }) + "\n";
+
+  let stage = 1;
+  const hydratedRanges = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 700 }, locale: "en-US" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "get_execution_output") {
+      if (Array.isArray(body.ranges)) {
+        hydratedRanges.push(body.ranges);
+        const lines = [];
+        for (const [start] of body.ranges) {
+          if (start === 100) {
+            lines.push(JSON.stringify({
+              type: "tool_execution_end",
+              toolCallId: "hyd-t1",
+              toolName: "bash",
+              isError: false,
+              result: { content: [{ type: "text", text: "HYDRATED_T1_BODY" }], details: { exitCode: 0 } },
+              grapherRawRange: [100, 220],
+            }));
+          } else if (start === 300) {
+            lines.push(JSON.stringify({
+              type: "tool_execution_end",
+              toolCallId: "hyd-t2",
+              toolName: "bash",
+              isError: false,
+              result: { content: [{ type: "text", text: "HYDRATED_T2_LIVE_RESULT_OK" }], details: { exitCode: 0 } },
+              grapherRawRange: [300, 480],
+            }));
+          }
+        }
+        await route.fulfill({ json: { result: {
+          runId: body.runId, executionId: body.executionId,
+          content: lines.join("\n") + "\n",
+          startOffset: body.ranges[0][0], nextOffset: body.ranges.at(-1)[1], totalBytes: stage === 1 ? 260 : 500,
+          complete: true, status: "running", projection: "hydrated",
+        } } });
+        return;
+      }
+      const totalBytes = stage === 1 ? 260 : 500;
+      const startOffset = body.tail ? 0 : (body.offset ?? 0);
+      const content = startOffset === 0
+        ? (stage === 1 ? step1Summary : step1Summary + step2Suffix)
+        : (stage === 2 && startOffset === 260 ? step2Suffix : "");
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content,
+        startOffset, nextOffset: totalBytes, totalBytes,
+        complete: true, status: "running", summaryOnly: true, projection: "summary",
+      } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null, executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=serial&settled=0&bytes=260`, { waitUntil: "domcontentloaded" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+
+    const trigger = page.getByTestId("activity-summary-trigger").first();
+    await trigger.click();
+    await page.waitForTimeout(320);
+
+    const toolCards = page.getByTestId("activity-summary-cards").getByTestId("tool-call-card");
+    await expect(toolCards).toHaveCount(2);
+
+    // Open the currently running second tool card before its result arrives.
+    const tool2Header = toolCards.nth(1).locator(".tool-call-header");
+    await tool2Header.click();
+    await page.waitForTimeout(260);
+    await expect(tool2Header).toHaveAttribute("aria-expanded", "true");
+
+    // Now tool 2 completes in summary projection with grapherBodyOmitted + grapherRawRange.
+    stage = 2;
+    await page.evaluate(() => window.changesAudit.update());
+
+    await expect(tool2Header).toHaveAttribute("aria-expanded", "true");
+    await expect(toolCards.nth(1)).toContainText("HYDRATED_T2_LIVE_RESULT_OK");
+    assert.ok(hydratedRanges.some(ranges => ranges.some(([start, end]) => start === 300 && end === 480)),
+      `expected targeted range hydration for completed running tool: ${JSON.stringify(hydratedRanges)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("global expand and collapse in a long virtualized conversation animate only viewport rows smoothly without single-frame jumps", { timeout: 30_000 }, async () => {
+  const fullLog = Array.from({ length: 50 }, (_, i) => [
+    JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: `Step ${i} reasoning. `.repeat(12) }] },
+    }),
+    ...Array.from({ length: 4 }, (_, j) => [
+      JSON.stringify({
+        type: "tool_execution_start",
+        toolCallId: `long-${i}-${j}`,
+        toolName: j % 2 === 0 ? "read" : "bash",
+        args: j % 2 === 0 ? { path: `src/mod_${i}_${j}.ts` } : { command: `echo step_${i}_${j}` },
+      }),
+      JSON.stringify({
+        type: "tool_execution_end",
+        toolCallId: `long-${i}-${j}`,
+        toolName: j % 2 === 0 ? "read" : "bash",
+        isError: false,
+        result: { content: [{ type: "text", text: `ok ${i}-${j}\n`.repeat(10) }], details: { exitCode: 0 } },
+      }),
+    ]).flat(),
+    JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `Completed milestone #${i + 1}.` }] },
+    }),
+  ]).flat().join("\n") + "\n";
+  const logBytes = Buffer.from(fullLog);
+
+  const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, locale: "en-US", reducedMotion: "no-preference" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "1");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_execution_output") {
+      const body = route.request().postDataJSON();
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: fullLog, startOffset: 0, nextOffset: logBytes.length, totalBytes: logBytes.length,
+        complete: true, status: "completed",
+      } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=node&settled=1&bytes=${logBytes.length}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+
+    const sampleTransition = async () => {
+      await page.evaluate(() => {
+        window.__smoothSamples = [];
+        const start = performance.now();
+        function tick(now) {
+          const rows = [...document.querySelectorAll('[data-testid="activity-summary-row"]')];
+          const lastRow = rows.at(-1);
+          window.__smoothSamples.push({
+            h: lastRow ? Math.round(lastRow.getBoundingClientRect().height) : null,
+            animTracks: document.querySelectorAll(".activity-summary-body-track").length,
+          });
+          if (now - start < 480) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
+      await page.getByTestId("collapse-cards-trigger").click();
+      await page.waitForTimeout(520);
+      return page.evaluate(() => window.__smoothSamples);
+    };
+
+    const expandSamples = await sampleTransition();
+    const expandTracks = Math.max(...expandSamples.map(s => s.animTracks));
+    const expandHeights = expandSamples.map(s => s.h).filter(h => h !== null);
+    const expandSpan = Math.max(...expandHeights) - Math.min(...expandHeights);
+    const expandSteps = expandHeights.slice(1).map((h, i) => h - expandHeights[i]);
+    const expandMaxStep = Math.max(...expandSteps);
+    // Viewport-scoped transition must animate far fewer rows than the 25+ overscan summary rows.
+    assert.ok(expandTracks > 0 && expandTracks <= 14, `expected viewport-scoped expand tracks (<=14), got ${expandTracks}`);
+    assert.ok(expandSpan > 150, `expected meaningful expand span, got ${expandSpan}: ${JSON.stringify(expandHeights)}`);
+    // No single frame should jump > 50% of the total height span.
+    assert.ok(expandMaxStep < expandSpan * 0.5, `expand jumped ${expandMaxStep}px of ${expandSpan}px in one frame: ${JSON.stringify(expandHeights)}`);
+
+    const collapseSamples = await sampleTransition();
+    const collapseTracks = Math.max(...collapseSamples.map(s => s.animTracks));
+    const collapseHeights = collapseSamples.map(s => s.h).filter(h => h !== null);
+    const collapseSpan = Math.max(...collapseHeights) - Math.min(...collapseHeights);
+    const collapseSteps = collapseHeights.slice(1).map((h, i) => collapseHeights[i] - h);
+    const collapseMaxStep = Math.max(...collapseSteps);
+    assert.ok(collapseTracks > 0 && collapseTracks <= 8, `expected viewport-scoped collapse tracks (<=8), got ${collapseTracks}`);
+    assert.ok(collapseSpan > 150, `expected meaningful collapse span, got ${collapseSpan}: ${JSON.stringify(collapseHeights)}`);
+    assert.ok(collapseMaxStep < collapseSpan * 0.5, `collapse jumped ${collapseMaxStep}px of ${collapseSpan}px in one frame: ${JSON.stringify(collapseHeights)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("planner global collapse and expand keep expanded thinking cards matched with zero boundary snap", { timeout: 30_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, locale: "en-US", reducedMotion: "no-preference" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_collapse_cards_v1", "0");
+  });
+  const errors = [];
+  let page;
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_execution_output") {
+      const body = route.request().postDataJSON();
+      const current = await page.evaluate(() => ({ outputText: window.changesAudit.outputText, running: window.changesAudit.running }));
+      const bytes = Buffer.from(current.outputText);
+      await route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId,
+        content: current.outputText, startOffset: 0, nextOffset: bytes.length, totalBytes: bytes.length,
+        complete: true, status: current.running ? "running" : "completed",
+      } } });
+      return;
+    }
+    await route.fulfill({ json: { result: {} } });
+  });
+  page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__changes?mode=planner&cards=1&settled=1`, { waitUntil: "networkidle" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+
+    const sampleTriggerTops = async () => {
+      await page.evaluate(() => {
+        window.__plannerTops = [];
+        const start = performance.now();
+        function tick(now) {
+          const trig = document.querySelector('[data-testid="collapse-cards-trigger"]');
+          const tc = document.querySelector(".thinking-card");
+          window.__plannerTops.push({
+            top: trig ? Math.round(trig.getBoundingClientRect().top) : null,
+            tcExpanded: tc ? tc.classList.contains("expanded") : null,
+          });
+          if (now - start < 450) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
+      await page.getByTestId("collapse-cards-trigger").click();
+      await page.waitForTimeout(480);
+      return page.evaluate(() => window.__plannerTops);
+    };
+
+    const collapseSamples = await sampleTriggerTops();
+    // During collapse, the thinking card inside the transition track stays expanded so there is no frame-0 height snap.
+    assert.ok(collapseSamples.filter(s => s.tcExpanded !== null).every(s => s.tcExpanded === true),
+      `planner thinking card collapsed early during global collapse: ${JSON.stringify(collapseSamples)}`);
+
+    const expandSamples = await sampleTriggerTops();
+    assert.ok(expandSamples.filter(s => s.tcExpanded !== null).every(s => s.tcExpanded === true),
+      `planner thinking card stayed closed during global expand: ${JSON.stringify(expandSamples)}`);
+    const expandTops = expandSamples.map(s => s.top).filter(v => v !== null);
+    // Final handoff from animating summary row to individual planner cards must not snap the footer downward.
+    const tailDelta = Math.abs(expandTops.at(-1) - expandTops.at(-4));
+    assert.ok(tailDelta <= 3, `planner expand snapped at handoff: ${JSON.stringify(expandTops)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+

@@ -12,6 +12,7 @@ use std::{
 const MAX_SESSIONS: usize = 16;
 const MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const EXITED_RETENTION: Duration = Duration::from_secs(15);
 static TERMINALS: OnceLock<WebTerminals> = OnceLock::new();
 
 #[derive(Default)]
@@ -20,6 +21,7 @@ struct Output {
     bytes: usize,
     cursor: u64,
     exit: Option<Option<i32>>,
+    exited_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -45,6 +47,7 @@ impl TerminalEventSink for BufferedSink {
     fn emit_exit(&self, event: TerminalExitEvent) {
         if let Ok(mut output) = self.0.lock() {
             output.exit = Some(event.exit_code);
+            output.exited_at = Some(Instant::now());
         }
     }
 }
@@ -147,7 +150,16 @@ impl WebTerminals {
             .map(|mut sessions| {
                 let expired: Vec<_> = sessions
                     .iter()
-                    .filter(|(_, session)| session.touched.elapsed() > IDLE_TIMEOUT)
+                    .filter(|(_, session)| {
+                        session.touched.elapsed() > IDLE_TIMEOUT
+                            || session
+                                .sink
+                                .0
+                                .lock()
+                                .ok()
+                                .and_then(|out| out.exited_at)
+                                .is_some_and(|at| at.elapsed() > EXITED_RETENTION)
+                    })
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in &expired {

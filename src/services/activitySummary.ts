@@ -129,7 +129,11 @@ export function summarizeActivityGroup(
         readGraphCount += 1;
       } else if (normalizedToolName === "edit_graph") {
         editGraphCount += 1;
-      } else {
+      } else if (item.toolPhase !== "generating") {
+        // Generating calls may carry the placeholder name "tool" or a partial
+        // name until toolcall_end / tool_execution_start finalizes the real
+        // tool name. Wait until the call leaves "generating" so "Called 1 tool"
+        // never flashes and then disappears once the real name arrives.
         otherToolCount += 1;
       }
       continue;

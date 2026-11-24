@@ -15,7 +15,7 @@ import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, o
 import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, SUMMARY_INITIAL_TRANSCRIPT_BYTES, SUMMARY_OLDER_TRANSCRIPT_BYTES, transcriptAutoFillBudget, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
 import { observeElementResize } from "../services/sharedResizeObserver";
 import { utf8Bytes } from "../lib/BoundedLruCache";
-import { collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem, type HydratedCardPatch } from "../services/cardHydration";
+import { collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem, isItemHydrated, type HydratedCardPatch } from "../services/cardHydration";
 import type { TranscriptItem } from "../types";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -554,7 +554,7 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
     for (const item of targetItems) {
       if (!item.bodyOmitted) continue;
       const key = hydrationKeyForItem(item);
-      if (!key || hydratedCardsRef.current.has(key) || hydratingKeysRef.current.has(key)) continue;
+      if (!key || isItemHydrated(item, hydratedCardsRef.current.get(key)) || hydratingKeysRef.current.has(key)) continue;
       needed.push(item);
       keys.push(key);
     }

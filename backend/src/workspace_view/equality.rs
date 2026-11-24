@@ -104,3 +104,84 @@ fn entry_equal(left: &Entry, right: &Entry) -> bool {
                 if link_equal(target, other_target) && extra.eq_for_view_identity(other_extra)),
     }
 }
+
+fn first_map_diff(
+    prefix: &str,
+    left: &BTreeMap<String, Entry>,
+    right: &BTreeMap<String, Entry>,
+    skip_git_index: bool,
+) -> Option<String> {
+    let keep = |name: &str| !(skip_git_index && name == "index");
+    let mut left_iter = left.iter().filter(|(name, _)| keep(name)).peekable();
+    let mut right_iter = right.iter().filter(|(name, _)| keep(name)).peekable();
+    while let (Some(&(lk, lv)), Some(&(rk, rv))) = (left_iter.peek(), right_iter.peek()) {
+        match lk.cmp(rk) {
+            std::cmp::Ordering::Less => return Some(format!("{prefix}{lk} removed")),
+            std::cmp::Ordering::Greater => return Some(format!("{prefix}{rk} added")),
+            std::cmp::Ordering::Equal => {
+                if !entry_equal(lv, rv) {
+                    return Some(format!("{prefix}{lk} modified"));
+                }
+                left_iter.next();
+                right_iter.next();
+            }
+        }
+    }
+    if let Some((lk, _)) = left_iter.next() {
+        return Some(format!("{prefix}{lk} removed"));
+    }
+    if let Some((rk, _)) = right_iter.next() {
+        return Some(format!("{prefix}{rk} added"));
+    }
+    None
+}
+
+/// Summarize the first observable difference between two `View` snapshots so
+/// concurrent-change diagnostics point to the exact file or metadata that moved.
+pub(super) fn first_diff_detail(left: &View, right: &View) -> Option<String> {
+    if let Some(diff) = first_map_diff("", &left.entries, &right.entries, false) {
+        return Some(diff);
+    }
+    match (&left.git_entries, &right.git_entries) {
+        (Some(a), Some(b)) => {
+            if let Some(diff) = first_map_diff(".git/", a, b, true) {
+                return Some(diff);
+            }
+        }
+        (Some(_), None) => return Some(".git removed".into()),
+        (None, Some(_)) => return Some(".git added".into()),
+        (None, None) => {}
+    }
+    if !map_equal(&left.repositories, &right.repositories, false, equal) {
+        for (path, left_repo) in &left.repositories {
+            match right.repositories.get(path) {
+                None => return Some(format!("{path} repository removed")),
+                Some(right_repo) if !equal(left_repo, right_repo) => {
+                    if let Some(inner) = first_diff_detail(left_repo, right_repo) {
+                        return Some(format!("{path}/{inner}"));
+                    }
+                    return Some(format!("{path} repository modified"));
+                }
+                _ => {}
+            }
+        }
+        for path in right.repositories.keys() {
+            if !left.repositories.contains_key(path) {
+                return Some(format!("{path} repository added"));
+            }
+        }
+    }
+    if left.git_config != right.git_config {
+        return Some(".git/config modified".into());
+    }
+    if left.git_files != right.git_files {
+        return Some(".git metadata files modified".into());
+    }
+    if left.hardlinks != right.hardlinks {
+        return Some("hardlink topology modified".into());
+    }
+    if left.root_mode != right.root_mode || !left.root_extra.eq_for_view_identity(&right.root_extra) {
+        return Some("root metadata modified".into());
+    }
+    None
+}

@@ -7,10 +7,11 @@ import { ActivitySummaryRow, type CardsTransitionPhase } from "./ActivitySummary
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
-export const TranscriptRow = memo(function TranscriptRow({ item, expanded, cardsTransition, onExpandedChange, onChildResize, onChildExpandedChange, editing, draft,
+export const TranscriptRow = memo(function TranscriptRow({ item, expanded, cardsTransition, getChildExpanded, onExpandedChange, onChildResize, onChildExpandedChange, editing, draft,
   onDraftChange, onStartEdit, onCancelEdit, onEditUser, steerAttachments }: {
   item: TranscriptItem; expanded?: boolean;
   cardsTransition?: CardsTransitionPhase;
+  getChildExpanded?: (id: string) => boolean | undefined;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
   onChildResize?: (expanded: boolean, card?: HTMLElement) => void;
   onChildExpandedChange?: (child: TranscriptItem, expanded: boolean, card?: HTMLElement) => void;
@@ -24,7 +25,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, cards
   // rows sit directly in the shared list (which owns the 10px card rhythm),
   // and text uses the shared chat bubble classes.
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
-  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
+  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} getChildExpanded={getChildExpanded} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"

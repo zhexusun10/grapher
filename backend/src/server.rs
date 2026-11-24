@@ -3846,18 +3846,43 @@ fn plan_goal(
 
 /// Reclaim a Run's temporary source snapshot once nothing needs it. Takes the
 /// per-source lock and re-checks under it: a concurrent dispatch may have
-/// materialized a new snapshot while this caller was finishing.
+/// materialized a new snapshot while this caller was finishing. When a shadow
+/// database is retained (for example standard Git projects), opportunistically
+/// prune stale cache refs, unreachable objects and dead agent views once no
+/// incomplete Run still needs it.
 fn reclaim_source_snapshot(service: &Arc<Service>, repository: &std::path::Path) {
     let result = (|| -> Result<(), String> {
         let lock = source_lock(repository)?;
         let _guard = lock.lock().map_err(|error| error.to_string())?;
-        let reclaimable = service
-            .runtime
-            .lock()
-            .map_err(|error| error.to_string())?
-            .shadow_reclaimable(repository)?;
+        let (reclaimable, prune_target) = {
+            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+            if runtime.shadow_reclaimable(repository)? {
+                (true, None)
+            } else if !runtime.is_serial()
+                && runtime.state.phase == "completed"
+                && !runtime
+                    .store
+                    .shadow_repo_needed_by_other_run(&runtime.state.run_id, repository)?
+            {
+                let target = match crate::workspace::shadow_repo_if_exists(repository)? {
+                    Some(shadow) => {
+                        let protected =
+                            crate::cleanup::protected_shadow_objects(&runtime.store, "")?;
+                        Some((shadow, protected))
+                    }
+                    None => None,
+                };
+                (false, target)
+            } else {
+                (false, None)
+            }
+        };
         if reclaimable {
             crate::workspace::remove_shadow_repo(repository)?;
+        } else if let Some((shadow, protected)) = prune_target {
+            let ref_lock = crate::workspace::host_ref_lock(repository)?;
+            let _ref_guard = ref_lock.lock().map_err(|error| error.to_string())?;
+            crate::workspace::prune_shadow_unreachable(&shadow, &protected)?;
         }
         Ok(())
     })();
@@ -3987,6 +4012,9 @@ fn drive(service: Arc<Service>) {
                         if runtime.batch_workspaces() && runtime.state.phase == "completed" {
                             if let Err(error) = runtime.defer_cleanup_worktrees() {
                                 eprintln!("Cannot retire completed batch workspaces: {error}");
+                            }
+                            if let Err(error) = runtime.prune_stale_environment_snapshots() {
+                                eprintln!("Cannot prune stale environment snapshots: {error}");
                             }
                         }
                     }

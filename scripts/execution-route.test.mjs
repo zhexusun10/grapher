@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deduceRouteType, shouldShowRouteBadge } from '../src/services/executionRoute.ts';
+import { deduceRouteType, resolveRunRouteType, shouldShowRouteBadge } from '../src/services/executionRoute.ts';
 
 test('persisted graph route cannot auto-approve a single task node as serial', () => {
   const graph = { nodes: [{ id: 'task', task: 'test' }], edges: [], originalGoal: 'test' };
@@ -119,4 +119,30 @@ test('shouldShowRouteBadge deduces mode from snapshot events and partition metri
     'historical run with partitioner metrics must show badge'
   );
 });
+
+test('resolveRunRouteType prefers active route, then cached snapshot, then persisted run mode', () => {
+  assert.equal(
+    resolveRunRouteType({ runId: 'run-1', activeRunId: 'run-1', activeRouteType: 'serial', runMode: 'auto' }),
+    'serial'
+  );
+  assert.equal(
+    resolveRunRouteType({
+      runId: 'run-2',
+      activeRunId: 'run-1',
+      activeRouteType: 'serial',
+      cachedSnapshot: { planType: 'graph', events: [] },
+      runMode: 'auto',
+    }),
+    'graph'
+  );
+  assert.equal(
+    resolveRunRouteType({ runId: 'run-3', activeRunId: 'run-1', activeRouteType: 'graph', runMode: 'serial' }),
+    'serial'
+  );
+  assert.equal(
+    resolveRunRouteType({ runId: 'run-4', activeRunId: 'run-1', activeRouteType: 'graph', runMode: 'auto' }),
+    'undecided'
+  );
+});
+
 

@@ -1025,8 +1025,76 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
         ("nested/cache.PYO", false, false, false),
         ("file.TsBuIlDiNfO", true, false, false),
         ("NODE_MODULES/pkg/file.js", false, false, false),
+        ("node_modules/.cache/babel/entry.json", true, false, false),
+        ("packages/web/node_modules/.VITE-test/deps/chunk.js", true, false, false),
+        ("node_modules/.vite/deps/react.js", true, false, false),
+        (".next/cache/webpack/client.pack", true, false, false),
+        ("apps/site/.Next/CACHE/fetch/a", true, false, false),
+        (".nuxt/cache/nitro/build.json", true, false, false),
+        (".nuxt/types/app.d.ts", false, false, false),
+        (".angular/cache/18.0/angular-webpack/a", true, false, false),
+        ("docs/.vitepress/cache/deps/chunk.js", true, false, false),
+        ("docs/.vitepress/dist/index.html", false, false, false),
+        ("docs/.vuepress/.cache/pages.js", true, false, false),
+        ("docs/.vuepress/.temp/routes.js", true, false, false),
+        ("docs/.vuepress/dist/index.html", false, false, false),
+        (".nx/cache/12345.tar", true, false, false),
+        (".nx/workspace-data/project-graph.json", true, false, false),
+        (".nx-cache/terminalOutputs/a", true, false, false),
+        (".nx/nx.json", false, false, false),
+        (".vitest/results.json", true, false, false),
+        (".eslintcache", true, false, false),
+        ("sub/.stylelintcache", true, false, false),
+        ("sub/.prettiercache", true, false, false),
+        (".rpt2_cache/a", true, false, false),
+        (".nyc_output/cov.json", true, false, false),
+        (".hypothesis/examples/a", true, false, false),
+        (".pytype/pyi/mod.pyi", true, false, false),
+        (".pyre/types/mod.json", true, false, false),
+        ("notebooks/.ipynb_checkpoints/demo-checkpoint.ipynb", true, false, false),
+        (".dmypy.json", true, false, false),
+        (".sass-cache/a.scssc", true, false, false),
+        (".gradle/8.7/fileHashes/fileHashes.bin", true, false, false),
+        (".gradletasknamecache", true, false, false),
+        (".kotlin/sessions/kotlin-compiler.salive", true, false, false),
+        (".metals/metals.h2.db", true, false, false),
+        (".bloop/app.json", true, false, false),
+        (".zig-cache/o/abc/app.o", true, false, false),
+        ("zig-cache/o/abc/app.o", true, false, false),
+        ("zig-out/bin/app", false, false, false),
+        (".phpunit.result.cache", true, false, false),
+        (".phpunit.cache/test-results", true, false, false),
+        (".php-cs-fixer.cache", true, false, false),
+        (".deptrac.cache", true, false, false),
+        (".twig-cs-fixer.cache", true, false, false),
+        (".jekyll-cache/Jekyll/Cache/a", true, false, false),
+        (".jekyll-metadata", true, false, false),
+        (".ccls-cache/main.cpp.blob", true, false, false),
+        (".ccache/0/a.o", true, false, false),
+        (".cache/clangd/index/main.idx", true, false, false),
+        (".clangd", false, false, false),
+        (".index-build/arm64-apple-macosx/debug/index/store/a", true, false, false),
+        (".build/debug/MyApp", false, false, false),
+        (".swiftpm/xcode/xcshareddata/xcschemes/App.xcscheme", false, false, false),
+        (".vs/MyApp/v17/.suo", true, false, false),
+        ("_ReSharper.Caches/ReSharperPlatformVs17/a", true, false, false),
+        ("ipch/stdafx.ipch", true, false, false),
+        ("bin/Debug/net9.0/App.dll", false, false, false),
+        ("obj/Debug/net9.0/project.assets.json", false, false, false),
+        ("backend/target/debug/.fingerprint/app-123/invoked.timestamp", true, false, false),
+        ("backend/target/aarch64-apple-darwin/debug/incremental/app/s.bin", true, false, false),
+        ("target/.rustc_info.json", true, false, false),
+        ("backend/target/debug/.cargo-lock", true, false, false),
+        ("backend/target/debug/.cargo-build-lock", true, false, false),
+        ("backend/target/debug/.cargo-artifact-lock", true, false, false),
+        ("backend/target/debug/grapher", false, false, false),
+        ("src/incremental/engine.rs", false, false, false),
+        (".yarn/cache/pkg-npm-1.0.0.zip", false, false, false),
+        (".dart_tool/package_config.json", false, false, false),
+        ("src/cache/data.json", false, false, false),
         ("src/__PyCache__/module", true, false, false),
         (".Next/build-id", false, false, false),
+        (".next/standalone/server.js", false, false, false),
         ("not_node_modules/file.js", false, false, false),
         ("dist/build/out/target/authored", false, false, false),
         (
@@ -1840,7 +1908,8 @@ fn macos_nfd_case_shadow_verify_and_unstage_behave_consistently() {
             Some("leaf-link".into())
         );
 
-        // Newly staged (uncommitted) .DS_Store in standard Git repo survives scoped snapshot.
+        // Newly staged (uncommitted) .DS_Store in standard Git repo survives both
+        // unscoped and scoped snapshots and prepares cleanly without view mismatch.
         let staged_repo = temp.path().join("staged-ds");
         fs::create_dir(&staged_repo).unwrap();
         workspace::git(&staged_repo, &["init", "-q"]).unwrap();
@@ -1851,8 +1920,321 @@ fn macos_nfd_case_shadow_verify_and_unstage_behave_consistently() {
         workspace::project_git(&staged_repo, &["commit", "-qm", "init"]).unwrap();
         fs::write(staged_repo.join(".DS_Store"), "staged ds").unwrap();
         workspace::project_git(&staged_repo, &["add", "-f", ".DS_Store"]).unwrap();
+        let unscoped_snap = workspace::snapshot_repository(&staged_repo).unwrap();
+        let unscoped_files = workspace::repository_git(&staged_repo, &["ls-tree", "-r", "-z", &unscoped_snap]).unwrap();
+        assert!(unscoped_files.split('\0').any(|entry| entry.ends_with("\t.DS_Store")), "{unscoped_files:?}");
+        let unscoped_slot = slot(&temp, "staged-ds-unscoped");
+        workspace::prepare(&staged_repo, &unscoped_slot, &unscoped_snap, &[]).unwrap();
+        assert_eq!(fs::read_to_string(unscoped_slot.join(".DS_Store")).unwrap(), "staged ds");
         let staged_snap = workspace::snapshot_repository_scoped(&staged_repo, &[".venv".into()]).unwrap();
         let staged_files = workspace::repository_git(&staged_repo, &["ls-tree", "-r", "-z", &staged_snap]).unwrap();
         assert!(staged_files.split('\0').any(|entry| entry.ends_with("\t.DS_Store")), "{staged_files:?}");
+    }
+}
+
+#[test]
+fn scoped_snapshot_preserves_raw_bytes_and_authored_grapher_files_with_autocrlf() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("scoped-raw");
+    fs::create_dir(&repo).unwrap();
+    workspace::git(&repo, &["init", "-q"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.name", "Author"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.email", "author@example.invalid"]).unwrap();
+    workspace::project_git(&repo, &["config", "core.autocrlf", "true"]).unwrap();
+    workspace::project_git(&repo, &["config", "core.safecrlf", "true"]).unwrap();
+    fs::write(repo.join(".gitattributes"), "*.txt text\n.gitattributes -text\n").unwrap();
+    fs::write(repo.join("raw.txt"), "line1\nline2\r\n").unwrap();
+    fs::write(repo.join(".grapher-project.json"), "{\"ok\":true}\n").unwrap();
+    fs::create_dir(repo.join(".venv")).unwrap();
+    fs::write(repo.join(".venv/runtime.bin"), "excluded").unwrap();
+    let exclusions = vec![".venv".to_string()];
+
+    let base = workspace::snapshot_repository_scoped(&repo, &exclusions).unwrap();
+    let shadow = workspace::shadow_repo_dir(&repo).unwrap();
+    let raw_blob = workspace::repository_git(&repo, &["rev-parse", &format!("{base}:raw.txt")]).unwrap();
+    assert_eq!(
+        workspace::git_bytes(
+            &repo,
+            &["--git-dir", shadow.to_str().unwrap(), "cat-file", "blob", &raw_blob],
+            None,
+            None,
+        )
+        .unwrap(),
+        b"line1\nline2\r\n"
+    );
+    assert!(workspace::repository_git(&repo, &["rev-parse", &format!("{base}:.grapher-project.json")]).is_ok());
+    assert!(workspace::repository_git(&repo, &["rev-parse", &format!("{base}:.venv/runtime.bin")]).is_err());
+
+    let node = slot(&temp, "scoped-node");
+    workspace::prepare_with_merger_expected_for_run_scoped(
+        &repo,
+        &node,
+        &base,
+        &[],
+        &base,
+        None,
+        &exclusions,
+        true,
+        || Err("unexpected conflict".into()),
+    )
+    .unwrap();
+    assert_eq!(fs::read(node.join("raw.txt")).unwrap(), b"line1\nline2\r\n");
+    assert_eq!(fs::read_to_string(node.join(".grapher-project.json")).unwrap(), "{\"ok\":true}\n");
+    assert!(!node.join(".venv").exists());
+
+    fs::create_dir(node.join(".venv")).unwrap();
+    fs::write(node.join(".venv/extra"), "live").unwrap();
+    fs::write(node.join("raw.txt"), "updated\nraw\r\n").unwrap();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let head = workspace::snapshot_node_scoped(&node, &repo, "worker", Some(&run_id), &exclusions).unwrap();
+    let updated_blob = workspace::repository_git(&repo, &["rev-parse", &format!("{head}:raw.txt")]).unwrap();
+    assert_eq!(
+        workspace::git_bytes(
+            &repo,
+            &["--git-dir", shadow.to_str().unwrap(), "cat-file", "blob", &updated_blob],
+            None,
+            None,
+        )
+        .unwrap(),
+        b"updated\nraw\r\n"
+    );
+    assert!(workspace::repository_git(&repo, &["rev-parse", &format!("{head}:.grapher-project.json")]).is_ok());
+    assert!(workspace::repository_git(&repo, &["rev-parse", &format!("{head}:.venv/extra")]).is_err());
+}
+
+#[test]
+fn single_parent_prepare_reuses_parent_head_and_prunes_dead_agent_views() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("source");
+    fs::create_dir(&repo).unwrap();
+    workspace::git(&repo, &["init", "-q"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.name", "Author"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.email", "author@example.invalid"]).unwrap();
+    fs::write(repo.join("base.txt"), "base\n").unwrap();
+    workspace::project_git(&repo, &["add", "base.txt"]).unwrap();
+    workspace::project_git(&repo, &["commit", "-qm", "init"]).unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+
+    let run = uuid::Uuid::new_v4().to_string();
+    let parent_slot = temp.path().join(".grapher-worktrees").join(&run).join("parent");
+    workspace::prepare_with_merger_expected_for_run(&repo, &parent_slot, &base, &[], &base, Some(&run), || {
+        Err("unexpected".into())
+    })
+    .unwrap();
+    fs::write(parent_slot.join("from-parent.txt"), "parent output\n").unwrap();
+    let parent_head = workspace::snapshot_node_for_run(&parent_slot, &repo, "parent", Some(&run)).unwrap();
+
+    // Fresh child slot with single parent checks out parent directly without a
+    // synthetic --no-ff commit and preserves both base and parent ancestry.
+    let child_slot = temp.path().join(".grapher-worktrees").join(&run).join("child");
+    let child_before = workspace::prepare_with_merger_expected_for_run(
+        &repo,
+        &child_slot,
+        &base,
+        std::slice::from_ref(&parent_head),
+        &base,
+        Some(&run),
+        || Err("unexpected".into()),
+    )
+    .unwrap();
+    assert_eq!(child_before, parent_head);
+    assert_eq!(
+        fs::read_to_string(child_slot.join("from-parent.txt")).unwrap(),
+        "parent output\n"
+    );
+    workspace::verify_prepared_ancestor(&child_slot, &base).unwrap();
+    workspace::verify_prepared_ancestor(&child_slot, &parent_head).unwrap();
+
+    // Deleting the run prunes the orphan commit and its dead agent-views dir.
+    let shadow = workspace::shadow_repo_dir(&repo).unwrap();
+    let parent_view = shadow.join("agent-views").join(&parent_head);
+    assert!(parent_view.is_dir());
+    workspace::prune_shadow_run_refs(&shadow, &run, &std::collections::BTreeSet::new(), true).unwrap();
+    assert!(!parent_view.exists(), "dead agent-views record must be pruned after GC");
+    assert!(shadow.join("agent-views").join(&base).is_dir(), "live HEAD view must be retained");
+}
+
+#[test]
+fn large_missing_blob_batch_imports_raw_bytes_via_pack_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("many-files");
+    fs::create_dir(&repo).unwrap();
+    // Exceed PACK_IMPORT_THRESHOLD (512) with distinct raw files + one duplicate pair.
+    for index in 0..520 {
+        fs::write(
+            repo.join(format!("file-{index:04}.txt")),
+            format!("payload-{index}\r\n"),
+        )
+        .unwrap();
+    }
+    fs::write(repo.join("dup-a.txt"), "shared-bytes\n").unwrap();
+    fs::write(repo.join("dup-b.txt"), "shared-bytes\n").unwrap();
+
+    let snap = workspace::materialize_shadow_repo(&repo, &[]).unwrap();
+    let live = workspace::live_tree_scoped(&repo, &[]).unwrap();
+    assert_eq!(
+        live,
+        workspace::repository_git(&repo, &["rev-parse", &format!("{snap}^{{tree}}")]).unwrap()
+    );
+    assert_eq!(
+        workspace::repository_git(&repo, &["show", &format!("{snap}:file-0519.txt")]).unwrap(),
+        "payload-519"
+    );
+    assert_eq!(
+        workspace::repository_git(&repo, &["show", &format!("{snap}:dup-b.txt")]).unwrap(),
+        "shared-bytes"
+    );
+}
+
+#[test]
+fn scoped_tool_caches_are_excluded_from_snapshots_and_git_pathspecs_while_preserving_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("cache-exclusions");
+    fs::create_dir(&repo).unwrap();
+    workspace::git(&repo, &["init", "-q"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.name", "Author"]).unwrap();
+    workspace::project_git(&repo, &["config", "user.email", "author@example.invalid"]).unwrap();
+    fs::write(
+        repo.join(".gitignore"),
+        "node_modules/\n.next/\n.nuxt/\n.angular/\n.vitepress/cache/\n.vuepress/.cache/\n.nx/cache/\n.nx/workspace-data/\n.gradle/\n.kotlin/\n.zig-cache/\nzig-out/\n.phpunit.result.cache\n.eslintcache\n.vs/\n.index-build/\n.build/\n.cache/clangd/\nbin/\nobj/\nbackend/target/\n",
+    )
+    .unwrap();
+    for (rel, body) in [
+        ("node_modules/pkg/index.js", "dep\n"),
+        ("node_modules/.cache/babel/cached.json", "cache\n"),
+        ("node_modules/.vite/deps/react.js", "cache\n"),
+        ("node_modules/.vite-workspace-changes/deps/chunk.js", "cache\n"),
+        ("apps/web/node_modules/.vite-ui/deps/chunk.js", "cache\n"),
+        (".next/build-id", "build-1\n"),
+        (".next/cache/webpack/pack.bin", "cache\n"),
+        (".nuxt/types/app.d.ts", "export {};\n"),
+        (".nuxt/cache/nitro.json", "cache\n"),
+        (".angular/cache/build.bin", "cache\n"),
+        ("docs/.vitepress/cache/deps/chunk.js", "cache\n"),
+        ("docs/.vuepress/.cache/pages.js", "cache\n"),
+        (".nx/cache/task.tar", "cache\n"),
+        (".nx/workspace-data/graph.json", "cache\n"),
+        (".gradle/daemon.log", "cache\n"),
+        (".kotlin/sessions/s.salive", "cache\n"),
+        (".zig-cache/o/obj.o", "cache\n"),
+        ("zig-out/bin/app", "binary\n"),
+        (".phpunit.result.cache", "cache\n"),
+        (".eslintcache", "cache\n"),
+        (".vs/App/v17/cache.db", "cache\n"),
+        (".cache/clangd/index/main.idx", "cache\n"),
+        (".clangd", "CompileFlags:\n  Add: [-Wall]\n"),
+        (".index-build/index/store/unit", "cache\n"),
+        (".build/debug/SwiftApp", "binary\n"),
+        ("bin/Debug/App.dll", "dll\n"),
+        ("obj/Debug/project.assets.json", "{}\n"),
+        ("target/.rustc_info.json", "{}\n"),
+        ("backend/target/.rustc_info.json", "{}\n"),
+        ("backend/target/debug/.fingerprint/app/dep-bin", "fp\n"),
+        ("backend/target/aarch64-apple-darwin/debug/incremental/app/q.bin", "inc\n"),
+        ("backend/target/debug/.cargo-lock", "\n"),
+        ("backend/target/debug/grapher", "binary\n"),
+        ("src/incremental/mod.rs", "pub fn x() {}\n"),
+        (".yarn/cache/pkg.zip", "offline-dep\n"),
+        ("node_modules/.cache/tracked.txt", "tracked\n"),
+    ] {
+        let full = repo.join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, body).unwrap();
+    }
+    workspace::project_git(&repo, &["add", "-f", ".gitignore", "node_modules/.cache/tracked.txt"])
+        .unwrap();
+    workspace::project_git(&repo, &["commit", "-qm", "init"]).unwrap();
+
+    let snap = workspace::snapshot_repository(&repo).unwrap();
+    let tree_files: std::collections::BTreeSet<String> = workspace::repository_git(
+        &repo,
+        &["ls-tree", "-r", "--name-only", "-z", &snap],
+    )
+    .unwrap()
+    .split('\0')
+    .filter(|s| !s.is_empty())
+    .map(str::to_owned)
+    .collect();
+
+    for kept in [
+        "node_modules/pkg/index.js",
+        ".next/build-id",
+        ".nuxt/types/app.d.ts",
+        "zig-out/bin/app",
+        ".clangd",
+        ".build/debug/SwiftApp",
+        "bin/Debug/App.dll",
+        "obj/Debug/project.assets.json",
+        "backend/target/debug/grapher",
+        "src/incremental/mod.rs",
+        ".yarn/cache/pkg.zip",
+        "node_modules/.cache/tracked.txt",
+    ] {
+        assert!(tree_files.contains(kept), "expected {kept} in {tree_files:?}");
+    }
+    let dropped_paths = [
+        "node_modules/.cache/babel/cached.json",
+        "node_modules/.vite/deps/react.js",
+        "node_modules/.vite-workspace-changes/deps/chunk.js",
+        "apps/web/node_modules/.vite-ui/deps/chunk.js",
+        ".next/cache/webpack/pack.bin",
+        ".nuxt/cache/nitro.json",
+        ".angular/cache/build.bin",
+        "docs/.vitepress/cache/deps/chunk.js",
+        "docs/.vuepress/.cache/pages.js",
+        ".nx/cache/task.tar",
+        ".nx/workspace-data/graph.json",
+        ".gradle/daemon.log",
+        ".kotlin/sessions/s.salive",
+        ".zig-cache/o/obj.o",
+        ".phpunit.result.cache",
+        ".eslintcache",
+        ".vs/App/v17/cache.db",
+        ".cache/clangd/index/main.idx",
+        ".index-build/index/store/unit",
+        "target/.rustc_info.json",
+        "backend/target/.rustc_info.json",
+        "backend/target/debug/.fingerprint/app/dep-bin",
+        "backend/target/aarch64-apple-darwin/debug/incremental/app/q.bin",
+        "backend/target/debug/.cargo-lock",
+    ];
+    for dropped in dropped_paths {
+        assert!(!tree_files.contains(dropped), "unexpected {dropped} in {tree_files:?}");
+    }
+
+    // Verify Git pathspecs match the same exclusion boundary for ignored files.
+    let mut args = vec![
+        "ls-files".to_string(),
+        "--others".into(),
+        "--ignored".into(),
+        "--exclude-standard".into(),
+        "-z".into(),
+        "--".into(),
+        ".".into(),
+    ];
+    args.extend(workspace::generated_artifact_pathspecs());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let ignored_listed: std::collections::BTreeSet<String> =
+        workspace::project_git(&repo, &arg_refs)
+            .unwrap()
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+    assert!(ignored_listed.contains("node_modules/pkg/index.js"));
+    assert!(ignored_listed.contains(".next/build-id"));
+    assert!(ignored_listed.contains(".nuxt/types/app.d.ts"));
+    assert!(ignored_listed.contains("zig-out/bin/app"));
+    assert!(ignored_listed.contains(".build/debug/SwiftApp"));
+    assert!(ignored_listed.contains("bin/Debug/App.dll"));
+    assert!(ignored_listed.contains("obj/Debug/project.assets.json"));
+    assert!(ignored_listed.contains("backend/target/debug/grapher"));
+    for dropped in dropped_paths {
+        assert!(
+            !ignored_listed.contains(dropped),
+            "pathspec failed to exclude {dropped}: {ignored_listed:?}"
+        );
     }
 }

@@ -266,6 +266,69 @@ fn detached_cleanup_refuses_non_workspace_receipts() {
     assert!(f.original.join("node/old.txt").is_file());
 }
 
+#[test]
+fn detached_slot_retire_moves_slot_git_and_state_outside_run_dir_and_rejects_invalid_checkouts() {
+    let f = fixture();
+    let parent = f._temp.path();
+    let run_dir = parent.join(".grapher-worktrees").join(&f.run);
+    let slot = run_dir.join("node-a-1");
+    fs::create_dir_all(&slot).unwrap();
+    fs::write(slot.join("code.txt"), "slot").unwrap();
+    let digest = crate::workspace_state::slot_digest(&slot).unwrap();
+    let git_dir = run_dir.join(".grapher-git").join(format!("{digest}.git"));
+    let state_dir = run_dir.join(".grapher-state").join(&digest);
+    fs::create_dir_all(&git_dir).unwrap();
+    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(state_dir.join("cache.bin"), "state").unwrap();
+
+    for invalid in [
+        "../escape",
+        "nested/slot",
+        ".files",
+        ".grapher-git",
+        ".grapher-state",
+        "publication-files-1234",
+        ".grapher-cleanup-1234",
+        ".grapher-git/not-hex.git",
+        ".grapher-state/short",
+    ] {
+        let bad = Target::workspace_checkout(parent, &f.run, invalid);
+        assert!(
+            retire(&f.root, &f.store, &f.run, &bad).is_err(),
+            "expected checkout `{invalid}` to be rejected"
+        );
+    }
+
+    let git_target = Target::workspace_checkout(parent, &f.run, format!(".grapher-git/{digest}.git"));
+    let state_target = Target::workspace_checkout(parent, &f.run, format!(".grapher-state/{digest}"));
+    let slot_target = Target::workspace_checkout(parent, &f.run, "node-a-1");
+    retire(&f.root, &f.store, &f.run, &git_target).unwrap();
+    retire(&f.root, &f.store, &f.run, &state_target).unwrap();
+    retire(&f.root, &f.store, &f.run, &slot_target).unwrap();
+
+    assert!(!slot.exists());
+    assert!(!git_dir.exists());
+    assert!(!state_dir.exists());
+    // Detached directories live beside `<run_id>` in `.grapher-worktrees/`, never inside `<run_id>/`.
+    assert!(run_dir.is_dir());
+    let receipts = f.store.detached_workspaces().unwrap();
+    assert_eq!(receipts.len(), 3);
+    for record in &receipts {
+        let (_, destination) = record.location(&f.root).unwrap();
+        assert_eq!(destination.parent().unwrap(), parent.join(".grapher-worktrees"));
+        assert!(destination.is_dir());
+    }
+
+    drain(&f.root, &f.store).unwrap();
+    assert!(f.store.detached_workspaces().unwrap().is_empty());
+    for record in &receipts {
+        let (_, destination) = record.location(&f.root).unwrap();
+        assert!(!destination.exists());
+    }
+    assert!(f.source.join("user.txt").is_file());
+}
+
 #[cfg(windows)]
 #[test]
 fn detached_cleanup_retains_readonly_file_and_directory_support() {

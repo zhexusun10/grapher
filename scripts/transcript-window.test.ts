@@ -3,9 +3,9 @@ import test from "node:test";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage } from "../src/services/transcriptWindow.ts";
 import { cancelTranscriptReaders, executionTranscriptCache, invalidateTranscriptCaches, registerTranscriptReader } from "../src/services/transcriptCache.ts";
 import { transcriptAutoFillBudget, TranscriptAutoFillBudget } from "../src/services/transcriptPaging.ts";
-import { retainedRowAnchor, rowOffsets, visibleTranscriptRows } from "../src/services/transcriptLayout.ts";
+import { matchActivitySummary, retainedRowAnchor, rowOffsets, stabilizeActivitySummaryIds, visibleTranscriptRows } from "../src/services/transcriptLayout.ts";
 import { summarizeActivityGroup } from "../src/services/activitySummary.ts";
-import { applyHydratedCardPatches, collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem } from "../src/services/cardHydration.ts";
+import { applyHydratedCardPatches, collectHydrationRanges, extractHydratedCardPatches, hydrationKeyForItem, isItemHydrated } from "../src/services/cardHydration.ts";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 import { translate } from "../src/i18n/index.ts";
 import type { TranscriptItem } from "../src/types.ts";
@@ -307,6 +307,33 @@ test("collapseCards folds cards into Codex-style summaries between model text an
   assert.equal(withPrepended.rows[0].summaryItems?.length, 3);
 });
 
+test("expanded summaries remap by child overlap before using a stale ordinal", () => {
+  const item = (id: string): TranscriptItem => ({
+    id,
+    type: "thinking",
+    role: "assistant",
+    content: id,
+    status: "success",
+  });
+  const target = {
+    id: "summary-new-offset",
+    type: "activity_summary" as const,
+    role: "assistant" as const,
+    summaryItems: [item("target-a"), item("target-b"), item("target-c")],
+  };
+  const summaries: TranscriptItem[] = [
+    { id: "summary-new-group", type: "activity_summary", role: "assistant", summaryItems: [item("new-group")] },
+    target,
+    { id: "summary-old-neighbor", type: "activity_summary", role: "assistant", summaryItems: [item("neighbor")] },
+  ];
+  const matched = matchActivitySummary(summaries, {
+    toolCallIds: [],
+    itemIds: ["target-a", "target-b"],
+    ordinalFromEnd: 0,
+  });
+  assert.equal(matched, target, "new groups must not redirect an expanded strip to the old ordinal's row");
+});
+
 test("summarizeActivityGroup retains legacy and Parallel search details", () => {
   for (const args of [
     { query: "Find official documentation" },
@@ -430,6 +457,35 @@ test("summarizeActivityGroup formats Codex-style summaries in Chinese and Englis
     { id: "r3", type: "tool_call", toolName: "read", toolPhase: "executing", args: { path: "src/c.ts" }, status: "running" },
   ], zh);
   assert.equal(finalizedNew.text, "已浏览 3 个文件");
+
+  // Streaming a toolcall_start before the real tool name arrives uses the
+  // placeholder name "tool" (or a partial name) while toolPhase === "generating".
+  // It must not flash "调用了 1 个工具" before finalizing into the real category.
+  const generatingPlaceholderOnly = summarizeActivityGroup([
+    { id: "t1", type: "thinking", content: "plan", status: "success" },
+    { id: "c1", type: "tool_call", toolName: "tool", toolPhase: "generating", args: {}, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(generatingPlaceholderOnly.text, "正在思考…");
+  assert.equal(generatingPlaceholderOnly.isRunning, true);
+
+  const generatingPlaceholderAfterReads = summarizeActivityGroup([
+    ...twoFiles,
+    { id: "c1", type: "tool_call", toolName: "tool", toolPhase: "generating", args: {}, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(generatingPlaceholderAfterReads.text, "已浏览 2 个文件");
+  assert.equal(generatingPlaceholderAfterReads.isRunning, true);
+
+  const generatingPartialName = summarizeActivityGroup([
+    ...twoFiles,
+    { id: "c1", type: "tool_call", toolName: "ba", toolPhase: "generating", args: {}, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(generatingPartialName.text, "已浏览 2 个文件");
+
+  const finalizedUnknownTool = summarizeActivityGroup([
+    ...twoFiles,
+    { id: "c1", type: "tool_call", toolName: "mcp_query", toolPhase: "executing", args: {}, status: "running" },
+  ], zh, { isOpen: true });
+  assert.equal(finalizedUnknownTool.text, "已浏览 2 个文件 · 调用了 1 个工具");
 
   // While a live group is still open or running, keep single-tool summaries in
   // the compact aggregate form so the bar never stretches horizontally with a
@@ -590,3 +646,61 @@ test("card-shell projections validate byte cursors, enforce LRU string sizing, a
   assert.equal(hydratedThinking.bodyOmitted, undefined);
   assert.equal(hydratedThinking.content, "FULL_HYDRATED_REASONING");
 });
+
+test("leading live summaries keep stable IDs across tool completion, follow-up tools, thinking-to-tool growth, and prepends", () => {
+  const think: TranscriptItem = { id: "think_output_0_0", type: "thinking", role: "assistant", content: "Inspecting", status: "success" };
+  const call1Running: TranscriptItem = { id: "call-1", type: "tool_call", toolCallId: "call-1", toolName: "bash", args: { command: "ls" }, status: "running" };
+  const call1Done: TranscriptItem = { ...call1Running, status: "success", result: "ok" };
+  const call2Running: TranscriptItem = { id: "call-2", type: "tool_call", toolCallId: "call-2", toolName: "bash", args: { command: "pwd" }, status: "running" };
+  const call2Done: TranscriptItem = { ...call2Running, status: "success", result: "/repo" };
+  const call3Running: TranscriptItem = { id: "call-3", type: "tool_call", toolCallId: "call-3", toolName: "read", args: { path: "README.md" }, status: "running" };
+  const textAfter: TranscriptItem = { id: "text_output_900_0", type: "text", role: "assistant", content: "Done." };
+
+  // With canPrepend=false (startOffset === 0), the leading group never flips between first and last tool.
+  const step1 = visibleTranscriptRows([call1Done, call2Running], undefined, { collapseCards: true, live: true, canPrepend: false }).rows;
+  const step2 = visibleTranscriptRows([call1Done, call2Done], undefined, { collapseCards: true, live: true, canPrepend: false }).rows;
+  const step3 = visibleTranscriptRows([call1Done, call2Done, call3Running], undefined, { collapseCards: true, live: true, canPrepend: false }).rows;
+  const step4 = visibleTranscriptRows([call1Done, call2Done, textAfter], undefined, { collapseCards: true, live: false, canPrepend: false }).rows;
+  assert.equal(step1[0].id, "summary_call-1");
+  assert.equal(step2[0].id, "summary_call-1");
+  assert.equal(step3[0].id, "summary_call-1");
+  assert.equal(step4[0].id, "summary_call-1");
+
+  // Thinking followed by first tool call keeps the mounted summary row ID via stabilizeActivitySummaryIds.
+  const onlyThinking = visibleTranscriptRows([think], undefined, { collapseCards: true, live: true, canPrepend: false }).rows;
+  assert.equal(onlyThinking[0].id, "summary_think_output_0_0");
+  const withFirstToolRaw = visibleTranscriptRows([think, call1Running], undefined, { collapseCards: true, live: true, canPrepend: false }).rows;
+  assert.equal(withFirstToolRaw[0].id, "summary_call-1");
+  const withFirstTool = stabilizeActivitySummaryIds(withFirstToolRaw, onlyThinking);
+  assert.equal(withFirstTool[0].id, "summary_think_output_0_0");
+
+  // Reaching byte zero after a prepend (canPrepend true -> false) keeps the leading settled summary ID.
+  const tailSettled = visibleTranscriptRows([call1Done, call2Done, textAfter], undefined, { collapseCards: true, live: false, canPrepend: true }).rows;
+  assert.equal(tailSettled[0].id, "summary_call-2");
+  const reachedZeroRaw = visibleTranscriptRows([think, call1Done, call2Done, textAfter], undefined, { collapseCards: true, live: false, canPrepend: false }).rows;
+  const reachedZero = stabilizeActivitySummaryIds(reachedZeroRaw, tailSettled);
+  assert.equal(reachedZero[0].id, "summary_call-2");
+
+  // Splitting a group never produces duplicate IDs.
+  const splitRaw = visibleTranscriptRows([call1Done, textAfter, call2Done], undefined, { collapseCards: true, live: false, canPrepend: false }).rows;
+  const split = stabilizeActivitySummaryIds(splitRaw, tailSettled);
+  const splitSummaryIds = split.filter(row => row.type === "activity_summary").map(row => row.id);
+  assert.equal(new Set(splitSummaryIds).size, splitSummaryIds.length);
+});
+
+test("isItemHydrated requires both args and result hydration when a live tool settles with an omitted result", () => {
+  const argsHydratedPatch = { args: { path: "src/app.ts", content: "full" }, argsOmitted: false, bodyOmitted: false };
+  const runningTool: TranscriptItem = {
+    id: "call-live", type: "tool_call", toolCallId: "call-live", toolName: "write",
+    args: {}, status: "running", argsOmitted: true, bodyOmitted: true, rawArgsRange: [0, 100],
+  };
+  assert.equal(isItemHydrated(runningTool, undefined), false);
+  assert.equal(isItemHydrated(runningTool, argsHydratedPatch), true);
+
+  const settledWithOmittedResult: TranscriptItem = {
+    ...runningTool, status: "success", argsOmitted: undefined, resultOmitted: true, bodyOmitted: true, rawResultRange: [100, 300],
+  };
+  assert.equal(isItemHydrated(settledWithOmittedResult, argsHydratedPatch), false);
+  assert.equal(isItemHydrated(settledWithOmittedResult, { ...argsHydratedPatch, result: "ok", resultOmitted: false }), true);
+});
+

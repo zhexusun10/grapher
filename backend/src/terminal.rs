@@ -29,6 +29,23 @@ const MIN_ROWS: u16 = 5;
 const MAX_ROWS: u16 = 200;
 const READ_CHUNK_BYTES: usize = 4096;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+const MAX_TERMINAL_SESSIONS: usize = 32;
+
+fn is_internal_control_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.starts_with("GRAPHER_")
+        || matches!(
+            upper.as_str(),
+            "PI_SESSION_FILE"
+                | "PI_SESSION_ID"
+                | "PI_CODING_AGENT_DIR"
+                | "PI_CODING_AGENT"
+                | "PI_MODEL"
+                | "PI_PROVIDER"
+                | "PI_REASONING_LEVEL"
+                | "PI_THINKING"
+        )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,38 +126,42 @@ impl TerminalSession {
         if self.killed.swap(true, Ordering::AcqRel) {
             return;
         }
-        #[cfg(unix)]
-        {
-            // Terminate the entire foreground/session process group first so
-            // nested dev servers or commands started inside the shell exit too.
-            if let Ok(guard) = self.master.lock() {
-                if let Some(master) = guard.as_ref() {
-                    if let Some(pgid) = master.process_group_leader() {
-                        if pgid > 0 {
+        if !self.child_exited.load(Ordering::Acquire) {
+            #[cfg(unix)]
+            {
+                // Terminate the entire foreground/session process group first so
+                // nested dev servers or commands started inside the shell exit too.
+                if let Ok(guard) = self.master.lock() {
+                    if let Some(master) = guard.as_ref() {
+                        if let Some(pgid) = master.process_group_leader() {
+                            if pgid > 0 {
+                                unsafe {
+                                    libc::kill(-pgid, libc::SIGHUP);
+                                    libc::kill(-pgid, libc::SIGTERM);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(pid) = self.child_pid {
+                    if let Ok(pid_i32) = i32::try_from(pid) {
+                        if pid_i32 > 0 && !self.child_exited.load(Ordering::Acquire) {
                             unsafe {
-                                libc::kill(-pgid, libc::SIGHUP);
-                                libc::kill(-pgid, libc::SIGTERM);
+                                libc::kill(-pid_i32, libc::SIGHUP);
+                                libc::kill(-pid_i32, libc::SIGTERM);
                             }
                         }
                     }
                 }
             }
-            if let Some(pid) = self.child_pid {
-                if let Ok(pid_i32) = i32::try_from(pid) {
-                    if pid_i32 > 0 {
-                        unsafe {
-                            libc::kill(-pid_i32, libc::SIGHUP);
-                            libc::kill(-pid_i32, libc::SIGTERM);
-                        }
-                    }
+            #[cfg(not(unix))]
+            let _ = self.child_pid;
+
+            if !self.child_exited.load(Ordering::Acquire) {
+                if let Ok(mut killer) = self.killer.lock() {
+                    let _ = killer.kill();
                 }
             }
-        }
-        #[cfg(not(unix))]
-        let _ = self.child_pid;
-
-        if let Ok(mut killer) = self.killer.lock() {
-            let _ = killer.kill();
         }
         // Drop writer & master PTY handles so the reader thread unblocks and
         // ConPTY / POSIX PTY descriptors are released immediately.
@@ -172,6 +193,9 @@ impl TerminalManager {
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> Result<TerminalSessionInfo, String> {
+        if self.active_count() >= MAX_TERMINAL_SESSIONS {
+            return Err("Too many open terminals; close an existing terminal first".into());
+        }
         let cwd = validate_workspace_dir(workspace_path)?;
         let size = clamped_pty_size(cols, rows);
         let (shell_program, shell_args, shell_label) = resolve_default_shell();
@@ -222,6 +246,11 @@ impl TerminalManager {
         let mut cmd = CommandBuilder::new(&shell_program);
         for arg in &shell_args {
             cmd.arg(arg);
+        }
+        for (key, _) in std::env::vars_os() {
+            if is_internal_control_env_key(&key.to_string_lossy()) {
+                cmd.env_remove(&key);
+            }
         }
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");

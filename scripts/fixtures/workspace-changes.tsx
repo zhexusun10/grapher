@@ -151,7 +151,7 @@ function Fixture() {
     outputBytes: params.has("bytes") ? Number(params.get("bytes")) : new TextEncoder().encode(outputText).length,
     output: "",
   };
-  const attempts: Execution[] = repeatedAttempts
+  const attempts: Execution[] = repeatedAttempts || (params.get("grow-attempts") === "1" && revision > 0)
     ? [{ ...execution, id: "execution-prior", attempt: 1, status: "completed", startedAt: 1, completedAt: 2 }, { ...execution, attempt: 2 }]
     : [execution];
   const state: Snapshot = {

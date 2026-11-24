@@ -435,7 +435,7 @@ fn large_files_keep_streaming_and_bounded_reads_do_not_grow_without_limit() {
     let Entry::File { blob, .. } = &entries["large"] else {
         panic!("file observation")
     };
-    assert!(read_small(&large, blob).unwrap().is_none());
+    assert!(read_small("large", &large, blob).unwrap().is_none());
     bench::legacy_stage(&f.root, &f.metadata, entries.clone()).unwrap();
     let expected = f.git(&["write-tree"]);
     stage(&f.root, &f.metadata, entries).unwrap();

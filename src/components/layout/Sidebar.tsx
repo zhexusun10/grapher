@@ -6,6 +6,7 @@ import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2, 
 import type { ProjectItem } from "../../types";
 import type { RunIndicator } from "../../hooks/useRunIndicators";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
+import { copyTextToClipboard } from "../../services/externalLink";
 import { workspacePathDisplay } from "./workspacePathDisplay";
 import { ContextMenu, contextMenuAnchor, type ContextMenuAnchor } from "../ui/context-menu";
 
@@ -979,7 +980,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
-              void navigator.clipboard?.writeText(normalizeWorkspacePath(projectContextMenu.project.path)).catch(() => {});
+              void copyTextToClipboard(normalizeWorkspacePath(projectContextMenu.project.path));
               setProjectContextMenu(null);
             }}
           >
@@ -1037,7 +1038,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
-              void navigator.clipboard?.writeText(runContextMenu.runId).catch(() => {});
+              void copyTextToClipboard(runContextMenu.runId);
               setRunContextMenu(null);
             }}
           >

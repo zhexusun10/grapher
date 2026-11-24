@@ -103,7 +103,18 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
   const eventUnsubscribeRef = useRef<(() => void) | null>(null);
   const eventSubscribePromiseRef = useRef<Promise<void> | null>(null);
   const mountedRef = useRef(true);
+  const pendingCreatesRef = useRef(0);
+  const closedSessionIdsRef = useRef(new Set<string>());
   const earlyEventsRef = useRef(new Map<string, { chunks: Uint8Array[]; bytes: number; exit?: number | null }>());
+
+  const markSessionClosed = useCallback((sessionId: string) => {
+    earlyEventsRef.current.delete(sessionId);
+    const closed = closedSessionIdsRef.current;
+    if (closed.size >= 128) {
+      closed.delete(closed.values().next().value!);
+    }
+    closed.add(sessionId);
+  }, []);
 
   const pushOutputForInstance = useCallback((instanceId: number, bytes: Uint8Array) => {
     if (bytes.length === 0) return;
@@ -174,8 +185,11 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
       onOutput: (event) => {
         const instanceId = sessionToInstanceRef.current.get(event.sessionId);
         try {
-          const bytes = decodeBase64ToBytes(event.data);
           if (instanceId === undefined) {
+            if (pendingCreatesRef.current <= 0 || closedSessionIdsRef.current.has(event.sessionId)) {
+              return;
+            }
+            const bytes = decodeBase64ToBytes(event.data);
             const pending = earlyEvents(event.sessionId);
             pending.chunks.push(bytes);
             pending.bytes += bytes.length;
@@ -184,6 +198,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
             }
             return;
           }
+          const bytes = decodeBase64ToBytes(event.data);
           pushOutputForInstance(instanceId, bytes);
         } catch {
           // Ignore malformed output frame.
@@ -191,7 +206,9 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
       },
       onExit: (event) => {
         if (!sessionToKeyRef.current.has(event.sessionId)) {
-          earlyEvents(event.sessionId).exit = event.exitCode;
+          if (pendingCreatesRef.current > 0 && !closedSessionIdsRef.current.has(event.sessionId)) {
+            earlyEvents(event.sessionId).exit = event.exitCode;
+          }
           return;
         }
         handleExit(event.sessionId, event.exitCode);
@@ -211,14 +228,30 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
     return task;
   }, [supported, pushOutputForInstance, earlyEvents, handleExit]);
 
-  // Ensure all live PTYs and event listeners are cleaned up if the app root unmounts.
+  // Ensure all live PTYs and event listeners are cleaned up on unmount or page reload.
   useEffect(() => {
     mountedRef.current = true;
+    const handlePageHide = () => {
+      for (const sessionId of sessionToKeyRef.current.keys()) {
+        markSessionClosed(sessionId);
+        void killDesktopTerminal(sessionId).catch(() => {});
+      }
+      sessionToKeyRef.current.clear();
+      sessionToInstanceRef.current.clear();
+      earlyEventsRef.current.clear();
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", handlePageHide);
+    }
     return () => {
       mountedRef.current = false;
+      if (typeof window !== "undefined") {
+        window.removeEventListener("pagehide", handlePageHide);
+      }
       eventUnsubscribeRef.current?.();
       eventUnsubscribeRef.current = null;
       for (const sessionId of sessionToKeyRef.current.keys()) {
+        markSessionClosed(sessionId);
         void killDesktopTerminal(sessionId).catch(() => {});
       }
       sessionToKeyRef.current.clear();
@@ -227,7 +260,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
       pendingBuffersRef.current.clear();
       earlyEventsRef.current.clear();
     };
-  }, []);
+  }, [markSessionClosed]);
 
   const spawnForWorkspace = useCallback(
     (key: string, workspacePath: string, targetMode: WorkspaceTerminalMode, preservedHeight?: number) => {
@@ -238,6 +271,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         const oldSessionId = existing.sessionId;
         sessionToInstanceRef.current.delete(oldSessionId);
         sessionToKeyRef.current.delete(oldSessionId);
+        markSessionClosed(oldSessionId);
         void killDesktopTerminal(oldSessionId).catch(() => {});
       }
       if (existing) {
@@ -262,13 +296,16 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
       setEntriesByKey((prev) => ({ ...prev, [key]: nextEntry }));
 
       const size = latestSizeByKeyRef.current.get(key);
+      pendingCreatesRef.current += 1;
       void ensureEventSubscription()
         .then(() => createDesktopTerminal(workspacePath, size?.cols, size?.rows))
         .then(
         (info) => {
+          pendingCreatesRef.current = Math.max(0, pendingCreatesRef.current - 1);
           const current = entriesRef.current[key];
           if (!mountedRef.current || !current || current.closing || current.instanceId !== instanceId) {
-            earlyEventsRef.current.delete(info.sessionId);
+            markSessionClosed(info.sessionId);
+            if (pendingCreatesRef.current === 0) earlyEventsRef.current.clear();
             void killDesktopTerminal(info.sessionId).catch(() => {});
             return;
           }
@@ -298,6 +335,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
           });
           const early = earlyEventsRef.current.get(info.sessionId);
           earlyEventsRef.current.delete(info.sessionId);
+          if (pendingCreatesRef.current === 0) earlyEventsRef.current.clear();
           if (early) {
             for (const chunk of early.chunks) pushOutputForInstance(instanceId, chunk);
             if ("exit" in early) handleExit(info.sessionId, early.exit ?? null);
@@ -308,6 +346,8 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
           }
         },
         (error) => {
+          pendingCreatesRef.current = Math.max(0, pendingCreatesRef.current - 1);
+          if (pendingCreatesRef.current === 0) earlyEventsRef.current.clear();
           const current = entriesRef.current[key];
           if (!current || current.instanceId !== instanceId) return;
           const message = error instanceof Error ? error.message : String(error ?? "Failed to start terminal");
@@ -326,7 +366,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         },
       );
     },
-    [supported, ensureEventSubscription, pushOutputForInstance, handleExit],
+    [supported, ensureEventSubscription, pushOutputForInstance, handleExit, markSessionClosed],
   );
 
   const toggleActiveTerminal = useCallback(() => {
@@ -390,6 +430,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         if (current.sessionId) {
           sessionToInstanceRef.current.delete(current.sessionId);
           sessionToKeyRef.current.delete(current.sessionId);
+          markSessionClosed(current.sessionId);
           void killDesktopTerminal(current.sessionId).catch(() => {});
         }
         pendingBuffersRef.current.delete(current.instanceId);
@@ -425,7 +466,7 @@ export function useWorkspaceTerminals(activeWorkspacePath: string): WorkspaceTer
         return next;
       });
     },
-    [activeKey],
+    [activeKey, markSessionClosed],
   );
 
   const closeTerminalForPath = useCallback(

@@ -175,10 +175,8 @@ fn queued_file_observations_match_sequential_capture_and_reread_same_size_edits(
     let old_observations = pending(&path, 257);
     let mut expected = BTreeMap::new();
     for file in pending(&path, 257) {
-        expected.insert(
-            file.name,
-            file_entry(&file.absolute, &file.metadata).unwrap(),
-        );
+        let entry = file_entry(&file.name, &file.absolute, &file.metadata).unwrap();
+        expected.insert(file.name, entry);
     }
     let mut actual = BTreeMap::new();
     fill(&mut actual, files, 4).unwrap();

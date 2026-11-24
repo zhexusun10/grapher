@@ -1089,3 +1089,682 @@ fn workspace_adopted_as_source_is_not_erased_even_after_all_history_is_cleared()
     assert!(adopted.join("nested/dependencies/file").is_file());
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
+
+#[test]
+fn intermediate_publication_retires_idle_slots_for_4_to_1_and_keeps_hot_slots_for_8_to_4() {
+    // Case 1: 4 -> 1 fan-in. After the 4 parallel nodes deliver via intermediate
+    // PublicationCompleted, the next batch is 1 shared-source node so all 4
+    // idle private slots (plus their `.grapher-git` and `.grapher-state`) are
+    // retired asynchronously, while any failed/unreleased slot is preserved.
+    let (_temp, source, mut runtime) = setup();
+    let fan_in_graph = Graph {
+        original_goal: "4-to-1".into(),
+        nodes: ["a", "b", "c", "d", "sink"]
+            .into_iter()
+            .map(|id| Node {
+                id: id.into(),
+                task: id.into(),
+            })
+            .collect(),
+        edges: ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|from| crate::model::Edge {
+                from: from.into(),
+                to: "sink".into(),
+                feedback: false,
+            })
+            .collect(),
+    };
+    let mut config = runtime.state.config.clone().unwrap();
+    config.isolate_parallel_nodes = true;
+    config.max_parallel = 4;
+    runtime.create(fan_in_graph, config).unwrap();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+
+    let run_id = runtime.state.run_id.clone();
+    let run_root = crate::workspace::workspaces_parent(&runtime.root)
+        .join(".grapher-worktrees")
+        .join(&run_id);
+    let mut heads = Vec::new();
+    let mut slots = Vec::new();
+    for node in ["a", "b", "c", "d"] {
+        let exec_id = Uuid::new_v4().to_string();
+        let slot = run_root.join(format!("{node}-1"));
+        directory(&slot);
+        let digest = crate::workspace_state::slot_digest(&slot).unwrap();
+        let git_meta = run_root.join(".grapher-git").join(format!("{digest}.git"));
+        let state_meta = run_root.join(".grapher-state").join(&digest);
+        directory(&git_meta);
+        directory(&state_meta);
+        let mut exec = execution(&runtime, &exec_id);
+        exec.node = node.into();
+        exec.worktree = slot.to_string_lossy().into_owned();
+        runtime
+            .emit(EventKind::Started {
+                execution: exec,
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        let head = format!("head-{node}");
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: exec_id,
+                head: head.clone(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
+        heads.push(head);
+        slots.push((slot, git_meta, state_meta));
+    }
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            },
+            EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into_owned(),
+                heads,
+            },
+            EventKind::PublicationCompleted {
+                head: "pub-4-to-1".into(),
+            },
+        ])
+        .unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    // Whole-run cleanup must still wait for `sink`, but idle slots retire now.
+    runtime.defer_cleanup_worktrees().unwrap();
+    assert!(run_root.is_dir());
+    runtime.retire_idle_workspace_slots().unwrap();
+    for (slot, git_meta, state_meta) in &slots {
+        assert!(!slot.exists(), "idle slot {} should be retired", slot.display());
+        assert!(!git_meta.exists(), "slot git metadata should be retired");
+        assert!(!state_meta.exists(), "slot state metadata should be retired");
+    }
+    crate::cleanup::detached::drain(&runtime.root, &runtime.store).unwrap();
+    assert!(runtime.store.detached_workspaces().unwrap().is_empty());
+
+    // Case 2: 8 -> 4. After 8 nodes deliver, 4 downstream nodes are immediately
+    // ready as a private batch, so 4 hot slots are preserved and 4 excess slots
+    // are retired.
+    let (_temp2, source2, mut runtime2) = setup();
+    let parents: Vec<String> = (1..=8).map(|i| format!("p{i}")).collect();
+    let children: Vec<String> = (1..=4).map(|i| format!("c{i}")).collect();
+    let mut nodes: Vec<Node> = parents
+        .iter()
+        .chain(&children)
+        .map(|id| Node {
+            id: id.clone(),
+            task: id.clone(),
+        })
+        .collect();
+    let mut edges = Vec::new();
+    for (idx, p) in parents.iter().enumerate() {
+        edges.push(crate::model::Edge {
+            from: p.clone(),
+            to: children[idx % 4].clone(),
+            feedback: false,
+        });
+    }
+    let mut config2 = runtime2.state.config.clone().unwrap();
+    config2.isolate_parallel_nodes = true;
+    config2.max_parallel = 4;
+    runtime2
+        .create(
+            Graph {
+                original_goal: "8-to-4".into(),
+                nodes: std::mem::take(&mut nodes),
+                edges,
+            },
+            config2,
+        )
+        .unwrap();
+    runtime2.set_route("graph").unwrap();
+    runtime2.approve().unwrap();
+    let run_id2 = runtime2.state.run_id.clone();
+    let run_root2 = crate::workspace::workspaces_parent(&runtime2.root)
+        .join(".grapher-worktrees")
+        .join(&run_id2);
+    let mut heads2 = Vec::new();
+    let mut slot_paths2 = Vec::new();
+    for node in &parents {
+        let exec_id = Uuid::new_v4().to_string();
+        let slot = run_root2.join(format!("{node}-1"));
+        directory(&slot);
+        let mut exec = execution(&runtime2, &exec_id);
+        exec.node = node.clone();
+        exec.worktree = slot.to_string_lossy().into_owned();
+        runtime2
+            .emit(EventKind::Started {
+                execution: exec,
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        let head = format!("head-{node}");
+        runtime2
+            .emit(EventKind::Finished {
+                execution_id: exec_id,
+                head: head.clone(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
+        heads2.push(head);
+        slot_paths2.push(slot);
+    }
+    runtime2
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            },
+            EventKind::PublicationStarted {
+                repository: source2.to_string_lossy().into_owned(),
+                heads: heads2,
+            },
+            EventKind::PublicationCompleted {
+                head: "pub-8-to-4".into(),
+            },
+        ])
+        .unwrap();
+    runtime2.retire_idle_workspace_slots().unwrap();
+    let surviving = slot_paths2.iter().filter(|slot| slot.is_dir()).count();
+    assert_eq!(surviving, 4, "8 -> 4 should retain 4 hot slots and retire 4 excess slots");
+    assert_eq!(runtime2.store.detached_workspaces().unwrap().len(), 4);
+    crate::cleanup::detached::drain(&runtime2.root, &runtime2.store).unwrap();
+    assert!(runtime2.store.detached_workspaces().unwrap().is_empty());
+}
+
+#[test]
+fn prune_shadow_unreachable_cleans_stale_cache_refs_and_dead_views_while_keeping_live_history() {
+    let (_temp, source, runtime) = setup();
+    crate::workspace::git(&source, &["init", "-q"]).unwrap();
+    crate::workspace::git(&source, &["config", "user.name", "Grapher"]).unwrap();
+    crate::workspace::git(&source, &["config", "user.email", "grapher@example.com"]).unwrap();
+    fs::write(source.join("main.txt"), "v1").unwrap();
+    crate::workspace::git(&source, &["add", "main.txt"]).unwrap();
+    crate::workspace::git(&source, &["commit", "-q", "-m", "v1"]).unwrap();
+
+    let live_head = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
+    let shadow_text = shadow.to_str().unwrap();
+
+    // Create a second commit only referenced by a stale cache ref.
+    fs::write(source.join("main.txt"), "v2").unwrap();
+    let stale_head = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    assert_ne!(live_head, stale_head);
+
+    let run_id = runtime.state.run_id.clone();
+    crate::workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            &format!("refs/grapher/runs/{run_id}/nodes/a"),
+            &live_head,
+        ],
+    )
+    .unwrap();
+    crate::workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            "refs/grapher/inputs/stale-cache",
+            &stale_head,
+        ],
+    )
+    .unwrap();
+    // Point HEAD back to live_head so stale_head is only kept by the cache ref.
+    crate::workspace::git(
+        &shadow,
+        &["--git-dir", shadow_text, "update-ref", "HEAD", &live_head],
+    )
+    .unwrap();
+    let dead_view = shadow.join("agent-views").join(&stale_head);
+    fs::create_dir_all(&dead_view).unwrap();
+    fs::write(dead_view.join("view.json"), "{}").unwrap();
+    let live_view = shadow.join("agent-views").join(&live_head);
+    fs::create_dir_all(&live_view).unwrap();
+    fs::write(live_view.join("view.json"), "{}").unwrap();
+
+    let protected = BTreeSet::from([live_head.clone()]);
+    crate::workspace::prune_shadow_unreachable(&shadow, &protected).unwrap();
+
+    // Live run ref, protected commit and live view remain intact.
+    let kept = crate::workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "rev-parse",
+            &format!("refs/grapher/runs/{run_id}/nodes/a"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(kept, live_head);
+    assert!(live_view.is_dir());
+
+    // Stale cache ref and dead view are reclaimed.
+    assert!(crate::workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "rev-parse",
+            "--verify",
+            "refs/grapher/inputs/stale-cache",
+        ],
+    )
+    .is_err());
+    assert!(!dead_view.exists());
+}
+
+#[test]
+fn intermediate_publication_retires_installed_publication_dirs_and_keeps_incomplete_journals() {
+    let (_temp, source, mut runtime) = setup();
+    let fan_in = Graph {
+        original_goal: "pub-cleanup".into(),
+        nodes: ["a", "sink"]
+            .into_iter()
+            .map(|id| Node {
+                id: id.into(),
+                task: id.into(),
+            })
+            .collect(),
+        edges: vec![crate::model::Edge {
+            from: "a".into(),
+            to: "sink".into(),
+            feedback: false,
+        }],
+    };
+    let mut config = runtime.state.config.clone().unwrap();
+    config.isolate_parallel_nodes = true;
+    runtime.create(fan_in, config).unwrap();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+
+    let run_id = runtime.state.run_id.clone();
+    let run_root = crate::workspace::workspaces_parent(&runtime.root)
+        .join(".grapher-worktrees")
+        .join(&run_id);
+
+    // 1. Installed publication workspace + journal + view -> should be retired.
+    let done_pub = run_root.join("publication-files-0123456789abcdef");
+    let done_journal = run_root.join("publication-files-0123456789abcdef.publication");
+    let done_view = run_root.join("publication-view-fedcba9876543210");
+    directory(&done_pub);
+    fs::create_dir_all(done_journal.join("00000000")).unwrap();
+    fs::write(done_journal.join("00000000/prepared.json"), "{}").unwrap();
+    fs::write(done_journal.join("00000000/installed"), "pub-1").unwrap();
+    directory(&done_view);
+    let done_digest = crate::workspace_state::slot_digest(&done_pub).unwrap();
+    let done_git = run_root.join(".grapher-git").join(format!("{done_digest}.git"));
+    let done_state = run_root.join(".grapher-state").join(&done_digest);
+    directory(&done_git);
+    directory(&done_state);
+
+    // 2. Uninstalled publication journal -> must NOT be retired.
+    let pending_pub = run_root.join("publication-files-aaaaaaaaaaaaaaaa");
+    let pending_journal = run_root.join("publication-files-aaaaaaaaaaaaaaaa.publication");
+    directory(&pending_pub);
+    fs::create_dir_all(pending_journal.join("00000000")).unwrap();
+    fs::write(pending_journal.join("00000000/prepared.json"), "{}").unwrap();
+
+    // 3. Publication workspace owned by a failed merger -> must NOT be retired.
+    let failed_pub = run_root.join("publication-files-bbbbbbbbbbbbbbbb");
+    directory(&failed_pub);
+    let mut merger = execution(&runtime, &Uuid::new_v4().to_string());
+    merger.node = "merge:publication".into();
+    merger.worktree = failed_pub.to_string_lossy().into_owned();
+    let merger_id = merger.id.clone();
+    runtime
+        .emit(EventKind::MergerStarted { execution: merger })
+        .unwrap();
+    runtime
+        .emit(EventKind::MergerFailed {
+            execution_id: merger_id,
+            error: "conflict".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+
+    // Finish `a` and complete an intermediate publication.
+    let exec_id = Uuid::new_v4().to_string();
+    let mut exec = execution(&runtime, &exec_id);
+    exec.node = "a".into();
+    exec.worktree = source.to_string_lossy().into_owned();
+    runtime
+        .emit(EventKind::Started {
+            execution: exec,
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: exec_id,
+            head: "head-a".into(),
+            output: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            },
+            EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into_owned(),
+                heads: vec!["head-a".into()],
+            },
+            EventKind::PublicationCompleted {
+                head: "pub-1".into(),
+            },
+        ])
+        .unwrap();
+
+    runtime.retire_idle_workspace_slots().unwrap();
+    assert!(!done_pub.exists());
+    assert!(!done_journal.exists());
+    assert!(!done_view.exists());
+    assert!(!done_git.exists());
+    assert!(!done_state.exists());
+    assert!(
+        !run_root.join(".grapher-git").exists(),
+        "empty .grapher-git shell should be removed"
+    );
+    assert!(
+        !run_root.join(".grapher-state").exists(),
+        "empty .grapher-state shell should be removed"
+    );
+    assert!(pending_pub.is_dir(), "uninstalled publication workspace must stay");
+    assert!(pending_journal.is_dir(), "uninstalled journal must stay");
+    assert!(failed_pub.is_dir(), "failed merger workspace must stay");
+    crate::cleanup::detached::drain(&runtime.root, &runtime.store).unwrap();
+    assert!(runtime.store.detached_workspaces().unwrap().is_empty());
+}
+
+#[test]
+fn manual_graph_revision_shrinks_excess_idle_slots() {
+    let (_temp, source, mut runtime) = setup();
+    let initial = Graph {
+        original_goal: "shrink".into(),
+        nodes: ["p1", "p2", "p3", "p4", "c1", "c2", "c3", "c4"]
+            .into_iter()
+            .map(|id| Node {
+                id: id.into(),
+                task: id.into(),
+            })
+            .collect(),
+        edges: [("p1", "c1"), ("p2", "c2"), ("p3", "c3"), ("p4", "c4")]
+            .into_iter()
+            .map(|(from, to)| crate::model::Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback: false,
+            })
+            .collect(),
+    };
+    let mut config = runtime.state.config.clone().unwrap();
+    config.isolate_parallel_nodes = true;
+    config.max_parallel = 4;
+    runtime.create(initial, config).unwrap();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+
+    let run_id = runtime.state.run_id.clone();
+    let run_root = crate::workspace::workspaces_parent(&runtime.root)
+        .join(".grapher-worktrees")
+        .join(&run_id);
+    let mut heads = Vec::new();
+    let mut slots = Vec::new();
+    for node in ["p1", "p2", "p3", "p4"] {
+        let exec_id = Uuid::new_v4().to_string();
+        let slot = run_root.join(format!("{node}-1"));
+        directory(&slot);
+        let mut exec = execution(&runtime, &exec_id);
+        exec.node = node.into();
+        exec.worktree = slot.to_string_lossy().into_owned();
+        runtime
+            .emit(EventKind::Started {
+                execution: exec,
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        let head = format!("head-{node}");
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: exec_id,
+                head: head.clone(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
+        heads.push(head);
+        slots.push(slot);
+    }
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            },
+            EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into_owned(),
+                heads,
+            },
+            EventKind::PublicationCompleted {
+                head: "pub-1".into(),
+            },
+        ])
+        .unwrap();
+    // With 4 ready children (c1..c4), all 4 slots are kept hot.
+    runtime.retire_idle_workspace_slots().unwrap();
+    assert_eq!(slots.iter().filter(|s| s.is_dir()).count(), 4);
+
+    // Manually revise the graph down to a single remaining child `c1`.
+    let narrowed = Graph {
+        original_goal: "shrink".into(),
+        nodes: ["p1", "p2", "p3", "p4", "c1"]
+            .into_iter()
+            .map(|id| Node {
+                id: id.into(),
+                task: id.into(),
+            })
+            .collect(),
+        edges: ["p1", "p2", "p3", "p4"]
+            .into_iter()
+            .map(|from| crate::model::Edge {
+                from: from.into(),
+                to: "c1".into(),
+                feedback: false,
+            })
+            .collect(),
+    };
+    runtime
+        .revise_graph(narrowed, crate::model::PlanningSummary::default())
+        .unwrap();
+    assert_eq!(
+        slots.iter().filter(|s| s.is_dir()).count(),
+        0,
+        "narrowing next batch from 4 to 1 should retire all 4 idle slots"
+    );
+    crate::cleanup::detached::drain(&runtime.root, &runtime.store).unwrap();
+}
+
+#[test]
+fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_result() {
+    let (_temp, source, mut runtime) = setup();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+
+    let fixture_probe = source.join("fixture-shell");
+    fs::write(&fixture_probe, "#!/bin/sh\n").unwrap();
+    let policy: crate::environment::EnvironmentConfig = serde_json::from_value(serde_json::json!({
+        "mode": "native-workspace",
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "scopes": [".venv"],
+        "layout": "fixed",
+        "launch": {
+            "entry": &fixture_probe,
+            "path": [source.to_string_lossy()],
+            "shell": &fixture_probe
+        },
+        "baseline": [&fixture_probe],
+        "discovery": true,
+        "bestEffort": true
+    }))
+    .unwrap();
+    runtime
+        .emit(EventKind::EnvironmentPolicyResolved {
+            environment: Some(policy.clone()),
+            reason: "test".into(),
+        })
+        .unwrap();
+
+    let env_dir = runtime
+        .root
+        .join("environments")
+        .join(&runtime.state.run_id);
+    let store =
+        crate::environment::Environments::new(&runtime.root, &runtime.state.run_id, &policy)
+            .unwrap();
+    let work_a = source.parent().unwrap().join("env-work-a");
+    fs::create_dir_all(work_a.join(".venv")).unwrap();
+    fs::write(work_a.join(".venv/stale.txt"), "stale-blob-content").unwrap();
+    let files = crate::workspace_files::Files::environment(
+        &env_dir.join("files"),
+        &policy.scopes,
+        &policy.caches,
+    )
+    .unwrap();
+    let stale_env_ref = Uuid::new_v4().to_string();
+    files
+        .capture(&work_a, &stale_env_ref, "head-stale", &[])
+        .unwrap();
+
+    fs::write(work_a.join(".venv/stale.txt"), "kept-blob-content").unwrap();
+    let kept_env_ref = Uuid::new_v4().to_string();
+    files
+        .capture(&work_a, &kept_env_ref, "head-kept", &[])
+        .unwrap();
+    assert_ne!(stale_env_ref, kept_env_ref);
+
+    let launch_ref = store.launch(&policy.launch).unwrap();
+    let mut stale_launch = policy.launch.clone();
+    stale_launch.variables.insert("UNUSED".into(), "1".into());
+    let stale_launch_ref = store.launch(&stale_launch).unwrap();
+    assert_ne!(launch_ref, stale_launch_ref);
+
+    let composite = crate::environment::CompositeResult {
+        domain: crate::environment::Domain {
+            platform: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            baseline: "base".into(),
+            policy: "policy".into(),
+            contract: "native-workspace-v4".into(),
+        },
+        code_ref: "head-kept".into(),
+        environment_ref: kept_env_ref.clone(),
+        launch_ref: launch_ref.clone(),
+        resource_refs: vec![],
+        layout: Some(work_a.to_string_lossy().into_owned()),
+        generation: Uuid::new_v4().to_string(),
+        selected_from: vec![],
+        inheritance: None,
+    };
+    let descriptor = crate::environment::ResultDescriptor {
+        schema: 2,
+        run_id: runtime.state.run_id.clone(),
+        result: composite.clone(),
+        config: policy.clone(),
+        workspace: work_a.to_string_lossy().into_owned(),
+        entries: vec![crate::environment::ResultEntry {
+            name: "default".into(),
+            result: composite,
+            workspace: work_a.to_string_lossy().into_owned(),
+        }],
+        default_entry: Some("default".into()),
+    };
+
+    let exec_id = Uuid::new_v4().to_string();
+    let mut exec = execution(&runtime, &exec_id);
+    exec.node = "task".into();
+    runtime
+        .emit(EventKind::Started {
+            execution: exec,
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: exec_id,
+            head: "head-kept".into(),
+            output: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::ResultPublished { descriptor })
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: "head-kept".into(),
+        })
+        .unwrap();
+
+    // Case A: current published result stays intact; stale version, blob and launch are pruned.
+    let removed = runtime.prune_stale_environment_snapshots().unwrap();
+    assert!(removed >= 2);
+    assert!(env_dir
+        .join("files/versions")
+        .join(format!("{kept_env_ref}.json"))
+        .is_file());
+    assert!(!env_dir
+        .join("files/versions")
+        .join(format!("{stale_env_ref}.json"))
+        .exists());
+    assert!(env_dir
+        .join("launches")
+        .join(format!("{launch_ref}.json"))
+        .is_file());
+    assert!(!env_dir
+        .join("launches")
+        .join(format!("{stale_launch_ref}.json"))
+        .exists());
+
+    // Case B: a later shared-source batch runs and settles, making the earlier
+    // published_result historical so all remaining snapshots can be pruned.
+    runtime
+        .emit(EventKind::ExecutionBatchStarted {
+            nodes: vec!["task".into()],
+            isolated: false,
+            resumed: false,
+        })
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+    let removed_all = runtime.prune_stale_environment_snapshots().unwrap();
+    assert!(removed_all >= 2);
+    assert!(!env_dir
+        .join("files/versions")
+        .join(format!("{kept_env_ref}.json"))
+        .exists());
+    assert!(fs::read_dir(env_dir.join("files/blobs"))
+        .unwrap()
+        .next()
+        .is_none());
+}

@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
-import { rowOffsets, rowAt, visibleRows, visibleTranscriptRows } from "../services/transcriptLayout";
+import { rowOffsets, rowAt, visibleRows, visibleTranscriptRows, matchActivitySummary, stabilizeActivitySummaryIds, type ActivitySummaryAnchor } from "../services/transcriptLayout";
 import { type ChatMessage, type FileAttachment, type ImageAttachment, TranscriptItem } from "../types";
 import { plannerUserTurnKey } from "../services/plannerUserTurns";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
@@ -14,6 +14,7 @@ import { shareJson } from "../services/structuralSharing";
 import { VirtualizedList } from "./VirtualizedList";
 import { TranscriptRow } from "./TranscriptRow";
 import type { CardsTransitionPhase } from "./ActivitySummaryRow";
+import { markCardsPresented } from "../services/cardAnimations";
 import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { observeElementResize } from "../services/sharedResizeObserver";
 import type { InlineSteerAttachment, LiveSteerMarker } from "../lib/pendingSteers";
@@ -21,6 +22,7 @@ import {
   applyHydratedCardPatches,
   collectHydrationRanges,
   EAGER_SUMMARY_HYDRATION_MAX_BYTES,
+  hydrationKeyForItem,
   itemHydrationRanges,
   totalHydrationRangeBytes,
   type HydratedCardPatch,
@@ -297,7 +299,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const [userDraft, setUserDraft] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
-  const expandedSummaryMetaRef = useRef(new Map<string, { toolCallIds: string[]; ordinalFromEnd: number }>());
+  const expandedSummaryMetaRef = useRef(new Map<string, ActivitySummaryAnchor>());
+  const previousSummariesRef = useRef<TranscriptItem[]>([]);
+  const attemptedHydrationRangesRef = useRef(new Map<string, string>());
   const itemsSnapshotRef = useRef<TranscriptItem[]>([]);
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoFollowRef = useRef(false);
@@ -928,13 +932,60 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       for (const insertion of insertions.reverse()) rows.splice(insertion.index, 0, ...insertion.rows);
     }
     rows = applyHydratedCardPatches(rows, hydratedCards, hydratingKeys);
-    return visibleTranscriptRows(rows, starts, { collapseCards: cardsCollapsed, live: !settled });
-  }, [parsedItems, settled, sourceUserFallbacks, output, cardsCollapsed, hydratedCards, hydratingKeys]);
+    const firstSegmentSource = segmentedRef.current ? segmentStartsRef.current.keys().next().value : undefined;
+    const canPrepend = segmentedRef.current
+      ? (firstSegmentSource ? (segmentStatesRef.current.get(firstSegmentSource)?.startOffset ?? 0) > 0 : false)
+      : startOffset > 0;
+    const raw = visibleTranscriptRows(rows, starts, { collapseCards: cardsCollapsed, live: !settled, canPrepend });
+    if (!cardsCollapsed || previousSummariesRef.current.length === 0) return raw;
+    const stabilized = stabilizeActivitySummaryIds(raw.rows, previousSummariesRef.current);
+    return stabilized === raw.rows ? raw : { ...raw, rows: stabilized };
+  }, [parsedItems, settled, sourceUserFallbacks, output, startOffset, cardsCollapsed, hydratedCards, hydratingKeys]);
   const hasRangeSupportRef = useRef(false);
   hasRangeSupportRef.current = parsedItems.some(
     item => Boolean(item.rawRange || item.rawArgsRange || item.rawResultRange),
   );
   const items = projected.rows;
+  const prevCardsCollapsedRef = useRef(cardsCollapsed);
+  if (prevCardsCollapsedRef.current && !cardsCollapsed) {
+    markCardsPresented(
+      items
+        .filter(item => item.type === "tool_call" || item.type === "thinking")
+        .map(item => item.id),
+    );
+  }
+  prevCardsCollapsedRef.current = cardsCollapsed;
+  useLayoutEffect(() => {
+    previousSummariesRef.current = cardsCollapsed
+      ? items.filter(row => row.type === "activity_summary")
+      : [];
+  }, [cardsCollapsed, items]);
+  useEffect(() => {
+    attemptedHydrationRangesRef.current.clear();
+  }, [parseCacheKey]);
+  useEffect(() => {
+    if (!onHydrateItems) return;
+    const needed: TranscriptItem[] = [];
+    const consider = (item: TranscriptItem) => {
+      if (!item.bodyOmitted || item.hydrating || !expandedRows.current.get(item.id)) return;
+      const ranges = itemHydrationRanges(item);
+      if (ranges.length === 0) return;
+      const key = hydrationKeyForItem(item) ?? item.id;
+      const signature = ranges.map(([start, end]) => `${start}:${end}`).join(",");
+      if (attemptedHydrationRangesRef.current.get(key) === signature) return;
+      attemptedHydrationRangesRef.current.set(key, signature);
+      needed.push(item);
+    };
+    for (const row of items) {
+      if (row.type === "activity_summary") {
+        if (!expandedRows.current.get(row.id)) continue;
+        for (const child of row.summaryItems ?? []) consider(child);
+      } else {
+        consider(row);
+      }
+    }
+    if (needed.length > 0) onHydrateItems(needed);
+  }, [items, onHydrateItems]);
   // Missing revisions keep a boundary before the next loaded revision, even
   // when their rows have not loaded or have been virtualized out of the DOM.
   const sourceStarts: Array<{ source: string; index: number }> = [];
@@ -1091,6 +1142,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             .filter((callId): callId is string => Boolean(callId));
           expandedSummaryMetaRef.current.set(id, {
             toolCallIds,
+            itemIds: (target?.summaryItems ?? []).map(child => child.id),
             ordinalFromEnd: summaries.length - 1 - summaryIndex,
           });
         }
@@ -1292,14 +1344,20 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   itemsSnapshotRef.current = items;
   if (cardsCollapsed && expandedSummaryMetaRef.current.size > 0) {
     const summaries = items.filter(row => row.type === "activity_summary");
-    const summaryIds = new Set(summaries.map(row => row.id));
+    const summaryById = new Map(summaries.map((row, index) => [row.id, { row, index }]));
     for (const [savedId, meta] of [...expandedSummaryMetaRef.current.entries()]) {
-      if (summaryIds.has(savedId)) continue;
-      const byToolCall = meta.toolCallIds.length > 0
-        ? summaries.find(row => (row.summaryItems ?? []).some(child => child.toolCallId && meta.toolCallIds.includes(child.toolCallId)))
-        : undefined;
-      const byOrdinal = summaries[summaries.length - 1 - meta.ordinalFromEnd];
-      const matched = byToolCall ?? byOrdinal;
+      const existing = summaryById.get(savedId);
+      if (existing) {
+        expandedSummaryMetaRef.current.set(savedId, {
+          toolCallIds: (existing.row.summaryItems ?? [])
+            .map(child => child.toolCallId)
+            .filter((callId): callId is string => Boolean(callId)),
+          itemIds: (existing.row.summaryItems ?? []).map(child => child.id),
+          ordinalFromEnd: summaries.length - 1 - existing.index,
+        });
+        continue;
+      }
+      const matched = matchActivitySummary(summaries, meta);
       if (matched) {
         expandedRows.current.delete(savedId);
         expandedRows.current.set(matched.id, true);
@@ -1309,6 +1367,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           toolCallIds: (matched.summaryItems ?? [])
             .map(child => child.toolCallId)
             .filter((callId): callId is string => Boolean(callId)),
+          itemIds: (matched.summaryItems ?? []).map(child => child.id),
           ordinalFromEnd: summaries.length - 1 - nextIndex,
         });
       }
@@ -1328,13 +1387,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   const startEdit = useCallback((id: string, text: string) => { setEditingUser(id); setUserDraft(text); }, []);
   const cancelEdit = useCallback(() => setEditingUser(null), []);
+  const getChildExpanded = useCallback((id: string) => expandedRows.current.get(id), []);
   const renderRow = useCallback((item: TranscriptItem, _index?: number, allowTransition = true) => <TranscriptRow item={item}
-    expanded={expandedRows.current.get(item.id)} cardsTransition={allowTransition ? cardsTransition : "idle"} onExpandedChange={handleExpandedChange} onChildResize={onUserResize}
+    expanded={expandedRows.current.get(item.id)} cardsTransition={allowTransition ? cardsTransition : "idle"} getChildExpanded={getChildExpanded} onExpandedChange={handleExpandedChange} onChildResize={onUserResize}
     onChildExpandedChange={handleChildExpandedChange}
     editing={editingUser === item.id} draft={editingUser === item.id ? userDraft : ""}
     onDraftChange={setUserDraft} onStartEdit={startEdit} onCancelEdit={cancelEdit} onEditUser={onEditUser}
     steerAttachments={steerRowAttachments.get(item.id)} />,
-    [cardsTransition, handleExpandedChange, handleChildExpandedChange, onUserResize, editingUser, userDraft, startEdit, cancelEdit, onEditUser, steerRowAttachments]);
+    [cardsTransition, getChildExpanded, handleExpandedChange, handleChildExpandedChange, onUserResize, editingUser, userDraft, startEdit, cancelEdit, onEditUser, steerRowAttachments]);
 
   const isEmptyTranscript = settled && items.length === 0;
 

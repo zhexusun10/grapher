@@ -1,5 +1,5 @@
 import { t, localizeError } from "../i18n";
-import { openExternalUrl, resolveExternalHttpUrl } from "../services/externalLink";
+import { openExternalUrl, resolveExternalHttpUrl, copyTextToClipboard } from "../services/externalLink";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence, useIsPresent, useReducedMotion } from "motion/react";
 import {
@@ -38,19 +38,31 @@ function safeAuthUrl(url?: string) {
   return url ? resolveExternalHttpUrl(url) : null;
 }
 
-function AuthLink({ url, label }: { url?: string; label?: string }) {
-  if (!safeAuthUrl(url)) return null;
+function AuthLink({ url, label, copied, onCopy }: { url?: string; label?: string; copied: boolean; onCopy: (text: string) => void }) {
+  const safeUrl = url ? resolveExternalHttpUrl(url) : null;
+  if (!safeUrl) return null;
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      referrerPolicy="no-referrer"
-      className="provider-oauth-btn"
-    >
-      <ExternalLink size={14} />
-      <span>{label || t("在浏览器中打开授权页面")}</span>
-    </a>
+    <div className="provider-auth-link-row">
+      <a
+        href={safeUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        referrerPolicy="no-referrer"
+        className="provider-oauth-btn"
+      >
+        <ExternalLink size={14} />
+        <span>{label || t("在浏览器中打开授权页面")}</span>
+      </a>
+      <button
+        type="button"
+        className="copy-btn provider-oauth-copy-btn"
+        onClick={() => onCopy(safeUrl)}
+        aria-label={copied ? t("已复制") : t("复制链接")}
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+        <span>{copied ? t("已复制") : t("复制链接")}</span>
+      </button>
+    </div>
   );
 }
 
@@ -86,13 +98,13 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const [login, setLogin] = useState<LoginState>();
   const [answer, setAnswer] = useState("");
   const [showKey, setShowKey] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(() => !providerAuth.getCachedCatalog());
   const [error, setError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
   const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [showProviders, setShowProviders] = useState(false);
+  const [showProviders, setShowProviders] = useState(() => providersExpanded);
   const [showConfigured, setShowConfigured] = useState(false);
 
   const mounted = useRef(false);
@@ -143,10 +155,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   useEffect(() => {
     setAnswer("");
   }, [login?.prompt?.id]);
-
-  useEffect(() => {
-    if (providersExpanded) setShowProviders(true);
-  }, []);
 
   function setProvidersExpanded(expanded: boolean) {
     providersExpanded = expanded;
@@ -220,6 +228,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     activeId.current = undefined;
     setAnswer("");
     setShowKey(false);
+    setCopiedKey(null);
     onBusyChange(true);
     setBusy(true);
     setError("");
@@ -341,16 +350,16 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     setActiveProvider(null);
     setAnswer("");
     setShowKey(false);
+    setCopiedKey(null);
   }
 
-  async function copyText(text: string) {
-    if (!navigator.clipboard?.writeText) return;
+  async function copyText(text: string, key = text) {
     try {
-      await navigator.clipboard.writeText(text);
+      if (!await copyTextToClipboard(text)) throw new Error(t("复制失败，请检查剪贴板权限。"));
       if (!mounted.current) return;
-      setCopiedCode(true);
+      setCopiedKey(key);
       if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => { if (mounted.current) setCopiedCode(false); }, 2000);
+      copyTimer.current = setTimeout(() => { if (mounted.current) setCopiedKey(null); }, 2000);
     } catch (error) {
       if (mounted.current) setError(String(error));
     }
@@ -579,18 +588,28 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                             <button
                               type="button"
                               className="copy-btn"
-                              onClick={() => copyText(event.userCode!)}
+                              onClick={() => void copyText(event.userCode!, `code:${i}`)}
                               aria-label={t("复制到剪贴板")}
                             >
-                              {copiedCode ? <Check size={14} /> : <Copy size={14} />}
-                              <span>{copiedCode ? t("已复制") : t("复制")}</span>
+                              {copiedKey === `code:${i}` ? <Check size={14} /> : <Copy size={14} />}
+                              <span>{copiedKey === `code:${i}` ? t("已复制") : t("复制")}</span>
                             </button>
                           </div>
                         </div>
                       )}
-                      <AuthLink url={event.url || event.verificationUri} />
+                      <AuthLink
+                        url={event.url || event.verificationUri}
+                        copied={copiedKey === `url:${i}`}
+                        onCopy={(text) => void copyText(text, `url:${i}`)}
+                      />
                       {event.links?.map((link, index) => (
-                        <AuthLink key={index} url={link.url} label={link.label} />
+                        <AuthLink
+                          key={index}
+                          url={link.url}
+                          label={link.label}
+                          copied={copiedKey === `link:${i}:${index}`}
+                          onCopy={(text) => void copyText(text, `link:${i}:${index}`)}
+                        />
                       ))}
                     </div>
                   ))}

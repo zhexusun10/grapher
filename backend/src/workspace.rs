@@ -973,9 +973,10 @@ pub(crate) fn prune_shadow_run_refs(
         )?;
     }
 
-    // Node result commits are also pinned under refs/grapher/heads/<commit>.
-    // Keep a head only while a non-head ref (another Run, a source input or a
-    // published result) still points at the same object.
+    // Node result commits are also pinned under refs/grapher/heads/<commit>,
+    // and source deduplication caches live under refs/grapher/inputs/<key>.
+    // Keep cache refs only while a root ref (HEAD, another Run, a published
+    // result or protected live-Run evidence) still points at the same object.
     let refs = git(
         shadow,
         &[
@@ -986,19 +987,26 @@ pub(crate) fn prune_shadow_run_refs(
         ],
     )?;
     let mut referenced = std::collections::BTreeSet::new();
-    let mut heads = Vec::new();
+    if let Ok(head) = git(shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", "HEAD"]) {
+        if !head.is_empty() {
+            referenced.insert(head);
+        }
+    }
+    let mut cache_refs = Vec::new();
     for line in refs.lines() {
         let Some((reference, object)) = line.split_once(' ') else {
             continue;
         };
-        if reference.starts_with("refs/grapher/heads/") {
-            heads.push((reference.to_string(), object.to_string()));
+        if reference.starts_with("refs/grapher/heads/")
+            || reference.starts_with("refs/grapher/inputs/")
+        {
+            cache_refs.push((reference.to_string(), object.to_string()));
         } else {
             referenced.insert(object.to_string());
         }
     }
     let mut head_transaction = String::new();
-    for (reference, object) in heads {
+    for (reference, object) in cache_refs {
         if !referenced.contains(&object) && !protected.contains(&object) {
             head_transaction.push_str(&format!("delete {reference}\n"));
         }
@@ -1047,9 +1055,164 @@ pub(crate) fn prune_shadow_run_refs(
                 shadow,
                 &["--git-dir", shadow_text, "gc", "--prune=now", "--quiet"],
             )?;
+            prune_dead_agent_views(shadow, shadow_text);
         }
     }
     Ok(())
+}
+
+/// Reclaim unreferenced cache refs (`refs/grapher/heads/*`, `refs/grapher/inputs/*`),
+/// dead `agent-views/` and unreachable Git objects from a retained shadow
+/// repository (e.g. a standard Git project after a Run settles) without
+/// removing any live Run's `refs/grapher/runs/*` or protected commits.
+pub(crate) fn prune_shadow_unreachable(
+    shadow: &Path,
+    protected: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(shadow) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "Refusing linked or non-directory shadow repository: {}",
+            shadow.display()
+        ));
+    }
+    let shadow_text = shadow.to_str().ok_or("Invalid shadow path")?;
+    let refs = git(
+        shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+        ],
+    )?;
+    let mut referenced = std::collections::BTreeSet::new();
+    if let Ok(head) = git(shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", "HEAD"]) {
+        if !head.is_empty() {
+            referenced.insert(head);
+        }
+    }
+    let mut cache_refs = Vec::new();
+    for line in refs.lines() {
+        let Some((reference, object)) = line.split_once(' ') else {
+            continue;
+        };
+        if reference.starts_with("refs/grapher/heads/")
+            || reference.starts_with("refs/grapher/inputs/")
+        {
+            cache_refs.push((reference.to_string(), object.to_string()));
+        } else {
+            referenced.insert(object.to_string());
+        }
+    }
+    let mut head_transaction = String::new();
+    for (reference, object) in cache_refs {
+        if !referenced.contains(&object) && !protected.contains(&object) {
+            head_transaction.push_str(&format!("delete {reference}\n"));
+        }
+    }
+    let removed_cache_refs = !head_transaction.is_empty();
+    if removed_cache_refs {
+        git_bytes(
+            shadow,
+            &["--git-dir", shadow_text, "update-ref", "--stdin"],
+            None,
+            Some(head_transaction.as_bytes()),
+        )?;
+    }
+    let remaining = git(
+        shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "for-each-ref",
+            "--format=%(objectname)",
+        ],
+    )?;
+    let remaining: std::collections::BTreeSet<&str> = remaining.lines().collect();
+    if protected
+        .iter()
+        .all(|object| remaining.contains(object.as_str()))
+    {
+        if removed_cache_refs {
+            git(
+                shadow,
+                &[
+                    "--git-dir",
+                    shadow_text,
+                    "reflog",
+                    "expire",
+                    "--expire=now",
+                    "--all",
+                ],
+            )?;
+            git(
+                shadow,
+                &["--git-dir", shadow_text, "gc", "--prune=now", "--quiet"],
+            )?;
+        } else {
+            let _ = git(
+                shadow,
+                &["--git-dir", shadow_text, "gc", "--auto", "--quiet"],
+            );
+        }
+        prune_dead_agent_views(shadow, shadow_text);
+    }
+    Ok(())
+}
+
+fn prune_dead_agent_views(shadow: &Path, shadow_text: &str) {
+    let views = shadow.join("agent-views");
+    let Ok(entries) = fs::read_dir(&views) else {
+        return;
+    };
+    let stale_cutoff = std::time::Duration::from_secs(3600);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.contains(".pending-") {
+            // Leave recent pending captures alone: node view capture runs
+            // outside the host ref lock. Only reclaim old crash leftovers.
+            if meta
+                .modified()
+                .ok()
+                .and_then(|mtime| mtime.elapsed().ok())
+                .is_some_and(|age| age > stale_cutoff)
+            {
+                let _ = crate::workspace_cleanup::remove_tree(&path);
+            }
+            continue;
+        }
+        if matches!(name.len(), 40 | 64) && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let exists = git(
+                shadow,
+                &[
+                    "--git-dir",
+                    shadow_text,
+                    "cat-file",
+                    "-e",
+                    &format!("{name}^{{commit}}"),
+                ],
+            )
+            .is_ok();
+            if !exists {
+                let _ = crate::workspace_cleanup::remove_tree(&path);
+            }
+        }
+    }
 }
 pub(crate) struct MergerGitView {
     path: PathBuf,
@@ -1426,11 +1589,7 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
     }
     let view = crate::workspace_view::inspect_source_scoped(&canonical, exclusions)?;
     let identity = crate::workspace_view::view_identity(&view)?;
-    if exclusions.is_empty() {
-        crate::workspace_view::stage_project_with_view(&canonical, &shadow, &view)?;
-    } else {
-        stage_scoped(&canonical, exclusions)?;
-    }
+    crate::workspace_view::stage_project_with_view(&canonical, &shadow, &view)?;
     let lock = host_ref_lock(&canonical)?;
     let _guard = lock.lock().map_err(|e| e.to_string())?;
     let mut commit = vec![
@@ -2804,23 +2963,7 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         git(path, &["update-ref", "refs/grapher/base", &base_head])?;
     }
     let (workers, threshold) = checkout_parallelism();
-    git(
-        path,
-        &[
-            "-c",
-            &workers,
-            "-c",
-            threshold,
-            "checkout",
-            "-q",
-            "-f",
-            "-B",
-            "grapher-node",
-            "refs/grapher/base",
-        ],
-    )?;
-    let mut resolved_heads = Vec::new();
-    for parent in parents {
+    let resolve_parent = |parent: &String| -> Result<String, String> {
         // Commit IDs use immutable pins; named parents require a Run scope.
         let is_head =
             matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
@@ -2861,11 +3004,80 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
                 ],
             )?;
         }
-        resolved_heads.push(git(
+        git(
             path,
             &["rev-parse", &format!("refs/grapher/parents/{parent_id}")],
-        )?);
-    }
+        )
+    };
+    let mut resolved_heads = Vec::new();
+    let direct_parent = if parents.len() == 1 {
+        match resolve_parent(&parents[0]) {
+            Ok(parent_head) => {
+                let direct = git(
+                    path,
+                    &["merge-base", "--is-ancestor", &base_head, &parent_head],
+                )
+                .is_ok()
+                .then(|| parent_head.clone());
+                resolved_heads.push(parent_head);
+                let checkout_target = direct.as_deref().unwrap_or("refs/grapher/base");
+                git(
+                    path,
+                    &[
+                        "-c",
+                        &workers,
+                        "-c",
+                        threshold,
+                        "checkout",
+                        "-q",
+                        "-f",
+                        "-B",
+                        "grapher-node",
+                        checkout_target,
+                    ],
+                )?;
+                direct
+            }
+            Err(error) => {
+                let _ = git(
+                    path,
+                    &[
+                        "-c",
+                        &workers,
+                        "-c",
+                        threshold,
+                        "checkout",
+                        "-q",
+                        "-f",
+                        "-B",
+                        "grapher-node",
+                        "refs/grapher/base",
+                    ],
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        git(
+            path,
+            &[
+                "-c",
+                &workers,
+                "-c",
+                threshold,
+                "checkout",
+                "-q",
+                "-f",
+                "-B",
+                "grapher-node",
+                "refs/grapher/base",
+            ],
+        )?;
+        for parent in parents {
+            resolved_heads.push(resolve_parent(parent)?);
+        }
+        None
+    };
     for incoming in independent_heads(path, &resolved_heads)? {
         if git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_ok() {
             continue;
@@ -2899,18 +3111,34 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         return Ok(head);
     }
     if private_slot_layout(path) {
-        let mut views = resolved_heads;
-        if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
-            views.push(head.clone());
+        let fresh_direct_parent = direct_parent.as_deref().filter(|parent_head| {
+            !destination_exists
+                && base == base_head
+                && crate::workspace_view::has_record(&canonical_repo, parent_head)
+        });
+        let observed = if let Some(parent_head) = fresh_direct_parent {
+            crate::workspace_view::prepare(
+                &canonical_repo,
+                path,
+                parent_head,
+                &[],
+                exclusions,
+                true,
+            )
+        } else {
+            let mut views = resolved_heads;
+            if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
+                views.push(head.clone());
+            }
+            crate::workspace_view::prepare(
+                &canonical_repo,
+                path,
+                &base_head,
+                &views,
+                exclusions,
+                !destination_exists && parents.is_empty() && base == base_head,
+            )
         }
-        let observed = crate::workspace_view::prepare(
-            &canonical_repo,
-            path,
-            &base_head,
-            &views,
-            exclusions,
-            !destination_exists && parents.is_empty() && base == base_head,
-        )
         .map_err(|error| format!("Cannot prepare Graph project view: {error}"))?;
         return crate::workspace_view::seal_prepared_scoped(
             path,
@@ -3267,16 +3495,97 @@ pub(crate) fn validate_scope_layout_at(
 
 /// Rebuildable tool caches, not installed dependencies or runnable output.
 /// A directory name does not prove that a manifest/registry can reproduce its
-/// bytes. node_modules, .next, dist/build/out/target and standalone bytecode
-/// therefore follow the ordinary project Git channel, including ignored files.
-/// Tracked cache files still override this exclusion policy.
+/// bytes. node_modules, .next, .nuxt, dist/build/out/target/zig-out and
+/// standalone bytecode therefore follow the ordinary project Git channel,
+/// including ignored files, while strictly internal cache subtrees (such as
+/// `node_modules/.cache`, `node_modules/.vite*`, `.next/cache`, `.nuxt/cache`,
+/// `.angular/cache`, `.vitepress/cache`, `.vuepress/.cache`, `.nx/cache`) are
+/// excluded. Tracked cache files still override this exclusion policy.
 pub(crate) const GENERATED_ARTIFACT_DIRS: &[&str] = &[
+    // Python
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".hypothesis",
+    ".pytype",
+    ".pyre",
+    ".ipynb_checkpoints",
+    ".webassets-cache",
+    ".dmypy.json",
+    // JavaScript / TypeScript / Frontend
     ".turbo",
     ".parcel-cache",
+    ".vite",
+    ".vitest",
+    ".eslintcache",
+    ".stylelintcache",
+    ".prettiercache",
+    ".sass-cache",
+    ".rpt2_cache",
+    ".rts2_cache_cjs",
+    ".rts2_cache_es",
+    ".rts2_cache_umd",
+    ".fusebox",
+    ".grunt",
+    ".nyc_output",
+    ".nx-cache",
+    // JVM (Gradle / Kotlin / Scala)
+    ".gradle",
+    ".gradletasknamecache",
+    ".kotlin",
+    ".metals",
+    ".bloop",
+    // Zig (outputs live in `zig-out/`, which stays collected)
+    ".zig-cache",
+    "zig-cache",
+    // PHP
+    ".phpunit.result.cache",
+    ".phpunit.cache",
+    ".php-cs-fixer.cache",
+    ".deptrac.cache",
+    ".twig-cs-fixer.cache",
+    // Ruby / Jekyll
+    ".jekyll-cache",
+    ".jekyll-metadata",
+    // C / C++ / Swift
+    ".ccls-cache",
+    ".ccache",
+    ".index-build",
+    // C# / .NET / Visual Studio
+    ".vs",
+    "_ReSharper.Caches",
+    "ipch",
+];
+/// Strictly internal tool cache directories scoped under a parent directory
+/// whose other contents remain ordinary project files.
+pub(crate) const GENERATED_ARTIFACT_SCOPED_DIRS: &[(&str, &str)] = &[
+    ("node_modules", ".cache"),
+    ("node_modules", ".vite"),
+    (".next", "cache"),
+    (".nuxt", "cache"),
+    (".angular", "cache"),
+    (".vitepress", "cache"),
+    (".vuepress", ".cache"),
+    (".vuepress", ".temp"),
+    (".nx", "cache"),
+    (".nx", "workspace-data"),
+    (".cache", "clangd"),
+];
+/// Scoped directory-name prefixes for tools that isolate multiple cache
+/// directories under `node_modules` (for example Vite's `node_modules/.vite-*`).
+const GENERATED_ARTIFACT_SCOPED_PREFIXES: &[(&str, &str)] = &[("node_modules", ".vite-")];
+/// Strictly internal compiler/build cache entries nested anywhere beneath a
+/// Cargo `target` directory (including target triples like
+/// `target/aarch64-apple-darwin/debug/...`). Runnable outputs, docs, `deps/`
+/// and `build/` remain ordinary project files.
+const CARGO_TARGET_CACHE_ENTRIES: &[&str] = &[
+    ".fingerprint",
+    "incremental",
+    ".rustc_info.json",
+    ".cargo-lock",
+    ".cargo-build-lock",
+    ".cargo-artifact-lock",
 ];
 /// Incremental compiler state. Standalone .pyc/.pyo can be the only executable
 /// module distribution; only bytecode beneath __pycache__ is a disposable cache.
@@ -3284,16 +3593,54 @@ pub(crate) const GENERATED_ARTIFACT_SUFFIXES: &[&str] = &[".tsbuildinfo"];
 
 /// True when a path names a rebuildable cache, not a dependency/runtime artifact.
 pub(crate) fn is_generated_artifact(relative: &Path) -> bool {
-    if relative.components().any(|part| match part {
-        std::path::Component::Normal(name) => {
-            let name = name.to_string_lossy();
-            GENERATED_ARTIFACT_DIRS
+    let mut prev_normal: Option<std::borrow::Cow<'_, str>> = None;
+    let mut under_target = false;
+    for part in relative.components() {
+        let std::path::Component::Normal(raw) = part else {
+            prev_normal = None;
+            continue;
+        };
+        let name = raw.to_string_lossy();
+        let first = name.as_bytes().first().copied().unwrap_or_default();
+        if matches!(first, b'.' | b'_' | b'z' | b'Z' | b'i' | b'I')
+            && GENERATED_ARTIFACT_DIRS
                 .iter()
                 .any(|dir| name.eq_ignore_ascii_case(dir))
+        {
+            return true;
         }
-        _ => false,
-    }) {
-        return true;
+        if under_target
+            && matches!(first, b'.' | b'i' | b'I')
+            && CARGO_TARGET_CACHE_ENTRIES
+                .iter()
+                .any(|entry| name.eq_ignore_ascii_case(entry))
+        {
+            return true;
+        }
+        if let Some(prev) = prev_normal.as_deref() {
+            let prev_first = prev.as_bytes().first().copied().unwrap_or_default();
+            if matches!(prev_first, b'.' | b'n' | b'N')
+                && (GENERATED_ARTIFACT_SCOPED_DIRS
+                    .iter()
+                    .any(|(parent, child)| {
+                        prev.eq_ignore_ascii_case(parent) && name.eq_ignore_ascii_case(child)
+                    })
+                    || GENERATED_ARTIFACT_SCOPED_PREFIXES
+                        .iter()
+                        .any(|(parent, prefix)| {
+                            prev.eq_ignore_ascii_case(parent)
+                                && name
+                                    .get(..prefix.len())
+                                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                        }))
+            {
+                return true;
+            }
+        }
+        if !under_target && matches!(first, b't' | b'T') && name.eq_ignore_ascii_case("target") {
+            under_target = true;
+        }
+        prev_normal = Some(name);
     }
     relative.file_name().is_some_and(|name| {
         let name = name.to_string_lossy();
@@ -3418,15 +3765,139 @@ pub(crate) fn collection_excluded(
     collection_excluded_inner(None, relative, tracked, exclusions)
 }
 
-pub(crate) fn collection_excluded_at(
-    root: &Path,
-    relative: &Path,
-    tracked: &std::collections::BTreeSet<String>,
-    exclusions: &[String],
-) -> bool {
-    collection_excluded_inner(Some(root), relative, tracked, exclusions)
+pub(crate) struct TrackedPathIndex<'a> {
+    exact: &'a std::collections::BTreeSet<String>,
+    #[cfg(target_os = "macos")]
+    case_insensitive: bool,
+    #[cfg(target_os = "macos")]
+    folded: std::cell::OnceCell<std::collections::HashSet<String>>,
+    generated_dirs: std::cell::OnceCell<std::collections::HashSet<String>>,
+    #[cfg(target_os = "macos")]
+    folded_generated_dirs: std::cell::OnceCell<std::collections::HashSet<String>>,
 }
 
+impl<'a> TrackedPathIndex<'a> {
+    pub(crate) fn new(root: &Path, exact: &'a std::collections::BTreeSet<String>) -> Self {
+        let _ = root;
+        Self {
+            exact,
+            #[cfg(target_os = "macos")]
+            case_insensitive: crate::path_identity::case_insensitive_volume(root),
+            #[cfg(target_os = "macos")]
+            folded: std::cell::OnceCell::new(),
+            generated_dirs: std::cell::OnceCell::new(),
+            #[cfg(target_os = "macos")]
+            folded_generated_dirs: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn matches(&self, relative: &str) -> bool {
+        if self.exact.contains(relative) {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !self.case_insensitive && relative.is_ascii() {
+                return false;
+            }
+            let folded = self.folded.get_or_init(|| {
+                self.exact
+                    .iter()
+                    .map(|entry| {
+                        crate::path_identity::fold_relative_path(entry, self.case_insensitive)
+                    })
+                    .collect()
+            });
+            return folded.contains(&crate::path_identity::fold_relative_path(
+                relative,
+                self.case_insensitive,
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    /// True when at least one project-tracked file lives inside `relative`
+    /// under a generated-artifact directory (e.g. `__pycache__/tracked.pyc`),
+    /// so directory traversal must descend into it instead of pruning the
+    /// entire directory.
+    pub(crate) fn has_tracked_generated_descendant(&self, relative: &str) -> bool {
+        let dirs = self.generated_dirs.get_or_init(|| {
+            let mut set = std::collections::HashSet::new();
+            for entry in self.exact {
+                let path = Path::new(entry);
+                if is_generated_artifact(path) {
+                    let mut parent = path.parent();
+                    while let Some(dir) = parent.filter(|p| !p.as_os_str().is_empty()) {
+                        set.insert(dir.to_string_lossy().replace('\\', "/"));
+                        parent = dir.parent();
+                    }
+                }
+            }
+            set
+        });
+        if dirs.is_empty() {
+            return false;
+        }
+        if dirs.contains(relative) {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !self.case_insensitive && relative.is_ascii() {
+                return false;
+            }
+            let folded = self.folded_generated_dirs.get_or_init(|| {
+                dirs.iter()
+                    .map(|dir| crate::path_identity::fold_relative_path(dir, self.case_insensitive))
+                    .collect()
+            });
+            return folded.contains(&crate::path_identity::fold_relative_path(
+                relative,
+                self.case_insensitive,
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+}
+
+pub(crate) fn collection_excluded_with_index(
+    root: &Path,
+    relative: &Path,
+    tracked: &TrackedPathIndex<'_>,
+    exclusions: &[String],
+) -> bool {
+    if relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".grapher-publish-"))
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        && !tracked.matches(&relative.to_string_lossy().replace('\\', "/"))
+    {
+        return true;
+    }
+    if exclusions
+        .iter()
+        .any(|scope| scope_contains_at(root, relative, Path::new(scope)))
+    {
+        return true;
+    }
+    let portable = relative.to_string_lossy().replace('\\', "/");
+    if is_host_metadata(&portable) && !tracked.matches(&portable) {
+        return true;
+    }
+    if is_generated_artifact(relative)
+        && !tracked.matches(&portable)
+        && !tracked.has_tracked_generated_descendant(&portable)
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
 fn collection_excluded_inner(
     root: Option<&Path>,
     relative: &Path,
@@ -3460,7 +3931,12 @@ fn collection_excluded_inner(
     if is_host_metadata(&portable) && !tracked_path_matches(root, tracked, &portable) {
         return true;
     }
-    if is_generated_artifact(relative) && !tracked_path_matches(root, tracked, &portable) {
+    if is_generated_artifact(relative)
+        && !tracked_path_matches(root, tracked, &portable)
+        && !root.is_some_and(|root| {
+            TrackedPathIndex::new(root, tracked).has_tracked_generated_descendant(&portable)
+        })
+    {
         return true;
     }
     false
@@ -3473,6 +3949,18 @@ pub(crate) fn generated_artifact_pathspecs() -> Vec<String> {
     for dir in GENERATED_ARTIFACT_DIRS {
         specs.push(format!(":(exclude,glob,icase)**/{dir}"));
         specs.push(format!(":(exclude,glob,icase)**/{dir}/**"));
+    }
+    for (parent, child) in GENERATED_ARTIFACT_SCOPED_DIRS {
+        specs.push(format!(":(exclude,glob,icase)**/{parent}/{child}"));
+        specs.push(format!(":(exclude,glob,icase)**/{parent}/{child}/**"));
+    }
+    for (parent, prefix) in GENERATED_ARTIFACT_SCOPED_PREFIXES {
+        specs.push(format!(":(exclude,glob,icase)**/{parent}/{prefix}*"));
+        specs.push(format!(":(exclude,glob,icase)**/{parent}/{prefix}*/**"));
+    }
+    for entry in CARGO_TARGET_CACHE_ENTRIES {
+        specs.push(format!(":(exclude,glob,icase)**/target/**/{entry}"));
+        specs.push(format!(":(exclude,glob,icase)**/target/**/{entry}/**"));
     }
     for suffix in GENERATED_ARTIFACT_SUFFIXES {
         specs.push(format!(":(exclude,glob,icase)**/*{suffix}"));
@@ -3849,10 +4337,6 @@ pub(crate) fn raw_checkout_attributes(metadata: &Path) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-pub(crate) fn stage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
-    stage_scoped_impl(path, exclusions, false)
-}
-
 /// Stage into the physical workspace's own Git index (or its hidden metadata),
 /// never into a source shadow database keyed by that path.
 pub(crate) fn stage_scoped_local(path: &Path, exclusions: &[String]) -> Result<(), String> {
@@ -3994,11 +4478,13 @@ fn push_exclude_scope_specs(path: &Path, scope: &str, pathspecs: &mut Vec<String
 }
 
 fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<(), String> {
-    if crate::workspace_view::is_bound(path) && exclusions.is_empty() {
-        return crate::workspace_view::stage_project(
+    if crate::workspace_view::is_bound(path) {
+        crate::workspace_view::stage_project_scoped(
             path,
             &private_git_dir(path).ok_or("Missing graph Git")?,
-        );
+            exclusions,
+        )?;
+        return Ok(());
     }
     #[cfg(target_os = "macos")]
     let tracked_host_metadata = capture_tracked_host_metadata(path, exclusions, local)?;
@@ -4212,6 +4698,16 @@ fn snapshot_source_scoped(
                     ],
                 )?;
             }
+        }
+        if !evidence {
+            return crate::workspace_view::live_tree_scoped(
+                path,
+                &shadow,
+                exclusions,
+                head.as_deref(),
+            );
+        }
+        if let Some(head) = head.as_deref() {
             // Read/write only the private index. The user's index and branch are
             // untouched, even when their staged content differs from the worktree.
             repository_git(path, &["read-tree", head])?;
@@ -4221,19 +4717,11 @@ fn snapshot_source_scoped(
             // repository.
             repository_git(path, &["read-tree", "--empty"])?;
         }
-        if exclusions.is_empty() {
-            if let Some(view) = source_view.as_ref() {
-                crate::workspace_view::stage_project_with_view(path, &shadow, view)?;
-            } else {
-                crate::workspace_view::stage_project(path, &shadow)?;
-            }
+        let tree = if let Some(view) = source_view.as_ref() {
+            crate::workspace_view::stage_project_with_view(path, &shadow, view)?
         } else {
-            stage_scoped(path, exclusions)?;
-        }
-        let tree = repository_git(path, &["write-tree"])?;
-        if !evidence {
-            return Ok(tree);
-        }
+            crate::workspace_view::stage_project_scoped(path, &shadow, exclusions)?
+        };
         let original = match head.as_deref() {
             Some(head) => Some(repository_git(
                 path,
@@ -4280,27 +4768,38 @@ fn snapshot_source_scoped(
         // Source snapshots follow the observed source history. Reusing an older
         // matching tree after the user reverted an edit would otherwise make the
         // fork's dirty baseline an incoming change and restore the reverted file.
-        let previous = repository_git(path, &["rev-parse", "--verify", "HEAD"])
-            .ok()
-            .filter(|previous| {
-                head.as_deref().is_some_and(|head| {
-                    previous != head
-                        && crate::workspace_view::has_record(path, previous)
-                        && repository_git(path, &["merge-base", head, previous]).is_ok()
-                        && repository_git(path, &["merge-base", "--is-ancestor", previous, head])
-                            .is_err()
+        // Walk first-parent history if an older process left shadow HEAD on an
+        // unrecorded commit, so source-view ancestry is never silently severed.
+        let previous = head.as_deref().and_then(|head| {
+            repository_git(path, &["rev-list", "--first-parent", "-n", "32", "HEAD"])
+                .ok()
+                .and_then(|history| {
+                    history
+                        .lines()
+                        .find(|candidate| {
+                            *candidate != head
+                                && crate::workspace_view::has_record(path, candidate)
+                                && repository_git(path, &["merge-base", head, candidate]).is_ok()
+                                && repository_git(
+                                    path,
+                                    &["merge-base", "--is-ancestor", candidate, head],
+                                )
+                                .is_err()
+                        })
+                        .map(str::to_owned)
                 })
-            });
+        });
         let existing = repository_git(path, &["rev-parse", "--verify", &input_ref])
             .ok()
             .filter(|existing| {
-                previous.as_deref().is_none_or(|previous| {
-                    repository_git(path, &["merge-base", "--is-ancestor", previous, existing])
-                        .is_ok()
-                })
+                crate::workspace_view::has_record(path, existing)
+                    && previous.as_deref().is_none_or(|previous| {
+                        repository_git(path, &["merge-base", "--is-ancestor", previous, existing])
+                            .is_ok()
+                    })
             });
-        let snapshot = if let Some(existing) = existing {
-            existing
+        let (snapshot, newly_created) = if let Some(existing) = existing {
+            (existing, false)
         } else {
             let changed_view = match (head.as_deref(), source_view.as_ref()) {
                 (Some(head), Some(view)) if original.as_deref() == Some(tree.as_str()) => {
@@ -4338,18 +4837,12 @@ fn snapshot_source_scoped(
                     repository_git(path, &args)?
                 }
             };
-            repository_git(path, &["update-ref", &input_ref, &snapshot])?;
-            snapshot
+            (snapshot, true)
         };
-        repository_git(path, &["update-ref", "HEAD", &snapshot])?;
-        repository_git(
-            path,
-            &[
-                "update-ref",
-                &format!("refs/grapher/heads/{snapshot}"),
-                &snapshot,
-            ],
-        )?;
+        // Persist the project-view record BEFORE advancing shadow `HEAD` or
+        // caching refs: if the source changes mid-capture and fails, shadow
+        // `HEAD` must stay on the previous recorded snapshot so subsequent
+        // retries preserve the common ancestor needed for publication.
         if !crate::workspace_view::has_record(path, &snapshot) {
             if let (Some(identity), Some(view)) = (identity.as_deref(), source_view) {
                 crate::workspace_view::capture_source_with_view(
@@ -4363,6 +4856,18 @@ fn snapshot_source_scoped(
                 crate::workspace_view::capture_source_scoped(path, &snapshot, exclusions)?;
             }
         }
+        if newly_created {
+            repository_git(path, &["update-ref", &input_ref, &snapshot])?;
+        }
+        repository_git(path, &["update-ref", "HEAD", &snapshot])?;
+        repository_git(
+            path,
+            &[
+                "update-ref",
+                &format!("refs/grapher/heads/{snapshot}"),
+                &snapshot,
+            ],
+        )?;
         Ok(snapshot)
     } else {
         let canonical = path.canonicalize().map_err(|error| error.to_string())?;
@@ -4386,26 +4891,13 @@ fn snapshot_source_scoped(
             .as_ref()
             .map(crate::workspace_view::view_identity)
             .transpose()?;
-        if exclusions.is_empty() {
-            if let Some(view) = source_view.as_ref() {
-                crate::workspace_view::stage_project_with_view(&canonical, &shadow, view)?;
-            } else {
-                crate::workspace_view::stage_project(&canonical, &shadow)?;
-            }
-        } else {
-            stage_scoped(&canonical, exclusions)?;
-        }
         if !evidence {
-            return git(
-                &canonical,
-                &[
-                    "--git-dir",
-                    git_dir_str,
-                    "--work-tree",
-                    work_tree_str,
-                    "write-tree",
-                ],
-            );
+            return crate::workspace_view::live_tree_scoped(&canonical, &shadow, exclusions, None);
+        }
+        if let Some(view) = source_view.as_ref() {
+            crate::workspace_view::stage_project_with_view(&canonical, &shadow, view)?;
+        } else {
+            crate::workspace_view::stage_project_scoped(&canonical, &shadow, exclusions)?;
         }
         let unborn = git(
             &canonical,
@@ -4430,11 +4922,18 @@ fn snapshot_source_scoped(
         };
         let lock = host_ref_lock(&canonical)?;
         let _guard = lock.lock().map_err(|e| e.to_string())?;
+        let prior_head = if unborn {
+            None
+        } else {
+            repository_git(&canonical, &["rev-parse", "--verify", "HEAD"]).ok()
+        };
         let changed_view = if status.trim().is_empty() && !unborn {
-            let head = repository_git(&canonical, &["rev-parse", "HEAD"])?;
+            let head = prior_head
+                .as_deref()
+                .ok_or("Missing previous plain snapshot HEAD")?;
             crate::workspace_view::source_record_changed(
                 &canonical,
-                &head,
+                head,
                 source_view.as_ref().ok_or("Missing source view")?,
             )?
         } else {
@@ -4457,14 +4956,24 @@ fn snapshot_source_scoped(
         }
         let head = bridge_plain_snapshot(&canonical)?;
         if !crate::workspace_view::has_record(&canonical, &head) {
-            if let (Some(identity), Some(view)) = (identity.as_deref(), source_view) {
+            let capture_result = if let (Some(identity), Some(view)) =
+                (identity.as_deref(), source_view)
+            {
                 crate::workspace_view::capture_source_with_view(
                     &canonical, &head, identity, exclusions, view,
-                )?;
+                )
             } else if let Some(identity) = &identity {
-                crate::workspace_view::capture_source(&canonical, &head, identity)?;
+                crate::workspace_view::capture_source(&canonical, &head, identity)
             } else {
-                crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
+                crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)
+            };
+            if let Err(error) = capture_result {
+                if let Some(prev) = prior_head.as_deref() {
+                    let _ = repository_git(&canonical, &["update-ref", "HEAD", prev]);
+                } else if let Ok(sym) = repository_git(&canonical, &["symbolic-ref", "HEAD"]) {
+                    let _ = repository_git(&canonical, &["update-ref", "-d", &sym]);
+                }
+                return Err(error);
             }
         }
         Ok(head)

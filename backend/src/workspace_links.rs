@@ -21,6 +21,13 @@ impl Topology {
         self.aliases.is_empty() && self.outside.is_empty()
     }
 
+    /// Paths whose content/metadata signature must match their hardlink target.
+    pub(crate) fn aliased_paths(&self) -> impl Iterator<Item = &str> {
+        self.aliases
+            .iter()
+            .flat_map(|(alias, target)| [alias.as_str(), target.as_str()])
+    }
+
     /// Drop aliases/outside records whose path fails `keep`. Used when a
     /// comparison ignores generated artifacts a recorded view may still carry.
     pub(crate) fn retain(&mut self, keep: impl Fn(&str) -> bool) {

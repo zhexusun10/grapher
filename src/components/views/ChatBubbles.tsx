@@ -7,25 +7,7 @@ import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
 import { ImagePreviewModal, type PreviewImageItem } from "../modals/ImagePreviewModal";
 import { notifyTranscriptContentGrowth, notifyTranscriptFinalOutput, transcriptScrollParent } from "../../services/transcriptScroll";
-
-function copyFallback(text: string, onSuccess: () => void) {
-  try {
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.position = "fixed";
-    textarea.style.left = "-9999px";
-    textarea.style.top = "-9999px";
-    textarea.style.opacity = "0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    const successful = document.execCommand("copy");
-    document.body.removeChild(textarea);
-    if (successful) onSuccess();
-  } catch (err) {
-    console.error("Failed to copy", err);
-  }
-}
+import { copyTextToClipboard } from "../../services/externalLink";
 
 export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
   ({ content, isStreaming }) => {
@@ -57,6 +39,39 @@ export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: 
   }
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
+
+const USER_BUBBLE_COLLAPSE_CHARS = 12_000;
+const USER_BUBBLE_COLLAPSE_LINES = 150;
+const USER_BUBBLE_PREVIEW_CHARS = 6_000;
+const USER_BUBBLE_PREVIEW_LINES = 80;
+const USER_BUBBLE_FULL_EXPAND_LIMIT = 120_000;
+const USER_BUBBLE_EXPAND_STEP_CHARS = 20_000;
+
+function computeUserBubblePreviewEnd(text: string): number {
+  if (text.length <= USER_BUBBLE_COLLAPSE_CHARS) {
+    let lines = 0;
+    let previewEnd = -1;
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10) {
+        lines++;
+        if (lines === USER_BUBBLE_PREVIEW_LINES) previewEnd = i;
+        if (lines > USER_BUBBLE_COLLAPSE_LINES) {
+          return previewEnd > 0 ? Math.min(previewEnd, USER_BUBBLE_PREVIEW_CHARS) : USER_BUBBLE_PREVIEW_CHARS;
+        }
+      }
+    }
+    return text.length;
+  }
+  const limit = Math.min(text.length, USER_BUBBLE_PREVIEW_CHARS);
+  let lines = 0;
+  for (let i = 0; i < limit; i++) {
+    if (text.charCodeAt(i) === 10) {
+      lines++;
+      if (lines >= USER_BUBBLE_PREVIEW_LINES) return i;
+    }
+  }
+  return limit;
+}
 
 export function EditableUserBubble({
   text,
@@ -103,6 +118,7 @@ export function EditableUserBubble({
   const [copyHold, setCopyHold] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [visibleChars, setVisibleChars] = useState<number | null>(null);
   const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -110,6 +126,19 @@ export function EditableUserBubble({
   const { cleanText, attachments, images: allImages } = useMemo(() => {
     return parseMessageAttachmentsAndText(text, files, images);
   }, [text, files, images]);
+
+  const previewEnd = useMemo(() => computeUserBubblePreviewEnd(cleanText), [cleanText]);
+  const isCollapsible = previewEnd < cleanText.length;
+
+  useEffect(() => {
+    setVisibleChars(null);
+  }, [cleanText]);
+
+  const effectiveLimit = !isCollapsible
+    ? cleanText.length
+    : (visibleChars ?? previewEnd);
+  const isTruncated = effectiveLimit < cleanText.length;
+  const displayedText = isTruncated ? `${cleanText.slice(0, effectiveLimit)}…` : cleanText;
 
   const previewImages = useMemo<PreviewImageItem[]>(() =>
     allImages.map((img, idx) => ({
@@ -146,13 +175,9 @@ export function EditableUserBubble({
       }, 1500);
     };
 
-    if (navigator?.clipboard?.writeText) {
-      navigator.clipboard.writeText(targetText).then(onSuccess).catch(() => {
-        copyFallback(targetText, onSuccess);
-      });
-    } else {
-      copyFallback(targetText, onSuccess);
-    }
+    void copyTextToClipboard(targetText).then((ok) => {
+      if (ok) onSuccess();
+    }).catch(() => {});
   };
 
   // Only the fade-out ends the confirmation: the reveal rules (hover, focus
@@ -359,7 +384,41 @@ export function EditableUserBubble({
                     rows={1}
                   />
                 </div>
-              ) : cleanText}
+              ) : (
+                <>
+                  {displayedText}
+                  {isCollapsible ? (
+                    <div className="chat-bubble-user-expand-bar">
+                      {isTruncated ? (
+                        <button
+                          type="button"
+                          className="chat-bubble-user-expand-btn"
+                          onClick={() => {
+                            if (cleanText.length <= USER_BUBBLE_FULL_EXPAND_LIMIT) {
+                              setVisibleChars(cleanText.length);
+                            } else {
+                              setVisibleChars(Math.min(cleanText.length, effectiveLimit + USER_BUBBLE_EXPAND_STEP_CHARS));
+                            }
+                          }}
+                        >
+                          {cleanText.length <= USER_BUBBLE_FULL_EXPAND_LIMIT
+                            ? t("展开全部（共 {0} 字符）", cleanText.length.toLocaleString())
+                            : t("继续展开（已显示 {0} / {1} 字符）", effectiveLimit.toLocaleString(), cleanText.length.toLocaleString())}
+                        </button>
+                      ) : null}
+                      {effectiveLimit > previewEnd ? (
+                        <button
+                          type="button"
+                          className="chat-bubble-user-expand-btn"
+                          onClick={() => setVisibleChars(null)}
+                        >
+                          {t("收起内容")}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
           ) : null}
         </div>

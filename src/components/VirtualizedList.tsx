@@ -14,25 +14,21 @@ export function scrollParent(element: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-const MeasuredListRow = memo(function MeasuredListRow({ id, measure, rowElements, children }: {
-  id: string; measure: (id: string, height: number, sync?: boolean) => void;
+const MeasuredListRow = memo(function MeasuredListRow({ id, measureElement, rowElements, children }: {
+  id: string; measureElement: (id: string, element: HTMLElement, sync?: boolean) => void;
   rowElements: React.MutableRefObject<Map<string, HTMLElement>>; children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = ref.current!;
     rowElements.current.set(id, element);
-    const read = () => {
-      const rectHeight = element.getBoundingClientRect().height;
-      return rectHeight > 0 ? rectHeight : element.offsetHeight;
-    };
-    measure(id, read());
-    const unobserve = observeElementResize(element, () => measure(id, read(), true));
+    measureElement(id, element);
+    const unobserve = observeElementResize(element, () => measureElement(id, element, true));
     return () => {
       unobserve();
       if (rowElements.current.get(id) === element) rowElements.current.delete(id);
     };
-  }, [id, measure, rowElements]);
+  }, [id, measureElement, rowElements]);
   return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root", minWidth: 0, maxWidth: "100%" }}>{children}</div>;
 });
 
@@ -76,6 +72,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const committedResizedRevisionRef = useRef(0);
   const flushScheduled = useRef(false);
   const syncFlushScheduled = useRef(false);
+  const deferredHeightRafRef = useRef<number | null>(null);
   const mounted = useRef(false);
   const frame = useRef<number | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 600, hasScroller: true });
@@ -100,7 +97,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const statsHeightsRef = useRef(new Map<string, number>());
   const frozenEstimatesRef = useRef(new Map<string, number>());
 
-  const measure = useCallback((id: string, height: number, sync = false) => {
+  const measure = useCallback((id: string, height: number, sync = false, deferToRaf = false) => {
     if (height <= 0 || transitionPhaseRef.current !== "idle") return;
     const existing = heights.current.get(id);
     if (existing !== undefined && Math.abs(existing - height) < 0.25) return;
@@ -123,6 +120,24 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     frozenEstimatesRef.current.delete(id);
     heights.current.set(id, height);
     measuredRevisionRef.current += 1;
+    if (deferToRaf && !sync && !flushScheduled.current) {
+      // In-viewport resize with no active scroll anchor or bottom-follow:
+      // avoid synchronous flushSync re-renders on every animation frame.
+      if (deferredHeightRafRef.current === null) {
+        deferredHeightRafRef.current = requestAnimationFrame(() => {
+          deferredHeightRafRef.current = null;
+          if (!mounted.current) return;
+          if (measuredRevisionRef.current !== committedOffsetsRevisionRef.current) {
+            setHeightVersion(value => value + 1);
+          }
+        });
+      }
+      return;
+    }
+    if (deferredHeightRafRef.current !== null) {
+      cancelAnimationFrame(deferredHeightRafRef.current);
+      deferredHeightRafRef.current = null;
+    }
     if (sync) syncFlushScheduled.current = true;
     if (flushScheduled.current) return;
     flushScheduled.current = true;
@@ -146,6 +161,30 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       }
     });
   }, []);
+  const measureElement = useCallback((id: string, element: HTMLElement, sync = false) => {
+    if (transitionPhaseRef.current !== "idle") return;
+    const rect = element.getBoundingClientRect();
+    const height = rect.height > 0 ? rect.height : element.offsetHeight;
+    if (height <= 0) return;
+    if (!sync) {
+      measure(id, height, false, false);
+      return;
+    }
+    const parentEl = parentRef.current;
+    const aboveViewport = Boolean(
+      parentEl && rect.top < parentEl.getBoundingClientRect().top + parentEl.clientTop - 1,
+    );
+    const needsSync =
+      aboveViewport ||
+      restoreRef.current !== null ||
+      readingAnchor.current !== null ||
+      stabilizingAnchorRef.current ||
+      transitionAnchorRef.current !== null ||
+      gestureRowAnchor.current !== null ||
+      parentEl?.dataset.transcriptFollowing === "true" ||
+      parentEl?.dataset.transcriptPreparing === "true";
+    measure(id, height, needsSync, !needsSync);
+  }, [measure]);
   const previousIds = useRef<string[]>([]);
   const ids = useMemo(() => shareJson(previousIds.current, items.map(item => item.id)), [items]);
   previousIds.current = ids;
@@ -177,11 +216,16 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const latestIdsLengthRef = useRef(ids.length);
   latestIdsLengthRef.current = ids.length;
   const transitionPhaseRef = useRef(transitionPhase);
+  const previousTransitionPhaseRef = useRef(transitionPhase);
   transitionPhaseRef.current = transitionPhase;
-  // Track which rows were mounted when a collapse/expand transition began so
-  // offscreen summary rows pulled in mid-collapse mount already settled instead
-  // of exploding to 1fr above the viewport and oscillating scrollHeight.
+  // Track which viewport-visible rows participate in a collapse/expand transition
+  // so offscreen overscan rows never mount dozens of hidden child cards or force
+  // layout work outside the viewport.
   const transitionInitialIdsRef = useRef<Set<string> | null>(null);
+  if (previousTransitionPhaseRef.current !== transitionPhase) {
+    previousTransitionPhaseRef.current = transitionPhase;
+    transitionInitialIdsRef.current = null;
+  }
   const transitionAnchorRef = useRef<{ id: string; visualTop: number } | null>(null);
   // Keep the anchor through the subsequent first measurements too. Otherwise
   // new rows initially use estimated heights, then drag the reader on the next
@@ -559,6 +603,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     };
     const onExternalScrollAdjusted = () => {
       if (dispatchingScrollAdjustedRef.current || !parent) return;
+      if (transitionPhaseRef.current !== "idle" && hasActiveCardsTransitionAnchor()) return;
       if (ref.current) {
         const parentRect = parent.getBoundingClientRect();
         const elementRect = ref.current.getBoundingClientRect();
@@ -623,6 +668,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       observer.disconnect();
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
+      if (deferredHeightRafRef.current !== null) cancelAnimationFrame(deferredHeightRafRef.current);
+      deferredHeightRafRef.current = null;
     };
   }, [updateViewport, measure]);
   useEffect(() => {
@@ -644,13 +691,78 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const externalTop = externalTransitionAnchor && !pinnedToBottom && parent && ref.current
     ? Math.round(parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top)
     : null;
-  const effectiveViewportTop = liveTopRef.current ?? viewport.top;
-  const top = restoreTop ?? anchorTop ?? externalTop ?? (pinnedToBottom ? Math.max(effectiveViewportTop, totalHeight - height) : effectiveViewportTop);
   const pixelOverscan = Math.max(height * 1.8, 1200);
+  const hysteresisSlack = pixelOverscan - Math.max(height * 0.65, 440);
+  const liveTop = liveTopRef.current;
+  // Preserve window hysteresis across unrelated re-renders (such as new
+  // streaming output arriving while the reader scrolled slightly upward inside
+  // the overscan buffer): shifting `range.start` early mounts unmeasured older
+  // rows above the viewport and jumps `scrollTop` mid-stream.
+  const effectiveViewportTop =
+    virtual &&
+    liveTop !== null &&
+    !pinnedToBottom &&
+    transitionPhase === "idle" &&
+    Math.abs(liveTop - viewport.top) <= hysteresisSlack
+      ? viewport.top
+      : (liveTop ?? viewport.top);
+  const top = restoreTop ?? anchorTop ?? externalTop ?? (pinnedToBottom ? Math.max(effectiveViewportTop, totalHeight - height) : effectiveViewportTop);
   const range = virtual ? visibleRows(offsets, top, height, overscan, pixelOverscan)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
   if (transitionPhase !== "idle" && transitionInitialIdsRef.current === null) {
-    transitionInitialIdsRef.current = new Set(ids.slice(range.start, range.end));
+    const selected = new Set<string>();
+    const margin = 120;
+    if (parent && ref.current) {
+      const parentBounds = parent.getBoundingClientRect();
+      const viewTop = parentBounds.top - margin;
+      const viewBottom = parentBounds.bottom + margin;
+      if (transitionPhase === "expanding") {
+        for (let index = range.start; index < range.end; index++) {
+          const id = ids[index];
+          const el = rowElements.current.get(id);
+          if (!el || !el.isConnected) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom >= viewTop && rect.top <= viewBottom) {
+            selected.add(id);
+          }
+        }
+      } else {
+        const visibleBeforeIds = new Set<string>();
+        for (const [id, el] of rowElements.current) {
+          if (!el.isConnected) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom >= viewTop && rect.top <= viewBottom) {
+            visibleBeforeIds.add(id);
+          }
+        }
+        if (visibleBeforeIds.size > 0) {
+          for (let index = range.start; index < range.end; index++) {
+            const item = items[index] as T & { summaryItems?: Array<{ id: string }> };
+            if (visibleBeforeIds.has(item.id)) {
+              selected.add(item.id);
+            } else if (item.summaryItems?.some(child => visibleBeforeIds.has(child.id))) {
+              selected.add(item.id);
+            }
+          }
+        }
+      }
+      if (selected.size === 0 && rowElements.current.size === 0) {
+        const offTop = top - margin;
+        const offBottom = top + height + margin;
+        for (let index = range.start; index < range.end; index++) {
+          const rowStart = offsets[index] ?? 0;
+          const rowEnd = offsets[index + 1] ?? rowStart;
+          if (rowEnd >= offTop && rowStart <= offBottom) {
+            selected.add(ids[index]);
+          }
+        }
+      }
+    } else {
+      for (let index = range.start; index < range.end; index++) {
+        selected.add(ids[index]);
+      }
+    }
+    transitionInitialIdsRef.current = selected;
   }
 
   // When scrolling upward mounts previously unmeasured older rows above the
@@ -894,9 +1006,25 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       rangePrependSyncCountRef.current = 0;
     }
     const idsChanged = previousOffsetIds.current !== ids;
+    const isTailAppendOnly =
+      idsChanged &&
+      previousOffsetIds.current.length > 0 &&
+      ids.length > previousOffsetIds.current.length &&
+      previousOffsetIds.current[0] === ids[0];
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-    if (idsChanged && transitionPhase === "idle") scheduleViewportUpdate();
+    if (idsChanged && transitionPhase === "idle") {
+      let skipTailViewportShift = false;
+      if (isTailAppendOnly && !bottomPinnedNow && parent && ref.current) {
+        const curTop = Math.round(parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top);
+        const curHeight = parent.clientHeight || 600;
+        const safeMargin = Math.max(curHeight * 0.65, 440);
+        const withinSafeTop = rangeStart === 0 || curTop >= (offsets[rangeStart] ?? 0) + safeMargin;
+        const withinSafeBottom = rangeEnd >= ids.length || curTop + curHeight <= (offsets[rangeEnd] ?? 0) - safeMargin;
+        skipTailViewportShift = withinSafeTop && withinSafeBottom;
+      }
+      if (!skipTailViewportShift) scheduleViewportUpdate();
+    }
   }, [offsets, offsetsRevision, offsetsResizeRevision, ids, anchor, followingLatest, rangeStart, rangeEnd, transitionPhase, updateViewport, scheduleViewportUpdate, dispatchScrollAdjusted]);
   useEffect(() => {
     if (transitionPhase !== "idle") return;
@@ -916,7 +1044,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       style={{ position: "absolute", top: offsets[index] ?? totalHeight, height: 0, pointerEvents: "none" }} />)}
     {items.slice(range.start, range.end).map((item, index) => {
       const allowTransition = transitionPhase === "idle" ? true : (transitionInitialIdsRef.current?.has(item.id) ?? false);
-      return <MeasuredListRow key={item.id} id={item.id} measure={measure} rowElements={rowElements}>{renderRow(item, range.start + index, allowTransition)}</MeasuredListRow>;
+      return <MeasuredListRow key={item.id} id={item.id} measureElement={measureElement} rowElements={rowElements}>{renderRow(item, range.start + index, allowTransition)}</MeasuredListRow>;
     })}
   </div>;
 }

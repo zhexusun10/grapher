@@ -353,17 +353,38 @@ independent revalidation passes around snapshot capture and publication.
 
 ### Generated artifacts
 
-Runtime excludes rebuildable tool caches when any path component is
-`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.turbo` or
-`.parcel-cache`, or a filename ends with `.tsbuildinfo`. Project Git tracking
-still overrides these cache exclusions.
+Runtime excludes strictly rebuildable internal tool caches (case-insensitive)
+when:
+
+- any path component matches a known cache entry:
+  - Python: `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.hypothesis`, `.pytype`, `.pyre`, `.ipynb_checkpoints`, `.webassets-cache`, `.dmypy.json`
+  - JS/TS/Frontend & Monorepo: `.turbo`, `.parcel-cache`, `.vite`, `.vitest`, `.eslintcache`, `.stylelintcache`, `.prettiercache`, `.sass-cache`, `.rpt2_cache`, `.rts2_cache_cjs`, `.rts2_cache_es`, `.rts2_cache_umd`, `.fusebox`, `.grunt`, `.nyc_output`, `.nx-cache`
+  - JVM: `.gradle`, `.gradletasknamecache`, `.kotlin`, `.metals`, `.bloop`
+  - Zig: `.zig-cache`, `zig-cache`
+  - PHP: `.phpunit.result.cache`, `.phpunit.cache`, `.php-cs-fixer.cache`, `.deptrac.cache`, `.twig-cs-fixer.cache`
+  - Ruby/Jekyll: `.jekyll-cache`, `.jekyll-metadata`
+  - C/C++ & Swift: `.ccls-cache`, `.ccache`, `.index-build`
+  - C#/.NET/Visual Studio: `.vs`, `_ReSharper.Caches`, `ipch`
+- a path contains a scoped internal cache subtree: `node_modules/.cache`,
+  `node_modules/.vite`, `node_modules/.vite-*`, `.next/cache`, `.nuxt/cache`,
+  `.angular/cache`, `.vitepress/cache`, `.vuepress/.cache`, `.vuepress/.temp`,
+  `.nx/cache`, `.nx/workspace-data`, `.cache/clangd`, or Rust/Cargo internal
+  cache entries nested under `target/` (`.fingerprint`, `incremental`,
+  `.rustc_info.json`, `.cargo-lock`, `.cargo-build-lock`,
+  `.cargo-artifact-lock`); or
+- a filename ends with `.tsbuildinfo`.
+
+Project Git tracking still overrides these cache exclusions.
 
 Installed dependencies and runnable artifacts are **not** disposable caches.
-`node_modules`, `.next`, `dist`, `build`, `out`, `target` and standalone
-`.pyc`/`.pyo` files follow the ordinary project Git channel, even when ignored or
-untracked. A manifest or registry may be missing, and local package patches,
-private/offline dependencies and sourceless modules cannot be assumed
-rebuildable. Grapher does not run an installer to replace their bytes.
+`node_modules` packages, `.next`/`.nuxt` build outputs (outside their `cache`
+subtrees), `.yarn/cache`, `.dart_tool`, `.build`, `.swiftpm`, `bin`, `obj`,
+`dist`, `build`, `out`, `target` outputs (`debug`/`release` binaries, `doc`,
+`deps`, `build`), `zig-out` and standalone `.pyc`/`.pyo` files follow the
+ordinary project Git channel, even when ignored or untracked. A manifest or
+registry may be missing, and local package patches, private/offline dependencies
+and sourceless modules cannot be assumed rebuildable. Grapher does not run an
+installer to replace their bytes.
 
 Fresh nodes and forks inherit the recorded dependency/artifact bytes, not a
 live-source copy or writable link to another workspace. Dependency-only edits
@@ -433,7 +454,11 @@ is materialized lazily by the first private node worker, which force-collects
 the current source files and records `SourceSnapshotted` plus cleanup ownership.
 Serial does not create this database. Standard Git databases retain internal
 history for continuation and conversation-owned cleanup; the ordinary-folder
-reclamation rules below do not remove them.
+reclamation rules below do not remove them. When a Run completes and no other
+incomplete Run needs the retained shadow database, Runtime still prunes
+unreferenced cache refs (`refs/grapher/heads/*`, `refs/grapher/inputs/*`),
+dead `agent-views/` and unreachable Git objects while preserving all live Run
+refs and protected commits.
 
 Materialization runs without holding the Runtime lock, so the UI keeps
 reporting a `source_materialize` activity while Git walks the project. A
@@ -466,7 +491,7 @@ of that snapshot.
 ## Physical workspaces and ownership
 
 ```text
-<workspace-parent>/.grapher-worktrees/<run>/<node>-<execution>/
+<workspace-parent>/.grapher-worktrees/<run>/<node>[-<n>]/
 ```
 
 Graph slots are Run-owned private repositories, not `git worktree` checkouts. A physical directory is a reusable node/Merger single-writer slot, not a permanent node identity or security sandbox. Inputs come from the latest recorded source snapshot and completed dependency results, never the live source working tree.

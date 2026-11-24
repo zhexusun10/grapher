@@ -9,6 +9,53 @@ interface TauriRuntimeGlobal {
 
 const OPEN_EXTERNAL_URL_COMMAND = "open_external_url";
 
+function copyFallback(text: string): boolean {
+  if (typeof document === "undefined") return false;
+  const active = typeof HTMLElement !== "undefined" && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  // Mount inside an active modal dialog so useDialogFocus's focusin containment
+  // does not pull focus away and clear the selection before execCommand("copy").
+  const container = active?.closest?.('[role="dialog"], [role="alertdialog"]') ?? document.body;
+  if (!container) return false;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.tabIndex = -1;
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  container.appendChild(textarea);
+  let copied = false;
+  try {
+    textarea.select();
+    textarea.setSelectionRange?.(0, text.length);
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  } finally {
+    textarea.remove();
+    if (active?.isConnected) {
+      try { active.focus({ preventScroll: true }); } catch {}
+    }
+  }
+  return copied;
+}
+
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // WebView2 and older desktop WebViews may not expose the async clipboard API.
+  }
+  return copyFallback(text);
+}
+
 function getTauriInvoke(): TauriInvoke | null {
   if (typeof globalThis === "undefined") return null;
   const host = globalThis as unknown as TauriRuntimeGlobal;

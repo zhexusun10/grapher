@@ -1351,6 +1351,43 @@ impl Environments {
             && (!self.config.discovery || self.load_launch(reference)?.environment.is_some()))
     }
 
+    pub(crate) fn prune_unreferenced_snapshots(
+        &self,
+        retained_env_refs: &std::collections::BTreeSet<String>,
+        retained_launch_refs: &std::collections::BTreeSet<String>,
+    ) -> Result<usize, String> {
+        let mut removed = self.files.prune_unreferenced(retained_env_refs)?;
+        // Verify all retained launches exist before pruning obsolete launch records.
+        for launch_ref in retained_launch_refs {
+            if !launch_ref.is_empty() && self.load_launch(launch_ref).is_err() {
+                return Ok(removed);
+            }
+        }
+        let launches_dir = self.directory.join("launches");
+        if let Some(dir) = real_child_path(&self.directory, &launches_dir, false)? {
+            for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".json")) else {
+                    continue;
+                };
+                if !retained_launch_refs.contains(stem) {
+                    if fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     fn dedup_scopes(root: Option<&Path>, mut paths: Vec<String>) -> Vec<String> {
         paths.sort();
         let mut unique: Vec<String> = Vec::with_capacity(paths.len());

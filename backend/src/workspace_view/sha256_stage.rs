@@ -70,7 +70,7 @@ impl Batch {
             // Keep the original post-write content reread. The exact bytes
             // sent to Git also passed the scan identity check before import.
             if let Some((file, blob)) = &item.file_check {
-                verify_file(file, blob)?;
+                verify_file(&item.name, file, blob)?;
             }
             crate::workspace_git_index::append_index_info(index, item.mode, oid, &item.name);
         }
@@ -81,9 +81,11 @@ impl Batch {
     }
 }
 
-fn verify_file(file: &Path, blob: &str) -> Result<(), String> {
-    let len = fs::metadata(file).map_err(|e| e.to_string())?.len();
-    if super::file_blob(file, len)?.to_string() != blob {
+fn verify_file(display_name: &str, file: &Path, blob: &str) -> Result<(), String> {
+    let len = fs::metadata(file)
+        .map_err(|e| super::map_snapshot_io_error(e, display_name))?
+        .len();
+    if super::file_blob(display_name, file, len)?.to_string() != blob {
         return Err(CHANGED.into());
     }
     Ok(())
@@ -122,14 +124,14 @@ fn executable_paths(
     Ok(paths)
 }
 
-fn read_small(file: &Path, blob: &str) -> Result<Option<Vec<u8>>, String> {
+fn read_small(display_name: &str, file: &Path, blob: &str) -> Result<Option<Vec<u8>>, String> {
     // A growing file cannot turn a small-file batch into an unbounded read.
     let mut bytes = Vec::new();
     fs::File::open(file)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| super::map_snapshot_io_error(e, display_name))?
         .take(SMALL_BLOB_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| super::map_snapshot_io_error(e, display_name))?;
     if bytes.len() as u64 > SMALL_BLOB_LIMIT {
         // Size is only a routing hint, never a freshness check. If it grew
         // beyond this budget, use the original streaming path and revalidation.
@@ -207,9 +209,12 @@ fn stage_with(
                 };
                 let mode = if executable { "100755" } else { "100644" };
                 let buffered = if batchable
-                    && fs::metadata(&file).map_err(|e| e.to_string())?.len() <= SMALL_BLOB_LIMIT
+                    && fs::metadata(&file)
+                        .map_err(|e| super::map_snapshot_io_error(e, &name))?
+                        .len()
+                        <= SMALL_BLOB_LIMIT
                 {
-                    read_small(&file, &blob)?
+                    read_small(&name, &file, &blob)?
                 } else {
                     None
                 };
@@ -218,7 +223,7 @@ fn stage_with(
                     let mut args = prefix.to_vec();
                     args.extend(["hash-object", "-w", "--no-filters", "--", file_text]);
                     let oid = workspace::git(path, &args)?;
-                    verify_file(&file, &blob)?;
+                    verify_file(&name, &file, &blob)?;
                     crate::workspace_git_index::append_index_info(&mut index, mode, &oid, &name);
                     continue;
                 };

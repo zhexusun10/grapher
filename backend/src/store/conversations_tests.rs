@@ -360,3 +360,108 @@ fn sidebar_summary_reflects_conversation_rename_without_changing_original_goal()
     assert_eq!(loaded.graph.original_goal, "Original prompt");
     assert_eq!(loaded.title.as_deref(), Some("Sidebar Custom Title"));
 }
+
+#[test]
+fn sidebar_summary_truncates_oversized_goal_titles_at_char_boundary() {
+    let fixture = Fixture::new();
+    let huge_goal = format!("前缀报错：{}", "日志行\n".repeat(40_000));
+    fixture.create("huge-goal-run", "/repo", &huge_goal);
+    let summary = fixture
+        .summaries()
+        .into_iter()
+        .find(|s| s.run_id == "huge-goal-run")
+        .unwrap();
+    assert!(summary.title.starts_with("前缀报错："));
+    assert!(summary.title.ends_with('…'));
+    assert!(summary.title.chars().count() <= MAX_SUMMARY_TITLE_CHARS + 1);
+    let loaded = fixture.store.load("huge-goal-run").unwrap();
+    assert_eq!(loaded.graph.original_goal, huge_goal);
+}
+
+#[test]
+fn sidebar_catalog_reopens_replaced_database_file_and_handles_log_only_commits() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("events.sqlite");
+    {
+        let store = Store::open(&db_path).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "repository": "/alpha", "model": "test/model", "maxParallel": 1
+        }))
+        .unwrap();
+        let mut state = Snapshot {
+            run_id: "initial-run".into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: "Initial".into(),
+                        ..Default::default()
+                    },
+                    config,
+                    planning_id: None,
+                    planning: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            conversation_summaries(&db_path).unwrap().conversations[0].run_id,
+            "initial-run"
+        );
+        // Log-only commits advance SQLite data_version without mutating events.
+        store
+            .append(
+                &mut state,
+                EventKind::Output {
+                    execution_id: "exec-1".into(),
+                    text: "streamed chunk\n".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            conversation_summaries(&db_path).unwrap().conversations[0].run_id,
+            "initial-run"
+        );
+    }
+
+    // Replace the SQLite file at the same path via rename; the cached connection
+    // must detect the new file identity instead of reading the unlinked inode.
+    let replacement = directory.path().join("replacement.sqlite");
+    {
+        let store = Store::open(&replacement).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "repository": "/beta", "model": "test/model", "maxParallel": 1
+        }))
+        .unwrap();
+        let mut state = Snapshot {
+            run_id: "replaced-run".into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph {
+                        original_goal: "Replaced".into(),
+                        ..Default::default()
+                    },
+                    config,
+                    planning_id: None,
+                    planning: None,
+                },
+            )
+            .unwrap();
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(directory.path().join(format!("events.sqlite{suffix}")));
+    }
+    std::fs::rename(&replacement, &db_path).unwrap();
+
+    let summaries = conversation_summaries(&db_path).unwrap().conversations;
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].run_id, "replaced-run");
+    assert_eq!(summaries[0].title, "Replaced");
+    forget_catalog(&db_path);
+}

@@ -48,6 +48,7 @@
     "macOS": {
       "minimumSystemVersion": "12.0",
       "hardenedRuntime": true,
+      "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist",
       "dmg": {
         "windowSize": {

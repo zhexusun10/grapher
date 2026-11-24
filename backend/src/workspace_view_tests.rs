@@ -117,10 +117,19 @@ fn source_capture_keeps_identity_checks_and_revalidates_live_files() {
     fs::write(source.join("tracked.txt"), "changed after inspection\n").unwrap();
     let error = capture_source_with_view(&source, &next, &identity, &[], view).unwrap_err();
     assert!(
-        error.contains("Source changed while copying project Git"),
+        error.contains("Source changed while copying project Git")
+            && error.contains("tracked.txt modified"),
         "{error}"
     );
     assert!(!record_path(&source, &next).unwrap().exists());
+    let views_dir = record_path(&source, &next).unwrap().parent().unwrap().to_path_buf();
+    assert!(
+        !fs::read_dir(&views_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".pending-")),
+        "failed view capture must clean up its pending staging directory"
+    );
     assert_eq!(
         bytes(&source.join("tracked.txt")),
         b"changed after inspection\n"
@@ -3383,5 +3392,85 @@ fn validate_nested_bindings_catches_broken_nested_git_symlink() {
     assert!(
         err.contains("symbolic .git must resolve to a repository directory"),
         "{err}"
+    );
+}
+
+#[test]
+fn install_git_scoped_preserves_empty_multivar_reset_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    workspace::project_git(&repo, &["config", "--add", "credential.helper", ""]).unwrap();
+    workspace::project_git(
+        &repo,
+        &["config", "--add", "credential.helper", "/custom/helper"],
+    )
+    .unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+    let node = slot(&temp, "empty-multivar");
+    workspace::prepare(&repo, &node, &base, &[]).unwrap();
+    let values = workspace::project_git(
+        &node,
+        &["config", "--local", "--get-all", "credential.helper"],
+    )
+    .unwrap();
+    assert_eq!(
+        values.lines().collect::<Vec<_>>(),
+        vec!["", "/custom/helper"],
+        "empty multivar reset entry must not be overwritten by subsequent values"
+    );
+}
+
+#[test]
+fn concurrent_file_removal_reports_snapshot_change_with_path_instead_of_bare_not_found() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::write(repo.join("ephemeral.tmp"), "volatile\n").unwrap();
+    let view = inspect_source_scoped(&repo, &[]).unwrap();
+    let shadow = workspace::shadow_repo_dir(&repo).unwrap();
+    workspace::materialize_shadow_repo(&repo, &[]).unwrap();
+    fs::remove_file(repo.join("ephemeral.tmp")).unwrap();
+    let err = stage_project_with_view(&repo, &shadow, &view).unwrap_err();
+    assert!(
+        err.contains("Project changed while binding its byte snapshot")
+            && err.contains("ephemeral.tmp disappeared"),
+        "{err}"
+    );
+}
+
+#[test]
+fn poisoned_unrecorded_shadow_head_recovers_prior_recorded_ancestor_for_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::write(repo.join("tracked.txt"), "dirty-base\n").unwrap();
+    let base = workspace::snapshot_repository(&repo).unwrap();
+    let node = slot(&temp, "worker");
+    workspace::prepare(&repo, &node, &base, &[]).unwrap();
+    fs::write(node.join("node.txt"), "from-node\n").unwrap();
+    let node_head = workspace::snapshot_node_for_run(
+        &node,
+        &repo,
+        "worker",
+        Some(&uuid::Uuid::new_v4().to_string()),
+    )
+    .unwrap();
+
+    // Simulate a legacy/crashed snapshot that advanced shadow HEAD to a commit
+    // without an `agent-views` record (whose parent is `base`).
+    let tree = workspace::repository_git(&repo, &["rev-parse", &format!("{base}^{{tree}}")]).unwrap();
+    let poisoned = workspace::repository_git(
+        &repo,
+        &["commit-tree", &tree, "-p", &base, "-m", "poisoned"],
+    )
+    .unwrap();
+    workspace::repository_git(&repo, &["update-ref", "HEAD", &poisoned]).unwrap();
+    assert!(!has_record(&repo, &poisoned));
+
+    // A later source snapshot must walk past the unrecorded shadow HEAD,
+    // inherit `base` as its recorded ancestor, and keep `composition_base` valid.
+    fs::write(repo.join("source-later.txt"), "edited\n").unwrap();
+    let pub_input = workspace::snapshot_repository(&repo).unwrap();
+    assert_eq!(
+        composition_base(&repo, &pub_input, &[node_head]).unwrap(),
+        base
     );
 }

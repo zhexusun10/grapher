@@ -908,7 +908,7 @@ impl Runtime {
             return Ok(());
         }
         if (self.batch_workspaces() && self.active())
-            || crate::cleanup::retains_workspaces(&self.state)
+            || crate::cleanup::retains_workspaces(&self.root, &self.state)
         {
             return Ok(());
         }
@@ -934,6 +934,402 @@ impl Runtime {
             crate::cleanup::retire_workspaces(&self.root, &self.store, &task)?;
         }
         Ok(())
+    }
+
+    /// Between batches (for example after an intermediate `PublicationCompleted`
+    /// in a `4 -> 1` or `8 -> 4` pipeline), asynchronously retire idle private
+    /// slots that are no longer needed by live writers, recovery, feedback,
+    /// bound fixed-layout environments, or the immediately ready private batch.
+    pub(crate) fn retire_idle_workspace_slots(&self) -> Result<(), String> {
+        if !self.batch_workspaces()
+            || self.state.run_id.is_empty()
+            || uuid::Uuid::parse_str(&self.state.run_id).is_err()
+        {
+            return Ok(());
+        }
+        if matches!(
+            self.state.phase.as_str(),
+            "planning" | "publishing" | "merging" | "launching_result"
+        ) || self
+            .state
+            .publication
+            .as_ref()
+            .is_some_and(|publication| publication.status != "completed")
+        {
+            return Ok(());
+        }
+        if let Some(policy) = self
+            .state
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+        {
+            if !policy.discovery {
+                return Ok(());
+            }
+        }
+        let mut parents = BTreeSet::new();
+        if let Ok(parent) = workspace::workspaces_parent(&self.root)
+            .canonicalize()
+            .map(|resolved| crate::path_identity::actual_path(&resolved).unwrap_or(resolved))
+        {
+            parents.insert(parent);
+        }
+        for target in self.store.owned_cleanup_targets(&self.state.run_id)? {
+            if let crate::cleanup::Target::Workspace {
+                parent,
+                bucket,
+                owner,
+                checkout: None,
+            } = target
+            {
+                if bucket == ".grapher-worktrees" && owner == self.state.run_id {
+                    if let Ok(resolved) = parent.canonicalize().map(|resolved| {
+                        crate::path_identity::actual_path(&resolved).unwrap_or(resolved)
+                    }) {
+                        parents.insert(resolved);
+                    }
+                }
+            }
+        }
+        let protected_layouts = self.retained_environment_layouts()?;
+        let protected_sources = self.store.cleanup_sources()?;
+        let mut idle_slots = Vec::new();
+        let mut publication_dirs = Vec::new();
+        let mut touched_run_roots = BTreeSet::new();
+        for parent in parents {
+            let run_root = parent.join(".grapher-worktrees").join(&self.state.run_id);
+            let Ok(meta) = fs::symlink_metadata(&run_root) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err("Refusing linked Run workspace root".into());
+            }
+            for entry in fs::read_dir(&run_root).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                if !entry
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !crate::cleanup::valid_workspace_checkout(&name) {
+                    continue;
+                }
+                let Some(path) =
+                    crate::path_safety::real_child_path(&run_root, &entry.path(), false)?
+                else {
+                    continue;
+                };
+                if protected_sources
+                    .iter()
+                    .any(|source| crate::workspace::scope_contains(source, &path))
+                {
+                    continue;
+                }
+                if crate::cleanup::is_publication_workspace_checkout(&name) {
+                    if self.publication_dir_retirable(&run_root, &name, &path) {
+                        publication_dirs.push((parent.clone(), run_root.clone(), name, path));
+                    }
+                    continue;
+                }
+                if self.allocation_workspace_reserved(&path, None) {
+                    continue;
+                }
+                let key = crate::path_identity::path_key(&path);
+                if protected_layouts.contains(&key) {
+                    continue;
+                }
+                idle_slots.push((parent.clone(), run_root.clone(), name, path));
+            }
+        }
+        let retire_one = |parent: &Path, slot_name: String, slot_path: &Path| -> Result<(), String> {
+            if let Ok(digest) = crate::workspace_state::slot_digest(slot_path) {
+                let git_target = crate::cleanup::Target::workspace_checkout(
+                    parent,
+                    &self.state.run_id,
+                    format!(".grapher-git/{digest}.git"),
+                );
+                let _ = crate::cleanup::detached::retire(
+                    &self.root,
+                    &self.store,
+                    &self.state.run_id,
+                    &git_target,
+                );
+                let state_target = crate::cleanup::Target::workspace_checkout(
+                    parent,
+                    &self.state.run_id,
+                    format!(".grapher-state/{digest}"),
+                );
+                let _ = crate::cleanup::detached::retire(
+                    &self.root,
+                    &self.store,
+                    &self.state.run_id,
+                    &state_target,
+                );
+            }
+            let slot_target = crate::cleanup::Target::workspace_checkout(
+                parent,
+                &self.state.run_id,
+                slot_name,
+            );
+            crate::cleanup::detached::retire(
+                &self.root,
+                &self.store,
+                &self.state.run_id,
+                &slot_target,
+            )
+        };
+        if !idle_slots.is_empty() {
+            idle_slots.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+            let keep_hot = self.next_private_batch_hot_slots();
+            for (parent, run_root, slot_name, slot_path) in idle_slots.into_iter().skip(keep_hot) {
+                retire_one(&parent, slot_name, &slot_path)?;
+                touched_run_roots.insert(run_root);
+            }
+        }
+        for (parent, run_root, name, path) in publication_dirs {
+            retire_one(&parent, name, &path)?;
+            touched_run_roots.insert(run_root);
+        }
+        for run_root in touched_run_roots {
+            for container in [".grapher-git", ".grapher-state"] {
+                let dir = run_root.join(container);
+                if fs::read_dir(&dir)
+                    .ok()
+                    .is_some_and(|mut entries| entries.next().is_none())
+                {
+                    let _ = fs::remove_dir(&dir);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn publication_dir_retirable(&self, run_root: &Path, name: &str, path: &Path) -> bool {
+        let base_path = if let Some(stem) = name.strip_suffix(".publication") {
+            run_root.join(stem)
+        } else {
+            path.to_path_buf()
+        };
+        if self.workspace_reserved(path, None) || self.workspace_reserved(&base_path, None) {
+            return false;
+        }
+        if self.state.mergers.iter().any(|merger| {
+            matches!(merger.status.as_str(), "running" | "failed")
+                && (Self::same_workspace_path(Path::new(&merger.worktree), path)
+                    || Self::same_workspace_path(Path::new(&merger.worktree), &base_path))
+        }) {
+            return false;
+        }
+        let journal_root = if name.ends_with(".publication") {
+            path.to_path_buf()
+        } else if name.starts_with("publication-files-") {
+            run_root.join(format!("{name}.publication"))
+        } else {
+            return true;
+        };
+        let Ok(entries) = fs::read_dir(&journal_root) else {
+            return true;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let attempt = entry.path();
+            let has_state = attempt.join("prepared.json").is_file()
+                || attempt.join("input.json").is_file()
+                || attempt.join("applying").is_file();
+            if has_state && !attempt.join("installed").is_file() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Prune obsolete environment snapshots (`versions/`, `blobs/`, `launches/`)
+    /// after a Graph Run settles so earlier superseded batches or failed retries
+    /// do not retain large environment blobs until conversation deletion.
+    pub(crate) fn prune_stale_environment_snapshots(&self) -> Result<usize, String> {
+        if !self.batch_workspaces()
+            || self.state.phase != "completed"
+            || self.active()
+            || !self.state.pending_feedback.is_empty()
+            || self
+                .state
+                .nodes
+                .values()
+                .any(|node| node.status != "completed")
+            || self.state.result_execution.as_ref().is_some_and(|execution| {
+                matches!(execution.status.as_str(), "running" | "failed")
+            })
+        {
+            return Ok(0);
+        }
+        let Some(policy) = self
+            .state
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+        else {
+            return Ok(0);
+        };
+        let env_dir = self.root.join("environments").join(&self.state.run_id);
+        if !env_dir.is_dir() {
+            return Ok(0);
+        }
+        let Ok(store) = crate::environment::Environments::new(&self.root, &self.state.run_id, policy)
+        else {
+            return Ok(0);
+        };
+        let mut retained_env_refs = BTreeSet::new();
+        let mut retained_launch_refs = BTreeSet::new();
+        let current_result = self.require_current_batch_result().is_ok();
+        if current_result {
+            if let Some(descriptor) = self.state.published_result.as_ref() {
+                for result in std::iter::once(&descriptor.result)
+                    .chain(descriptor.entries.iter().map(|entry| &entry.result))
+                {
+                    if !result.environment_ref.is_empty() {
+                        retained_env_refs.insert(result.environment_ref.clone());
+                    }
+                    if !result.launch_ref.is_empty() {
+                        retained_launch_refs.insert(result.launch_ref.clone());
+                    }
+                }
+            }
+        }
+        if !policy.discovery {
+            if let Some(baseline) = self.state.environment_baseline.as_ref() {
+                if !baseline.environment_ref.is_empty() {
+                    retained_env_refs.insert(baseline.environment_ref.clone());
+                }
+                if !baseline.launch_ref.is_empty() {
+                    retained_launch_refs.insert(baseline.launch_ref.clone());
+                }
+            }
+        }
+        store.prune_unreferenced_snapshots(&retained_env_refs, &retained_launch_refs)
+    }
+
+    fn next_private_batch_hot_slots(&self) -> usize {
+        let Some(config) = self.state.config.as_ref() else {
+            return 0;
+        };
+        if !config.isolate_parallel_nodes {
+            return 0;
+        }
+        let ready = self
+            .state
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                let Some(state) = self.state.nodes.get(&node.id) else {
+                    return false;
+                };
+                if matches!(state.status.as_str(), "completed" | "running") {
+                    return false;
+                }
+                self.state.graph.edges.iter().all(|edge| {
+                    edge.feedback
+                        || edge.to != node.id
+                        || self
+                            .state
+                            .nodes
+                            .get(&edge.from)
+                            .is_some_and(|parent| parent.status == "completed")
+                })
+            })
+            .count();
+        if ready > workspace_policy::SHARED_SOURCE_BATCH_LIMIT {
+            ready
+        } else {
+            0
+        }
+    }
+
+    fn retained_environment_layouts(&self) -> Result<BTreeSet<String>, String> {
+        let mut retained = BTreeSet::new();
+        if let Some(execution) = self
+            .state
+            .result_execution
+            .as_ref()
+            .filter(|e| matches!(e.status.as_str(), "running" | "failed"))
+        {
+            if let Some(layout) = execution.input.layout.as_deref() {
+                if let Ok(path) = Path::new(layout).canonicalize() {
+                    retained.insert(crate::path_identity::path_key(&path));
+                }
+            }
+        }
+        let Some(policy) = self
+            .state
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+        else {
+            return Ok(retained);
+        };
+        let store = self.environments()?;
+        let needs_layout = |result: &crate::environment::CompositeResult| -> bool {
+            let Some(store) = store.as_ref() else {
+                return true;
+            };
+            store
+                .requires_fixed_layout(&result.launch_ref)
+                .unwrap_or(true)
+        };
+        if let Some(descriptor) = self.state.published_result.as_ref() {
+            if self.require_current_batch_result().is_ok() {
+                for result in std::iter::once(&descriptor.result)
+                    .chain(descriptor.entries.iter().map(|entry| &entry.result))
+                {
+                    if needs_layout(result) {
+                        if let Some(layout) = result.layout.as_deref() {
+                            if let Ok(path) = Path::new(layout).canonicalize() {
+                                retained.insert(crate::path_identity::path_key(&path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for edge in &self.state.graph.edges {
+            if edge.feedback {
+                continue;
+            }
+            if !self
+                .state
+                .nodes
+                .get(&edge.to)
+                .is_some_and(|child| child.status != "completed")
+            {
+                continue;
+            }
+            let Some(parent) = self.state.nodes.get(&edge.from) else {
+                continue;
+            };
+            let Some(result) = parent.result.as_ref() else {
+                continue;
+            };
+            if !policy.discovery || needs_layout(result) {
+                if let Some(layout) = result.layout.as_deref() {
+                    if let Ok(path) = Path::new(layout).canonicalize() {
+                        retained.insert(crate::path_identity::path_key(&path));
+                    }
+                }
+            }
+        }
+        Ok(retained)
     }
 
     pub fn retry_cleanup(&self, run_id: &str) -> Result<(), String> {
@@ -2437,7 +2833,11 @@ impl Runtime {
             graph,
             invalidated,
             source_head,
-        })
+        })?;
+        if self.state.approved && !self.active() {
+            let _ = self.retire_idle_workspace_slots();
+        }
+        Ok(())
     }
 
     /// Snapshot the authoritative committed graph and completed nodes when a
@@ -2587,7 +2987,11 @@ impl Runtime {
             planning,
             invalidated,
             source_head,
-        })
+        })?;
+        if self.state.approved && !self.active() {
+            let _ = self.retire_idle_workspace_slots();
+        }
+        Ok(())
     }
 
     /// Synchronize this conversation's model selection to unstarted and failed
@@ -4319,13 +4723,7 @@ impl Runtime {
             } else {
                 self.state.nodes[&node.id].feedback_workspace.clone()
             };
-            let fresh_path = || {
-                workspace::normalize_workspace_display_path(
-                    &self
-                        .run_workspace_root()
-                        .join(format!("{}-{id}", crate::compiler::node_id(&node.id))),
-                )
-            };
+            let fresh_path = || self.fresh_workspace_path(&node.id);
             let busy = |path: &Path| self.allocation_workspace_reserved(path, Some(&node.id));
             let shared_terminal = (!feedback_rebase && self.state.nodes[&node.id].shared_workspace)
                 .then(|| self.terminal_workspace_for(&node.id))
@@ -5365,6 +5763,65 @@ impl Runtime {
             .join(&self.state.run_id)
     }
 
+    fn fresh_workspace_path(&self, node_name: &str) -> String {
+        let root = self.run_workspace_root();
+        let raw = crate::compiler::node_id(node_name);
+        let lower = raw.to_ascii_lowercase();
+        let base = if lower.starts_with("publication-") || raw.starts_with('.') {
+            format!("n-{raw}")
+        } else {
+            raw
+        };
+        let slot_name_under_root = |path: &str| {
+            let path = Path::new(path);
+            path.parent()
+                .filter(|parent| Self::same_workspace_path(parent, &root))
+                .and_then(|_| path.file_name())
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        };
+        let mut used: BTreeSet<String> = self
+            .state
+            .executions
+            .iter()
+            .chain(&self.state.mergers)
+            .filter_map(|execution| slot_name_under_root(&execution.worktree))
+            .chain(
+                self.state
+                    .planning
+                    .as_ref()
+                    .and_then(|planning| planning.worktree.as_deref())
+                    .and_then(&slot_name_under_root),
+            )
+            .chain(
+                self.state
+                    .result_execution
+                    .as_ref()
+                    .and_then(|execution| execution.input.layout.as_deref())
+                    .and_then(&slot_name_under_root),
+            )
+            .collect();
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.filter_map(Result::ok) {
+                used.insert(entry.file_name().to_string_lossy().to_ascii_lowercase());
+            }
+        }
+        let mut suffix: usize = 1;
+        loop {
+            let name = if suffix == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{suffix}")
+            };
+            let candidate = root.join(&name);
+            if !used.contains(&name.to_ascii_lowercase())
+                && fs::symlink_metadata(&candidate).is_err()
+            {
+                return workspace::normalize_workspace_display_path(&candidate);
+            }
+            suffix += 1;
+        }
+    }
+
     fn existing_workspace_paths(&self) -> Vec<PathBuf> {
         let Ok(entries) = fs::read_dir(self.run_workspace_root()) else {
             return Vec::new();
@@ -5417,6 +5874,34 @@ impl Runtime {
     fn workspace_reserved(&self, path: &Path, owner: Option<&str>) -> bool {
         if self.path_is_running(path) {
             return true;
+        }
+        // A running Planner borrows its selected/switched slots; a failed
+        // Planner retains its final cwd for explicit continuation. Never let
+        // idle-slot allocation or another node overwrite that workspace.
+        if let Some(planning) = self
+            .state
+            .planning
+            .as_ref()
+            .filter(|planning| matches!(planning.status.as_deref(), Some("running" | "failed")))
+        {
+            let visited = self.state.events.iter().filter_map(|event| match &event.kind {
+                EventKind::PlannerWorkspaceSelected { planning: selected }
+                    if planning.status.as_deref() == Some("running")
+                        && selected.planning_id == planning.planning_id =>
+                {
+                    selected.worktree.as_deref()
+                }
+                _ => None,
+            });
+            if planning
+                .worktree
+                .as_deref()
+                .into_iter()
+                .chain(visited)
+                .any(|worktree| crate::path_identity::same_path(Path::new(worktree), path))
+            {
+                return true;
+            }
         }
         // Feedback evidence is reserved even without a managed environment.
         // Unrelated jobs must not recycle an input before batch composition.

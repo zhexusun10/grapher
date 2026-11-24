@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{atomic::AtomicUsize, Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 const DEFAULT_LIMIT: usize = 50;
@@ -21,32 +21,11 @@ const SNIPPET_AFTER_CHARS: usize = 84;
 const SNIPPET_MATCH_MAX_CHARS: usize = 160;
 const MAX_LOG_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct DbFileId {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-    #[cfg(not(unix))]
-    created: Option<SystemTime>,
-}
-
-fn db_file_id(path: &Path) -> Option<DbFileId> {
+fn db_file_id(path: &Path) -> Option<u128> {
     let meta = fs::metadata(path).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some(DbFileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Some(DbFileId {
-            created: meta.created().ok(),
-        })
-    }
+    crate::workspace_metadata::file_identity(path, &meta)
+        .ok()
+        .map(|(id, _)| id)
 }
 
 struct CachedRunEntry {
@@ -75,7 +54,6 @@ struct CachedPlannerTexts {
 
 struct SearchIndex {
     connection: Connection,
-    file_id: Option<DbFileId>,
     data_version: Option<i64>,
     max_seq_by_run: HashMap<String, i64>,
     runs: HashMap<String, CachedRunEntry>,
@@ -95,7 +73,6 @@ impl SearchIndex {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             connection,
-            file_id: db_file_id(db_path),
             data_version: None,
             max_seq_by_run: HashMap::new(),
             runs: HashMap::new(),
@@ -126,7 +103,11 @@ impl SearchIndex {
         {
             let mut stmt = self
                 .connection
-                .prepare_cached("SELECT run_id, MAX(sequence) FROM events GROUP BY run_id")
+                .prepare_cached(
+                    "SELECT run_id, MAX(sequence) FROM events
+                     WHERE run_id NOT IN (SELECT run_id FROM deleted_runs)
+                     GROUP BY run_id",
+                )
                 .map_err(|e| e.to_string())?;
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -135,7 +116,7 @@ impl SearchIndex {
                 max_seqs.insert(run_id, seq);
             }
         }
-        // Drop deleted/absent runs from cache.
+        // Drop deleted/absent runs and their cached execution/planner entries.
         let stale_runs: Vec<String> = self
             .runs
             .keys()
@@ -145,6 +126,14 @@ impl SearchIndex {
         for id in stale_runs {
             if let Some(removed) = self.runs.remove(&id) {
                 self.cached_bytes = self.cached_bytes.saturating_sub(removed.bytes);
+                if let Some(data) = removed.data.as_deref() {
+                    for (planning_id, _) in &data.planning_ids {
+                        if let Some(removed_planner) = self.planners.remove(planning_id) {
+                            self.cached_bytes =
+                                self.cached_bytes.saturating_sub(removed_planner.bytes);
+                        }
+                    }
+                }
             }
         }
         let stale_execs: Vec<String> = self
@@ -408,27 +397,48 @@ impl SearchIndex {
     }
 }
 
-static SEARCH_INDEXES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<SearchIndex>>>>> =
-    OnceLock::new();
+type SearchIndexSlot = (Option<u128>, Arc<Mutex<SearchIndex>>, Arc<AtomicUsize>);
+static SEARCH_INDEXES: OnceLock<Mutex<HashMap<PathBuf, SearchIndexSlot>>> = OnceLock::new();
 
-fn search_index_for(db_path: &Path) -> Result<Arc<Mutex<SearchIndex>>, String> {
+fn search_index_entry_for(
+    db_path: &Path,
+) -> Result<(Arc<Mutex<SearchIndex>>, Arc<AtomicUsize>), String> {
     let current_id = db_file_id(db_path);
+    {
+        let mut map = SEARCH_INDEXES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if let Some((saved_id, existing, waiting)) = map.get(db_path) {
+            if *saved_id == current_id {
+                return Ok((existing.clone(), waiting.clone()));
+            }
+            // Drop the stale connection before opening the replacement SQLite file
+            // so old WAL/SHM locks are released first.
+            drop(map.remove(db_path));
+        }
+    }
+    let opened = Arc::new(Mutex::new(SearchIndex::open(db_path)?));
+    let waiting = Arc::new(AtomicUsize::new(0));
     let mut map = SEARCH_INDEXES
         .get_or_init(Default::default)
         .lock()
         .map_err(|e| e.to_string())?;
-    if let Some(existing) = map.get(db_path) {
-        let same_file = existing
-            .lock()
-            .ok()
-            .is_some_and(|guard| guard.file_id == current_id);
-        if same_file {
-            return Ok(existing.clone());
+    if let Some((saved_id, existing, existing_waiting)) = map.get(db_path) {
+        if *saved_id == current_id {
+            return Ok((existing.clone(), existing_waiting.clone()));
         }
     }
-    let index = Arc::new(Mutex::new(SearchIndex::open(db_path)?));
-    map.insert(db_path.to_path_buf(), index.clone());
-    Ok(index)
+    map.insert(
+        db_path.to_path_buf(),
+        (current_id, opened.clone(), waiting.clone()),
+    );
+    Ok((opened, waiting))
+}
+
+#[cfg(test)]
+fn search_index_for(db_path: &Path) -> Result<Arc<Mutex<SearchIndex>>, String> {
+    search_index_entry_for(db_path).map(|(index, _)| index)
 }
 
 fn query_execution_log_bytes(connection: &Connection, run_id: &str, execution_id: &str) -> usize {
@@ -511,12 +521,15 @@ pub(super) fn search_conversations(
         });
     }
 
-    let root = service
-        .runtime
-        .lock()
-        .map_err(|error| error.to_string())?
-        .root
-        .clone();
+    let root = match super::known_service_root(service) {
+        Some(root) => root,
+        None => service
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?
+            .root
+            .clone(),
+    };
     if warm && normalized_query.is_empty() {
         warm_workspace_index(&root, &repository)?;
         return Ok(ConversationSearchResponse {
@@ -528,6 +541,21 @@ pub(super) fn search_conversations(
         });
     }
     search_workspace_root(&root, &repository, &normalized_query, role_filter, limit)
+}
+
+struct ActiveQueryGuard(Arc<AtomicUsize>);
+
+impl ActiveQueryGuard {
+    fn acquire(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveQueryGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
@@ -546,11 +574,21 @@ fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
     if workspace_runs.is_empty() {
         return Ok(());
     }
-    let index_arc = search_index_for(&db_path)?;
-    let mut index = index_arc.lock().map_err(|e| e.to_string())?;
-    let db_changed = index.sync_db_version()?;
+    let (index_arc, waiting) = search_index_entry_for(&db_path)?;
+    let db_changed = {
+        if waiting.load(Ordering::Acquire) > 0 {
+            return Ok(());
+        }
+        let mut index = index_arc.lock().map_err(|e| e.to_string())?;
+        index.sync_db_version()?
+    };
     let planning_root = root.join("planning").canonicalize().ok();
     for summary in &workspace_runs {
+        // Yield immediately if an interactive search query is waiting on the index.
+        if waiting.load(Ordering::Acquire) > 0 {
+            break;
+        }
+        let mut index = index_arc.lock().map_err(|e| e.to_string())?;
         let Some(run_data) = index.run_data(&summary.run_id)? else {
             continue;
         };
@@ -563,7 +601,8 @@ fn warm_workspace_index(root: &Path, repository: &str) -> Result<(), String> {
             );
         }
         if let Some(planning_root) = planning_root.as_deref() {
-            let check_disk = db_changed || summary.phase == "planning" || summary.has_active_executions;
+            let check_disk =
+                db_changed || summary.phase == "planning" || summary.has_active_executions;
             for (planning_id, _) in &run_data.planning_ids {
                 let _ = index.planner_texts(planning_root, planning_id, check_disk);
             }
@@ -609,7 +648,8 @@ fn search_workspace_root(
         });
     }
 
-    let index_arc = search_index_for(&db_path)?;
+    let (index_arc, waiting) = search_index_entry_for(&db_path)?;
+    let _active_query = ActiveQueryGuard::acquire(waiting);
     let mut index = index_arc.lock().map_err(|e| e.to_string())?;
     let db_changed = index.sync_db_version()?;
 

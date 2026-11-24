@@ -10,7 +10,8 @@ fn fixed(entries: &mut BTreeMap<String, Entry>, files: Vec<PendingFile>) -> Resu
         .min(4);
     if threads <= 1 || files.len() < 256 {
         for file in files {
-            entries.insert(file.name, file_entry(&file.absolute, &file.metadata)?);
+            let entry = file_entry(&file.name, &file.absolute, &file.metadata)?;
+            entries.insert(file.name, entry);
         }
         return Ok(());
     }
@@ -25,7 +26,7 @@ fn fixed(entries: &mut BTreeMap<String, Entry>, files: Vec<PendingFile>) -> Resu
                         .map(|file| {
                             Ok((
                                 file.name.clone(),
-                                file_entry(&file.absolute, &file.metadata)?,
+                                file_entry(&file.name, &file.absolute, &file.metadata)?,
                             ))
                         })
                         .collect::<Result<Vec<_>, String>>()

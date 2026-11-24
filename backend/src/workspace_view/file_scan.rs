@@ -14,7 +14,17 @@ pub(super) fn fill(
     threads: usize,
 ) -> Result<(), String> {
     fill_with(entries, files, threads, |file| {
-        file_entry(&file.absolute, &file.metadata)
+        file_entry(&file.name, &file.absolute, &file.metadata)
+    })
+}
+
+pub(super) fn fill_tree_only(
+    entries: &mut BTreeMap<String, Entry>,
+    files: Vec<PendingFile>,
+    threads: usize,
+) -> Result<(), String> {
+    fill_with(entries, files, threads, |file| {
+        super::file_tree_entry(&file.name, &file.absolute, &file.metadata)
     })
 }
 
@@ -24,7 +34,7 @@ pub(super) fn fill_with_links(
     threads: usize,
 ) -> Result<crate::workspace_links::Topology, String> {
     let resolved = resolve_files(files, threads, |file| {
-        file_entry_with_identity(&file.absolute, &file.metadata)
+        file_entry_with_identity(&file.name, &file.absolute, &file.metadata)
     })?;
     let mut identities = BTreeMap::new();
     for (name, (entry, identity)) in resolved {

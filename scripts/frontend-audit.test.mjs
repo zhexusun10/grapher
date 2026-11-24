@@ -388,6 +388,11 @@ test("Markdown block copy controls copy only their current code and recover from
   try {
     await page.evaluate(() => {
       window.audit.copies = [];
+      const originalExecCommand = document.execCommand?.bind(document);
+      document.execCommand = (command, ...args) => {
+        if (command === "copy" && window.audit.rejectCopy) return false;
+        return originalExecCommand ? originalExecCommand(command, ...args) : false;
+      };
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
         writeText: async text => {
           if (window.audit.rejectCopy) throw new Error("Clipboard denied");
@@ -608,7 +613,14 @@ test("Codex OAuth presents its method selection, opens the URL once and accepts 
     return true;
   });
   try {
-    await page.evaluate(() => { window.audit.opened = []; window.open = (...args) => { window.audit.opened.push(args); return null; }; });
+    await page.evaluate(() => {
+      window.audit.opened = [];
+      window.audit.copied = [];
+      window.open = (...args) => { window.audit.opened.push(args); return null; };
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: text => { window.audit.copied.push(text); return Promise.resolve(); },
+      } });
+    });
     await page.locator(".providers-grid-title").click();
     await page.locator(".login-btn").click();
     const prompt = page.locator("select#auth-answer");
@@ -625,6 +637,9 @@ test("Codex OAuth presents its method selection, opens the URL once and accepts 
     const link = page.locator(".provider-oauth-btn");
     await link.waitFor();
     assert.equal(await link.getAttribute("href"), url, "a clickable fallback survives popup blocking");
+    await page.getByRole("button", { name: "Copy link", exact: true }).click();
+    await page.waitForFunction(() => window.audit.copied.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.audit.copied), [url], "the authorization URL can be copied from Settings");
     await page.waitForFunction(() => window.audit.opened.length === 1);
     await page.waitForTimeout(1600); // repeated polls must not reopen the browser
     assert.deepEqual(await page.evaluate(() => window.audit.opened), [[url, "_blank", "noopener,noreferrer"]]);
@@ -4103,6 +4118,7 @@ test("unreadable attachments retain the draft and file instead of sending an inc
     await page.evaluate(() => {
       File.prototype.text = () => Promise.reject(new Error("Unreadable fixture"));
       FileReader.prototype.readAsText = () => { throw new Error("Unreadable fixture"); };
+      FileReader.prototype.readAsDataURL = () => { throw new Error("Unreadable fixture"); };
       document.querySelector("textarea").dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: new DataTransfer() }));
     });
     assert.equal(await page.evaluate(() => window.audit.pastes), 1);

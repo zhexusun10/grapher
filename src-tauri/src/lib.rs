@@ -188,33 +188,79 @@ pub fn validate_external_url(raw: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+async fn open_external_url(url: String) -> Result<(), String> {
     let validated = validate_external_url(&url)?;
-    // Pass the URL as a single direct argument (no shell interpolation) so
-    // query characters like `&` or `^` cannot alter the command line.
-    let mut command = if cfg!(target_os = "windows") {
-        let mut command = std::process::Command::new("explorer.exe");
-        command.arg(&validated);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = std::process::Command::new("open");
-        command.arg(&validated);
-        command
-    } else {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(&validated);
-        command
-    };
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Failed to open external URL in system browser: {error}"))?;
-    std::thread::Builder::new()
-        .name("grapher-open-external-url".to_string())
-        .spawn(move || {
-            let _ = child.wait();
-        })
-        .map_err(|error| format!("Failed to monitor external browser launch: {error}"))?;
-    Ok(())
+    // Run external browser launch off the UI thread so cold COM/Shell activation
+    // cannot stall WebView rendering, and pass the URL directly without a shell.
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::{
+                System::Com::{
+                    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+                    COINIT_DISABLE_OLE1DDE,
+                },
+                UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+            };
+            let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+            let target: Vec<u16> = validated.encode_utf16().chain(std::iter::once(0)).collect();
+            // ShellExecuteW delegates URL handling to the user's registered browser
+            // (and may invoke COM verb handlers, so initialize STA COM on this worker).
+            // explorer.exe treats some URL forms as filesystem paths in WebView contexts.
+            let hr = unsafe {
+                CoInitializeEx(
+                    std::ptr::null(),
+                    (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+                )
+            };
+            let result = unsafe {
+                ShellExecuteW(
+                    std::ptr::null_mut(),
+                    operation.as_ptr(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
+            if hr == 0 || hr == 1 {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+            if result as isize <= 32 {
+                return Err(format!(
+                    "Failed to open external URL in system browser (ShellExecuteW: {})",
+                    result as isize
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut command = if cfg!(target_os = "macos") {
+                let mut command = std::process::Command::new("open");
+                command.arg(&validated);
+                command
+            } else {
+                let mut command = std::process::Command::new("xdg-open");
+                command.arg(&validated);
+                command
+            };
+            let mut child = command.spawn().map_err(|error| {
+                format!("Failed to open external URL in system browser: {error}")
+            })?;
+            std::thread::Builder::new()
+                .name("grapher-open-external-url".to_string())
+                .spawn(move || {
+                    let _ = child.wait();
+                })
+                .map_err(|error| format!("Failed to monitor external browser launch: {error}"))?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| format!("External URL launcher task failed: {error}"))?
 }
 
 const MAX_NOTIFICATION_TITLE_CHARS: usize = 120;
@@ -1077,6 +1123,18 @@ pub fn run() {
     }));
     let app = builder
         .plugin(tauri_plugin_process::init())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                #[cfg(desktop)]
+                if let Some(terminals) =
+                    webview.app_handle().try_state::<Arc<terminal::TerminalManager>>()
+                {
+                    terminals.kill_all();
+                }
+            }
+        })
         .on_window_event(|_window, _event| {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = _event {

@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { isWindowsTauriDesktop } from "../../services/apiBase";
+import { copyTextToClipboard } from "../../services/externalLink";
 import "@xterm/xterm/css/xterm.css";
 
 interface XtermSurfaceProps {
@@ -133,8 +134,8 @@ export const XtermSurface: React.FC<XtermSurfaceProps> = ({
         (event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey && key === "c" && term.hasSelection());
       if (isCopy && term.hasSelection()) {
         const selected = term.getSelection();
-        if (selected && navigator.clipboard?.writeText) {
-          void navigator.clipboard.writeText(selected).catch(() => {});
+        if (selected) {
+          void copyTextToClipboard(selected);
         }
         return false;
       }

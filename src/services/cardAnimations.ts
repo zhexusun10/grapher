@@ -20,6 +20,12 @@ export function useCardAppear(id: string | undefined, isLive: boolean, timestamp
   return animate;
 }
 
+export function markCardsPresented(ids: Iterable<string>): void {
+  for (const id of ids) {
+    if (id) presentedCardIds.add(id);
+  }
+}
+
 export function resetPresentedCardIds(): void {
   presentedCardIds.clear();
 }

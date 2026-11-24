@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 import { t } from "../../i18n";
 import { highlightDiffLines, type SyntaxSpan } from "../../lib/diffSyntax";
 import { cacheFileDiff, getCachedFileDiff } from "../../services/fileChanges";
+import { observeElementResize } from "../../services/sharedResizeObserver";
 import type { FileChangeItem, FileChangeStatus, FileDiffLine, FileDiffResult } from "../../types";
 import { ChangeDiffStats } from "./ChangeDiffStats";
 
@@ -11,6 +12,7 @@ const DIFF_LINE_PAGE_SIZE = 300;
 
 interface ChangedFileRowProps {
   runId: string;
+  viewScopeKey: string;
   scopeKey: string;
   item: FileChangeItem;
   expanded: boolean;
@@ -133,6 +135,7 @@ function sameNodes(a?: string[], b?: string[]): boolean {
 function sameFileRowProps(prev: ChangedFileRowProps, next: ChangedFileRowProps): boolean {
   if (
     prev.runId !== next.runId ||
+    prev.viewScopeKey !== next.viewScopeKey ||
     prev.scopeKey !== next.scopeKey ||
     prev.expanded !== next.expanded ||
     prev.refreshVersion !== next.refreshVersion ||
@@ -158,6 +161,7 @@ function sameFileRowProps(prev: ChangedFileRowProps, next: ChangedFileRowProps):
 
 export const ChangedFileRow = React.memo(function ChangedFileRow({
   runId,
+  viewScopeKey,
   scopeKey,
   item,
   expanded,
@@ -178,28 +182,62 @@ export const ChangedFileRow = React.memo(function ChangedFileRow({
   const cacheKey = `${scopeKey}:${item.path}:${item.oldPath ?? ""}:${item.status}:${item.additions}:${item.deletions}:${item.isRunning ? 1 : 0}:${item.source ?? ""}:${refreshVersion}`;
   const [diffState, setDiffState] = useState<{
     status: "idle" | "loading" | "loaded" | "error";
+    viewScopeKey: string;
     data?: FileDiffResult;
     error?: string;
   }>(() => {
     const cached = getCachedFileDiff(cacheKey);
-    return cached ? { status: "loaded", data: cached } : { status: "idle" };
+    return cached ? { status: "loaded", viewScopeKey, data: cached } : { status: "idle", viewScopeKey };
   });
   const [retryCount, setRetryCount] = useState(0);
+  const retryBypassKeyRef = useRef<string | null>(null);
+  const diffContentRef = useRef<HTMLDivElement>(null);
+  const [diffHeight, setDiffHeight] = useState(0);
+  const [renderBody, setRenderBody] = useState(expanded);
+
+  useLayoutEffect(() => {
+    if (expanded) {
+      setRenderBody(true);
+    } else {
+      setDiffHeight(0);
+      if (typeof window === "undefined" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        setRenderBody(false);
+      } else {
+        const timer = setTimeout(() => setRenderBody(false), 240);
+        return () => clearTimeout(timer);
+      }
+      return;
+    }
+    const content = diffContentRef.current;
+    if (!content) return;
+    const measure = () => {
+      const nextHeight = content.getBoundingClientRect().height;
+      setDiffHeight(previous => Math.abs(previous - nextHeight) < 0.5 ? previous : nextHeight);
+    };
+    measure();
+    return observeElementResize(content, measure);
+  }, [expanded, item.path]);
 
   useEffect(() => {
     if (!expanded) return;
-    if (retryCount === 0) {
+    const bypassCache = retryBypassKeyRef.current === cacheKey;
+    retryBypassKeyRef.current = null;
+    if (!bypassCache) {
       const cached = getCachedFileDiff(cacheKey);
       if (cached) {
-        setDiffState({ status: "loaded", data: cached });
+        setDiffState({ status: "loaded", viewScopeKey, data: cached });
         return;
       }
     }
     const abort = new AbortController();
-    setDiffState((prev) => ({
-      status: prev.data ? "loaded" : "loading",
-      data: prev.data,
-    }));
+    setDiffState((prev) => {
+      const keepPrevData = prev.viewScopeKey === viewScopeKey ? prev.data : undefined;
+      return {
+        status: keepPrevData ? "loaded" : "loading",
+        viewScopeKey,
+        data: keepPrevData,
+      };
+    });
     loadDiff(item, abort.signal)
       .then((result) => {
         if (abort.signal.aborted) return;
@@ -207,21 +245,26 @@ export const ChangedFileRow = React.memo(function ChangedFileRow({
         if (!item.isRunning || result.binary || result.lines.length > 0) {
           cacheFileDiff(cacheKey, runId, result);
         }
-        setDiffState({ status: "loaded", data: result });
+        setDiffState({ status: "loaded", viewScopeKey, data: result });
       })
       .catch((err) => {
         if (abort.signal.aborted) return;
         setDiffState({
           status: "error",
+          viewScopeKey,
           error: err instanceof Error ? err.message : String(err),
         });
       });
     return () => abort.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, cacheKey, retryCount, loadDiff, runId]);
+  }, [expanded, cacheKey, retryCount, loadDiff, runId, viewScopeKey]);
 
   const handleToggle = useCallback(() => onToggle(item.path), [onToggle, item.path]);
-  const handleRetry = useCallback(() => setRetryCount((count) => count + 1), []);
+  const handleRetry = useCallback(() => {
+    retryBypassKeyRef.current = cacheKey;
+    setRetryCount((count) => count + 1);
+  }, [cacheKey]);
+  const showContent = expanded || renderBody;
 
   return (
     <div
@@ -265,43 +308,57 @@ export const ChangedFileRow = React.memo(function ChangedFileRow({
         )}
       </div>
 
-      {expanded && (
-        <div className="changed-file-diff-container">
-          {item.oldPath && (
-            <div className="changed-file-rename-note">
-              {item.oldPath} → {item.path}
+      <div
+        className={`changed-file-diff-reveal ${expanded ? "is-expanded" : ""}`}
+        style={{ height: expanded ? `${diffHeight}px` : 0 }}
+        aria-hidden={!expanded}
+        inert={!expanded || undefined}
+        onTransitionEnd={(event) => {
+          if (event.target === event.currentTarget && event.propertyName === "height" && !expanded) {
+            setRenderBody(false);
+          }
+        }}
+      >
+        <div ref={diffContentRef} className="changed-file-diff-content">
+          {showContent && (
+            <div className="changed-file-diff-container">
+              {item.oldPath && (
+                <div className="changed-file-rename-note">
+                  {item.oldPath} → {item.path}
+                </div>
+              )}
+              {(diffState.status === "loading" || diffState.status === "idle" || diffState.viewScopeKey !== viewScopeKey) && (
+                <div className="changed-file-diff-message">
+                  <Loader2 size={12} className="spin" aria-hidden="true" />
+                  <span>{t("正在加载变更内容…")}</span>
+                </div>
+              )}
+              {diffState.viewScopeKey === viewScopeKey && diffState.status === "error" && (
+                <div className="changed-file-diff-message is-error">
+                  <span>{t("加载变更内容失败")}</span>
+                  <button type="button" className="changed-file-diff-retry" onClick={handleRetry}>
+                    {t("重试")}
+                  </button>
+                </div>
+              )}
+              {diffState.viewScopeKey === viewScopeKey && diffState.status === "loaded" && diffState.data && (
+                diffState.data.binary ? (
+                  <div className="changed-file-diff-message">{t("二进制文件")}</div>
+                ) : diffState.data.lines.length === 0 ? (
+                  <div className="changed-file-diff-message">{t("无文本变更")}</div>
+                ) : (
+                  <DiffLinesView
+                    path={item.path}
+                    lines={diffState.data.lines}
+                    truncated={diffState.data.truncated}
+                    hiddenLines={diffState.data.hiddenLines}
+                  />
+                )
+              )}
             </div>
-          )}
-          {diffState.status === "loading" && (
-            <div className="changed-file-diff-message">
-              <Loader2 size={12} className="spin" aria-hidden="true" />
-              <span>{t("正在加载变更内容…")}</span>
-            </div>
-          )}
-          {diffState.status === "error" && (
-            <div className="changed-file-diff-message is-error">
-              <span>{t("加载变更内容失败")}</span>
-              <button type="button" className="changed-file-diff-retry" onClick={handleRetry}>
-                {t("重试")}
-              </button>
-            </div>
-          )}
-          {diffState.status === "loaded" && diffState.data && (
-            diffState.data.binary ? (
-              <div className="changed-file-diff-message">{t("二进制文件")}</div>
-            ) : diffState.data.lines.length === 0 ? (
-              <div className="changed-file-diff-message">{t("无文本变更")}</div>
-            ) : (
-              <DiffLinesView
-                path={item.path}
-                lines={diffState.data.lines}
-                truncated={diffState.data.truncated}
-                hiddenLines={diffState.data.hiddenLines}
-              />
-            )
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 }, sameFileRowProps);

@@ -212,12 +212,13 @@ impl GitBootstrapManager {
     fn spawn_worker(&self) {
         let app_data_dir = self.app_data_dir.clone();
         let status = Arc::clone(&self.status);
-        let _ = thread::Builder::new()
+        let worker_status = Arc::clone(&status);
+        if let Err(error) = thread::Builder::new()
             .name("grapher-git-bootstrap".into())
             .spawn(move || {
                 let Some(spec) = current_platform_spec() else {
                     set_status(
-                        &status,
+                        &worker_status,
                         GitBootstrapStatus::failed(
                             "Automatic Git download is not available on this platform.",
                         ),
@@ -235,16 +236,24 @@ impl GitBootstrapManager {
                             "[grapher-desktop] Managed Git ready at {}",
                             git_path.display()
                         );
-                        set_status(&status, GitBootstrapStatus::ready(git_path));
+                        set_status(&worker_status, GitBootstrapStatus::ready(git_path));
                     }
                     Err(error) => {
                         eprintln!(
                             "[grapher-desktop] Managed Git provisioning failed: {error}"
                         );
-                        set_status(&status, GitBootstrapStatus::failed(error));
+                        set_status(&worker_status, GitBootstrapStatus::failed(error));
                     }
                 }
-            });
+            })
+        {
+            set_status(
+                &status,
+                GitBootstrapStatus::failed(format!(
+                    "Failed to start managed Git bootstrap worker: {error}"
+                )),
+            );
+        }
     }
 }
 
@@ -398,29 +407,16 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 fn download_file(url: &str, destination: &Path) -> Result<(), String> {
-    let mut command = if cfg!(windows) {
-        let mut cmd = Command::new("curl.exe");
-        cmd.args([
-            "-fsSL",
-            "--retry",
-            "2",
-            "--retry-delay",
-            "2",
-            "--connect-timeout",
-            "20",
-            "--output",
-        ])
-        .arg(destination)
-        .arg(url);
-        cmd
+    let curl = if cfg!(windows) {
+        "curl.exe"
+    } else if Path::new("/usr/bin/curl").is_file() {
+        "/usr/bin/curl"
     } else {
-        let curl = if Path::new("/usr/bin/curl").is_file() {
-            "/usr/bin/curl"
-        } else {
-            "curl"
-        };
-        let mut cmd = Command::new(curl);
-        cmd.args([
+        "curl"
+    };
+    let mut command = Command::new(curl);
+    command
+        .args([
             "-fsSL",
             "--retry",
             "2",
@@ -428,12 +424,16 @@ fn download_file(url: &str, destination: &Path) -> Result<(), String> {
             "2",
             "--connect-timeout",
             "20",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "30",
+            "--max-time",
+            "600",
             "--output",
         ])
         .arg(destination)
         .arg(url);
-        cmd
-    };
 
     configure_silent_command(&mut command);
     let output = command

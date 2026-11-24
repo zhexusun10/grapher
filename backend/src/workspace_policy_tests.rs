@@ -2729,3 +2729,89 @@ fn restored_private_selection_initializes_native_inputs_before_dispatch() {
         .unwrap();
     assert!(initialized.sequence < started.sequence);
 }
+
+#[test]
+fn failed_planner_workspace_is_not_recycled_by_idle_slot_allocation() {
+    let (_temp, source, mut runtime) = adaptive(
+        true,
+        graph(
+            &["a", "b", "c", "d", "e", "f", "g", "h"],
+            &[
+                ("a", "e"),
+                ("b", "f"),
+                ("c", "g"),
+                ("d", "h"),
+            ],
+        ),
+        true,
+        4,
+    );
+    let batch1 = runtime.jobs().unwrap();
+    assert_eq!(batch1.len(), 4);
+    let retained_slot = batch1[0].execution.worktree.clone();
+    let retained_exec_id = batch1[0].execution.id.clone();
+    for job in &batch1 {
+        fs::create_dir_all(&job.execution.worktree).unwrap();
+        let head = format!("head-{}", job.execution.node);
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: job.execution.id.clone(),
+                head,
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
+    }
+    // Simulate a failed Planner turn pinned to batch1[0]'s private slot.
+    runtime
+        .emit(EventKind::PlannerWorkspaceSelected {
+            planning: PlanningSummary {
+                planning_id: "plan-failed".into(),
+                status: Some("failed".into()),
+                error: Some("network error".into()),
+                worktree: Some(retained_slot.clone()),
+                workspace_execution_id: Some(retained_exec_id),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    // Batch 1 publishes; its completed heads are now delivered so slots become
+    // eligible for idle recycling, except the slot retained by the failed Planner.
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            },
+            EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into(),
+                heads: vec![
+                    "head-a".into(),
+                    "head-b".into(),
+                    "head-c".into(),
+                    "head-d".into(),
+                ],
+            },
+        ])
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: "pub-1".into(),
+        })
+        .unwrap();
+    let batch2 = runtime.jobs().unwrap();
+    assert_eq!(batch2.len(), 4);
+    assert!(
+        batch2.iter().all(|job| {
+            !crate::path_identity::same_path(
+                Path::new(&job.execution.worktree),
+                Path::new(&retained_slot),
+            )
+        }),
+        "failed Planner slot {retained_slot} must not be recycled by Batch 2: {:?}",
+        batch2
+            .iter()
+            .map(|job| &job.execution.worktree)
+            .collect::<Vec<_>>()
+    );
+}

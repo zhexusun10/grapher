@@ -5,7 +5,11 @@ import {
   extractLeadingAttachmentPrefix,
   formatManagedAttachmentDisplayLabel,
   prependAttachmentPrefix,
+  truncateRunLabel,
 } from "../src/utils/attachmentPath.ts";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { EditableUserBubble } from "../src/components/views/ChatBubbles.tsx";
 
 test("formatFileSize formats bytes, KB, MB correctly", () => {
   assert.equal(formatFileSize(0), "0 B");
@@ -125,4 +129,27 @@ test("formatManagedAttachmentDisplayLabel hides internal paths and falls back to
   assert.equal(formatManagedAttachmentDisplayLabel(`@${pathA}`), "report.pdf");
   assert.equal(formatManagedAttachmentDisplayLabel(`@${pathA} @${pathB}`), "report.pdf, data.csv");
   assert.equal(formatManagedAttachmentDisplayLabel("Plain goal title"), "Plain goal title");
+
+  const huge = "error line\n".repeat(50_000);
+  const display = formatManagedAttachmentDisplayLabel(huge);
+  assert.ok(display.length <= 241);
+  assert.ok(display.endsWith("…"));
+  const stored = truncateRunLabel(huge);
+  assert.ok(stored.length <= 513);
+  assert.ok(stored.endsWith("…"));
+});
+
+test("EditableUserBubble collapses oversized pasted user messages into a bounded preview", () => {
+  const huge = `Header prompt\n${"error: No space left on device\n".repeat(5_000)}`;
+  const html = renderToStaticMarkup(React.createElement(EditableUserBubble, {
+    text: huge,
+    editing: false,
+    draft: "",
+    onDraftChange: () => {},
+    onCancel: () => {},
+    onSend: () => {},
+  }));
+  assert.ok(html.includes("Header prompt"));
+  assert.ok(html.includes("chat-bubble-user-expand-btn"));
+  assert.ok(html.length < 20_000, `expected bounded rendered HTML, got ${html.length}`);
 });

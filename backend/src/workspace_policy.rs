@@ -1,7 +1,7 @@
 //! Choose isolation at idle boundaries; active source workers may refill slots.
 use super::*;
 
-const SHARED_SOURCE_BATCH_LIMIT: usize = 3;
+pub(crate) const SHARED_SOURCE_BATCH_LIMIT: usize = 3;
 
 impl Runtime {
     /// Graph Runs use the current adaptive batch policy.

@@ -101,8 +101,8 @@ function annotateProviderError(message: string, language: Locale): string {
   } else if (isAuth) {
     hint =
       language === "zh-CN"
-        ? "提示：服务商认证失败或 API Key 无效，请在模型设置中检查配置。"
-        : "Tip: Provider authentication failed or API key is invalid. Please check your model settings.";
+        ? "提示：服务商认证失败或凭据无效/已过期，请在 Provider 配置中重新登录，或检查 API Key 与模型设置。"
+        : "Tip: Provider authentication failed or the credential is invalid or expired. Sign in again in Provider settings, or check the API key and model settings.";
   } else if (isRateLimit) {
     hint =
       language === "zh-CN"

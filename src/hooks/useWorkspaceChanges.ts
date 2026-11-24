@@ -25,7 +25,6 @@ export interface WorkspaceChangesViewModel {
   summary: FileChangeSummary;
   /** False until this scope has an authoritative summary. */
   isLoaded: boolean;
-  isRefreshing: boolean;
   refreshVersion: number;
   refresh: () => void;
 }
@@ -101,14 +100,12 @@ export function useWorkspaceChanges({
   // No executions means there cannot be any execution-scoped changes.
   const emptyScope = scopedIds !== null && scopedIds.length === 0;
   const [fetched, setFetched] = useState<{ key: string; summary: FileChangeSummary } | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const forceRefreshRef = useRef(false);
   const poller = useRef<PollingController | null>(null);
   const snapshotSequence = state.events.at(-1)?.sequence ?? 0;
 
   useEffect(() => {
-    setIsRefreshing(false);
     forceRefreshRef.current = false;
     if (!runId || runId.startsWith("pending-")) { setFetched(null); return; }
     if (emptyScope) return;
@@ -129,12 +126,10 @@ export function useWorkspaceChanges({
           : sameSummary(previous.summary, result.summary)
             ? previous
             : { key: scopeKey, summary: result.summary });
-        if (forced) setIsRefreshing(false);
         nextReadAt = Date.now() + REFRESH_INTERVAL_MS;
         return isWorking ? REFRESH_INTERVAL_MS : Infinity;
       } catch {
         if (abort.signal.aborted) return null;
-        if (forced) setIsRefreshing(false);
         // A failed read is not an authoritative empty change list. Retain the
         // last projection and retry, including after a terminal snapshot.
         nextReadAt = Date.now() + REFRESH_INTERVAL_MS;
@@ -158,7 +153,6 @@ export function useWorkspaceChanges({
     setRefreshVersion(version => version + 1);
     if (!runId || runId.startsWith("pending-") || emptyScope) return;
     forceRefreshRef.current = true;
-    setIsRefreshing(true);
     poller.current?.wake();
   }, [runId, emptyScope]);
 
@@ -170,14 +164,12 @@ export function useWorkspaceChanges({
     return {
       summary,
       isLoaded: !runId || runId.startsWith("pending-") || emptyScope || effectiveSummary !== undefined,
-      isRefreshing,
       refreshVersion,
       refresh,
     };
   }, [
     emptyScope,
     fetched,
-    isRefreshing,
     refresh,
     refreshVersion,
     runId,

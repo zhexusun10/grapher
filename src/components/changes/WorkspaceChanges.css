@@ -90,7 +90,7 @@
   outline-offset: 1px;
 }
 
-/* Sub-toolbar mirroring pi-gpui's "1 file  +33 −6   ↻" bar */
+/* Sub-toolbar keeps the file summary aligned with the panel body. */
 .changes-pane-subtoolbar {
   display: flex;
   align-items: center;
@@ -121,37 +121,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.changes-pane-refresh-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background-color 0.14s ease, color 0.14s ease;
-}
-
-.changes-pane-refresh-btn:hover:not(:disabled) {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-}
-
-.changes-pane-refresh-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.changes-pane-refresh-btn:focus-visible {
-  outline: 2px solid var(--border-focus);
-  outline-offset: 1px;
-}
-
 .changes-pane-body {
   display: flex;
   flex-direction: column;
@@ -159,6 +128,7 @@
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 6px 8px 16px;
   background: var(--bg-canvas);
 }
@@ -345,27 +315,28 @@
   outline-offset: 1px;
 }
 
-/* =============================================================================
-   Inline Unified Diff Box
-   ============================================================================= */
+/* Animate the measured diff height so the loading-to-content update is smooth
+   too, not only the initial click. The observer in ChangedFileRow tracks it. */
+.changed-file-diff-reveal {
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: height 220ms cubic-bezier(0.2, 0.75, 0.25, 1), opacity 160ms ease-out;
+}
+
+.changed-file-diff-reveal.is-expanded {
+  opacity: 1;
+}
+
+.changed-file-diff-content {
+  display: flow-root;
+  min-width: 0;
+}
 
 .changed-file-diff-container {
-  margin: 2px 4px 8px 4px;
+  margin: 2px 4px 8px;
   min-width: 0;
-  animation: changesDiffReveal 0.14s ease-out;
 }
-
-@keyframes changesDiffReveal {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .changed-file-diff-container {
-    animation: none;
-  }
-}
-
 .changed-file-rename-note {
   padding: 0 8px 4px 24px;
   font-size: 11px;
@@ -528,4 +499,10 @@
 }
 .diff-tok-type {
   color: #1D4ED8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .changed-file-diff-reveal {
+    transition: none;
+  }
 }

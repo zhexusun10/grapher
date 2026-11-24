@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { root } from './ensure-deps.mjs';
+import { findMacosCompatibilitySdk, macosDesktopToolchainEnv } from './cargo.mjs';
 import {
   assertVersionsSynced,
   MACOS_DMG_FORMAT,
@@ -97,6 +98,9 @@ test('Tauri v2 config enforces least privilege, synced versions, and .dmg / NSIS
   assert.equal(conf.bundle.resources['resources/runtime'], 'runtime');
   assert.equal(conf.bundle.resources['resources/node'], 'node');
   assert.equal(conf.bundle.macOS.hardenedRuntime, true);
+  assert.equal(conf.bundle.macOS.infoPlist, 'Info.plist');
+  const macosInfoPlist = readFileSync(join(root, 'src-tauri', 'Info.plist'), 'utf8');
+  assert.match(macosInfoPlist, /<key>UIDesignRequiresCompatibility<\/key>\s*<true\/>/);
   assert.equal(conf.bundle.macOS.entitlements, 'Entitlements.plist');
   assert.equal(conf.bundle.windows.nsis.installMode, 'currentUser');
   assert.equal(conf.bundle.windows.nsis.installerHooks, 'nsis/hooks.nsh');
@@ -733,4 +737,50 @@ test('runHdiutilCreateWithRetry retries transient Resource busy errors with expo
     /Command failed/,
   );
   assert.equal(fatalAttempts, 1);
+});
+
+test('macosDesktopToolchainEnv selects the highest macOS 26 SDK only when the active SDK is 27+', t => {
+  const dir = tempDir(t);
+  const sdk260 = join(dir, 'MacOSX26.0.sdk');
+  const sdk265 = join(dir, 'MacOSX26.5.sdk');
+  const sdk272 = join(dir, 'MacOSX27.2.sdk');
+  mkdirSync(sdk260, { recursive: true });
+  mkdirSync(sdk265, { recursive: true });
+  mkdirSync(sdk272, { recursive: true });
+  writeFileSync(join(sdk260, 'SDKSettings.plist'), '<plist/>');
+  writeFileSync(join(sdk265, 'SDKSettings.plist'), '<plist/>');
+  writeFileSync(join(sdk272, 'SDKSettings.plist'), '<plist/>');
+  symlinkSync('MacOSX26.5.sdk', join(dir, 'MacOSX26.sdk'));
+
+  const resolved265 = findMacosCompatibilitySdk({ sdkDirs: [dir] });
+  assert.ok(resolved265 && resolved265.endsWith('MacOSX26.5.sdk'));
+
+  // Active SDK 27.2 picks MacOSX26.5.sdk so UIDesignRequiresCompatibility stays honored.
+  const upgraded = macosDesktopToolchainEnv(
+    {},
+    { platform: 'darwin', activeSdkVersion: '27.2', sdkDirs: [dir] },
+  );
+  assert.equal(upgraded.SDKROOT, resolved265);
+
+  // Active SDK 26.5 leaves SDKROOT untouched.
+  const native26 = macosDesktopToolchainEnv(
+    {},
+    { platform: 'darwin', activeSdkVersion: '26.5', sdkDirs: [dir] },
+  );
+  assert.equal(native26.SDKROOT, undefined);
+
+  // Explicit caller SDKROOT is always preserved.
+  const explicit = macosDesktopToolchainEnv(
+    { SDKROOT: '/custom/MacOSX.sdk' },
+    { platform: 'darwin', activeSdkVersion: '27.2', sdkDirs: [dir] },
+  );
+  assert.equal(explicit.SDKROOT, '/custom/MacOSX.sdk');
+
+  // Missing 26 SDK degrades gracefully without throwing.
+  const emptyDir = tempDir(t);
+  const fallback = macosDesktopToolchainEnv(
+    {},
+    { platform: 'darwin', activeSdkVersion: '27.2', sdkDirs: [emptyDir] },
+  );
+  assert.equal(fallback.SDKROOT, undefined);
 });

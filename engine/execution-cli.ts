@@ -3,7 +3,7 @@ import { configureExecutionRetries } from './retry-policy.ts';
 import { runPiCli, preparePiCli } from './pi-compat.ts';
 import { flushRuntimeCompileCache } from '../scripts/pi-baseline.mjs';
 import { executionResources } from './global-extensions.ts';
-import { applyLaunchBinding, managedLaunch, managedBusinessEnvironment } from './launch-binding.mjs';
+import { applyLaunchBinding, managedLaunch, managedBashOptions } from './launch-binding.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 
 configureExecutionRetries();
@@ -27,7 +27,7 @@ if (args[0] === '--grapher-run-result') {
   applyLaunchBinding();
   const launch = managedLaunch();
   if (!launch) throw new Error('Result execution requires a Runtime launch binding');
-  const child = spawn(launch.entry, args.slice(1), { cwd: process.cwd(), env: managedBusinessEnvironment(), stdio: 'inherit', windowsHide: true });
+  const child = spawn(launch.entry, args.slice(1), { cwd: process.cwd(), env: managedBashOptions({ env: process.env }, true).env, stdio: 'inherit', windowsHide: true });
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(signal, () => {
       if (process.platform === 'win32' && child.pid) {

@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useReducedMotion } from "motion/react";
 import { TRANSCRIPT_SCROLL_ADJUSTED_EVENT } from "../services/transcriptScroll";
 import {
   AlertCircle,
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { TranscriptItem } from "../types";
 import { summarizeActivityGroup, type ActivitySummaryIcon } from "../services/activitySummary";
+import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
@@ -27,6 +28,8 @@ interface ActivitySummaryRowProps {
   item: TranscriptItem;
   expanded?: boolean;
   transitionPhase?: CardsTransitionPhase;
+  defaultThinkingExpanded?: boolean;
+  getChildExpanded?: (id: string) => boolean | undefined;
   onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
   onChildResize?: (expanded: boolean, card?: HTMLElement) => void;
   onChildExpandedChange?: (child: TranscriptItem, expanded: boolean, card?: HTMLElement) => void;
@@ -34,33 +37,46 @@ interface ActivitySummaryRowProps {
 
 export const CARDS_TRANSITION_DURATION_MS = 260;
 
-const CARDS_MOTION = { duration: CARDS_TRANSITION_DURATION_MS / 1000, ease: [0.25, 1, 0.5, 1] as const };
-
-// Exact cubic-bezier(0.25, 1, 0.5, 1) evaluator used by the synchronized
-// integer-pixel height driver so global collapse/expand transitions never
-// introduce subpixel scrollHeight sawtooth jitter on the bottom footer bar.
-function easeOutQuartBezier(t: number): number {
+// Smooth ease-out cubic (matches AnimatedDisclosure and CollapsibleCardBody):
+// responsive start without a harsh frame-1 jump and without a long 1px tail.
+function easeCardsTransition(t: number): number {
   if (t <= 0) return 0;
   if (t >= 1) return 1;
-  // Solve x(u) = t for P1=(0.25,1), P2=(0.5,1) via bisection (12 iterations < 0.0003 err).
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 12; i++) {
-    const u = (lo + hi) * 0.5;
-    const inv = 1 - u;
-    const x = 3 * inv * inv * u * 0.25 + 3 * inv * u * u * 0.5 + u * u * u;
-    if (x < t) lo = u;
-    else hi = u;
-  }
-  const u = (lo + hi) * 0.5;
-  const inv = 1 - u;
-  return 3 * inv * inv * u + 3 * inv * u * u + u * u * u;
+  const inv = 1 - t;
+  return 1 - inv * inv * inv;
 }
 
-type TransitionRowStep = (eased: number) => void;
-const activeTransitionRows = new Set<TransitionRowStep>();
+type PendingTransitionRow = {
+  headerTrack: HTMLDivElement;
+  headerInner: HTMLDivElement;
+  bodyTrack: HTMLDivElement;
+  bodyInner: HTMLDivElement;
+  collapsing: boolean;
+  keepBodyOpen: boolean;
+  active: ActiveTransitionRow | null;
+};
+
+type ActiveTransitionRow = {
+  headerTrack: HTMLDivElement;
+  bodyTrack: HTMLDivElement;
+  headerHeight: number;
+  bodyHeight: number;
+  collapsing: boolean;
+  keepBodyOpen: boolean;
+  lastHeaderHeight: number;
+  lastBodyHeight: number;
+};
+
+const pendingTransitionRows = new Set<PendingTransitionRow>();
+const activeTransitionRows = new Set<ActiveTransitionRow>();
+let pendingFlushScheduled = false;
 let transitionRafId: number | null = null;
+let transitionCompleteRafId: number | null = null;
 let transitionStartedAt = 0;
+let awaitingFirstPaint = false;
+let lastAppliedEased = 0;
+let transitionGeneration = 0;
+let transitionOnComplete: (() => void) | null = null;
 
 type CardsTransitionAnchor = {
   scroller: HTMLElement;
@@ -71,21 +87,89 @@ type CardsTransitionAnchor = {
 };
 let activeTransitionAnchor: CardsTransitionAnchor | null = null;
 
-function syncTransitionAnchorScroll() {
+function applyRowAt(row: ActiveTransitionRow, eased: number): boolean {
+  let heightChanged = false;
+  const headerRatio = row.collapsing ? eased : 1 - eased;
+  const nextHeaderH = Math.round(row.headerHeight * headerRatio);
+  if (nextHeaderH !== row.lastHeaderHeight) {
+    row.headerTrack.style.height = `${nextHeaderH}px`;
+    row.lastHeaderHeight = nextHeaderH;
+    heightChanged = true;
+  }
+  row.headerTrack.style.opacity = `${headerRatio}`;
+
+  if (!row.keepBodyOpen) {
+    const bodyRatio = row.collapsing ? 1 - eased : eased;
+    const nextBodyH = Math.round(row.bodyHeight * bodyRatio);
+    if (nextBodyH !== row.lastBodyHeight) {
+      row.bodyTrack.style.height = `${nextBodyH}px`;
+      row.lastBodyHeight = nextBodyH;
+      heightChanged = true;
+    }
+    row.bodyTrack.style.opacity = `${bodyRatio}`;
+  }
+  return heightChanged;
+}
+
+function syncTransitionAnchorScroll(emitEvent = true) {
   const anchor = activeTransitionAnchor;
   if (!anchor || !anchor.scroller.isConnected) return;
   const { scroller, trigger, pinToBottom, targetTop } = anchor;
   if (pinToBottom) {
     scroller.scrollTop = scroller.scrollHeight;
-    scroller.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+    if (emitEvent) scroller.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
     return;
   }
   if (trigger && trigger.isConnected) {
     const delta = trigger.getBoundingClientRect().top - targetTop;
     if (Math.abs(delta) >= 0.5) {
       scroller.scrollTop += delta;
-      scroller.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+      if (emitEvent) scroller.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
     }
+  }
+}
+
+function flushPendingTransitionRows(syncAnchor = true) {
+  if (pendingTransitionRows.size === 0) return;
+  const batch = [...pendingTransitionRows];
+  pendingTransitionRows.clear();
+
+  // Pass 1 (READ ONLY): measure all intrinsic track heights in a single layout pass
+  // instead of alternating read/write/scrollTop per row (eliminates 2N forced reflows).
+  const measured: Array<{ entry: PendingTransitionRow; headerHeight: number; bodyHeight: number }> = [];
+  for (const entry of batch) {
+    const headerHeight = Math.round(entry.headerInner.offsetHeight || entry.headerInner.getBoundingClientRect().height);
+    const bodyHeight = Math.round(entry.bodyInner.offsetHeight || entry.bodyInner.getBoundingClientRect().height);
+    measured.push({ entry, headerHeight, bodyHeight });
+  }
+
+  // Pass 2 (WRITE ONLY): apply initial frame heights/opacities for every row together.
+  const initialEased = lastAppliedEased;
+  for (const { entry, headerHeight, bodyHeight } of measured) {
+    const active: ActiveTransitionRow = {
+      headerTrack: entry.headerTrack,
+      bodyTrack: entry.bodyTrack,
+      headerHeight,
+      bodyHeight,
+      collapsing: entry.collapsing,
+      keepBodyOpen: entry.keepBodyOpen,
+      lastHeaderHeight: -1,
+      lastBodyHeight: -1,
+    };
+    if (active.keepBodyOpen) {
+      active.bodyTrack.style.height = "";
+      active.bodyTrack.style.opacity = "1";
+    }
+    applyRowAt(active, initialEased);
+    entry.active = active;
+    activeTransitionRows.add(active);
+  }
+
+  if (syncAnchor) {
+    syncTransitionAnchorScroll(false);
+  }
+  if (activeTransitionRows.size > 0 && transitionRafId === null) {
+    transitionRafId = requestAnimationFrame(tickCardsTransition);
   }
 }
 
@@ -93,30 +177,48 @@ export function hasActiveCardsTransitionAnchor() {
   return activeTransitionAnchor !== null;
 }
 
-export function cancelCardsTransitionAnchor() {
+function detachCardsTransitionAnchor() {
   if (!activeTransitionAnchor) return;
   activeTransitionAnchor.cleanup();
   activeTransitionAnchor = null;
 }
 
+export function cancelCardsTransitionAnchor() {
+  if (transitionRafId !== null) {
+    cancelAnimationFrame(transitionRafId);
+    transitionRafId = null;
+  }
+  if (transitionCompleteRafId !== null) {
+    cancelAnimationFrame(transitionCompleteRafId);
+    transitionCompleteRafId = null;
+  }
+  transitionOnComplete = null;
+  transitionGeneration += 1;
+  transitionStartedAt = 0;
+  awaitingFirstPaint = false;
+  lastAppliedEased = 0;
+  detachCardsTransitionAnchor();
+}
+
 export function syncCardsTransitionAnchorScroll() {
-  syncTransitionAnchorScroll();
+  flushPendingTransitionRows(false);
+  syncTransitionAnchorScroll(false);
 }
 
 export function finishCardsTransitionAnchor() {
   const anchor = activeTransitionAnchor;
   if (!anchor) return;
-  syncTransitionAnchorScroll();
+  syncTransitionAnchorScroll(true);
   queueMicrotask(() => {
     if (activeTransitionAnchor !== anchor) return;
-    syncTransitionAnchorScroll();
+    syncTransitionAnchorScroll(true);
   });
   requestAnimationFrame(() => {
     if (activeTransitionAnchor !== anchor) return;
-    syncTransitionAnchorScroll();
+    syncTransitionAnchorScroll(true);
     requestAnimationFrame(() => {
       if (activeTransitionAnchor !== anchor) return;
-      syncTransitionAnchorScroll();
+      syncTransitionAnchorScroll(true);
       cancelCardsTransitionAnchor();
     });
   });
@@ -126,51 +228,113 @@ export function beginCardsTransitionAnchor(
   scroller: HTMLElement | null,
   trigger: HTMLElement | null,
   pinToBottom: boolean,
+  onComplete?: () => void,
+  onUserInterrupt?: () => void,
 ) {
   cancelCardsTransitionAnchor();
-  transitionStartedAt = performance.now();
-  if (!scroller) return;
-  const cancel = () => cancelCardsTransitionAnchor();
-  scroller.addEventListener("wheel", cancel, { passive: true, once: true });
-  scroller.addEventListener("touchstart", cancel, { passive: true, once: true });
-  scroller.addEventListener("pointerdown", cancel, { passive: true, once: true });
-  activeTransitionAnchor = {
-    scroller,
-    trigger,
-    pinToBottom,
-    targetTop: trigger?.getBoundingClientRect().top ?? 0,
-    cleanup: () => {
-      scroller.removeEventListener("wheel", cancel);
-      scroller.removeEventListener("touchstart", cancel);
-      scroller.removeEventListener("pointerdown", cancel);
-    },
-  };
+  transitionStartedAt = 0;
+  awaitingFirstPaint = true;
+  lastAppliedEased = 0;
+  transitionOnComplete = onComplete ?? null;
+  transitionGeneration += 1;
+  if (scroller) {
+    // User scroll/touch/pointer interrupts only the scroll anchor so the user
+    // immediately regains scroll control while the 260ms row transition still
+    // finishes cleanly instead of freezing half-open until the fallback timer.
+    const cancel = () => {
+      detachCardsTransitionAnchor();
+      onUserInterrupt?.();
+    };
+    scroller.addEventListener("wheel", cancel, { passive: true, once: true });
+    scroller.addEventListener("touchstart", cancel, { passive: true, once: true });
+    scroller.addEventListener("pointerdown", cancel, { passive: true, once: true });
+    activeTransitionAnchor = {
+      scroller,
+      trigger,
+      pinToBottom,
+      targetTop: trigger?.getBoundingClientRect().top ?? 0,
+      cleanup: () => {
+        scroller.removeEventListener("wheel", cancel);
+        scroller.removeEventListener("touchstart", cancel);
+        scroller.removeEventListener("pointerdown", cancel);
+      },
+    };
+  }
+  // Always schedule a tick so even transitions with zero visible summary rows
+  // complete promptly instead of waiting for a fallback timeout.
+  if (transitionRafId === null) {
+    transitionRafId = requestAnimationFrame(tickCardsTransition);
+  }
 }
 
 function tickCardsTransition(now: number) {
   transitionRafId = null;
-  if (activeTransitionRows.size === 0) return;
+  flushPendingTransitionRows(false);
+  if (activeTransitionRows.size === 0) {
+    if (transitionOnComplete) {
+      const done = transitionOnComplete;
+      transitionOnComplete = null;
+      done();
+    }
+    return;
+  }
+  if (awaitingFirstPaint) {
+    // Frame 0 (eased = 0) was applied in useLayoutEffect and has not painted yet.
+    // Let the browser finish Frame 0's style/layout/paint before starting the
+    // animation clock so newly mounted cards never skip the start of the curve.
+    awaitingFirstPaint = false;
+    transitionRafId = requestAnimationFrame(tickCardsTransition);
+    return;
+  }
+  if (transitionStartedAt === 0) {
+    transitionStartedAt = now - 16;
+  }
   const elapsed = Math.max(0, now - transitionStartedAt);
   const progress = Math.min(1, elapsed / CARDS_TRANSITION_DURATION_MS);
-  const eased = easeOutQuartBezier(progress);
-  for (const step of activeTransitionRows) step(eased);
-  syncTransitionAnchorScroll();
+  const eased = easeCardsTransition(progress);
+  lastAppliedEased = eased;
+
+  let anyHeightChanged = false;
+  for (const row of activeTransitionRows) {
+    if (applyRowAt(row, eased)) anyHeightChanged = true;
+  }
+  if (anyHeightChanged || progress === 0 || progress >= 1) {
+    syncTransitionAnchorScroll(false);
+  }
+
   if (progress < 1 && activeTransitionRows.size > 0) {
     transitionRafId = requestAnimationFrame(tickCardsTransition);
+  } else if (progress >= 1 && transitionOnComplete) {
+    const done = transitionOnComplete;
+    const gen = transitionGeneration;
+    transitionOnComplete = null;
+    // Let the final `eased = 1` frame paint before switching to `"idle"`.
+    transitionCompleteRafId = requestAnimationFrame(() => {
+      transitionCompleteRafId = null;
+      if (transitionGeneration === gen) done();
+    });
   }
 }
 
-function registerCardsTransitionRow(step: TransitionRowStep): () => void {
-  if (activeTransitionRows.size === 0 && transitionStartedAt === 0) {
-    transitionStartedAt = performance.now();
+function registerCardsTransitionRow(entry: PendingTransitionRow): () => void {
+  pendingTransitionRows.add(entry);
+  if (!pendingFlushScheduled) {
+    pendingFlushScheduled = true;
+    queueMicrotask(() => {
+      pendingFlushScheduled = false;
+      flushPendingTransitionRows(true);
+    });
   }
-  activeTransitionRows.add(step);
   if (transitionRafId === null) {
     transitionRafId = requestAnimationFrame(tickCardsTransition);
   }
   return () => {
-    activeTransitionRows.delete(step);
-    if (activeTransitionRows.size === 0 && transitionRafId !== null) {
+    pendingTransitionRows.delete(entry);
+    if (entry.active) {
+      activeTransitionRows.delete(entry.active);
+      entry.active = null;
+    }
+    if (activeTransitionRows.size === 0 && pendingTransitionRows.size === 0 && transitionRafId !== null && !transitionOnComplete) {
       cancelAnimationFrame(transitionRafId);
       transitionRafId = null;
     }
@@ -206,10 +370,12 @@ function renderSummaryIcon(icon: ActivitySummaryIcon, isRunning: boolean) {
 const SummaryChildCard = memo(function SummaryChildCard({
   item,
   expanded,
+  defaultThinkingExpanded = false,
   onExpandedChange,
 }: {
   item: TranscriptItem;
   expanded?: boolean;
+  defaultThinkingExpanded?: boolean;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
 }) {
   const expand = useCallback(
@@ -217,7 +383,7 @@ const SummaryChildCard = memo(function SummaryChildCard({
     [item.id, onExpandedChange],
   );
   if (item.type === "tool_call") {
-    return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
+    return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} animateAppear={false} />;
   }
   if (item.type === "thinking") {
     return (
@@ -225,7 +391,7 @@ const SummaryChildCard = memo(function SummaryChildCard({
         item={item}
         isStreaming={item.status === "running"}
         title="Chain of Thought"
-        defaultExpanded={item.defaultExpanded ?? (item.status === "running")}
+        defaultExpanded={item.defaultExpanded ?? (defaultThinkingExpanded || item.status === "running")}
         autoExpandWhileStreaming={true}
         expanded={expanded}
         onExpandedChange={expand}
@@ -243,6 +409,8 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
   item,
   expanded,
   transitionPhase = "idle",
+  defaultThinkingExpanded = false,
+  getChildExpanded,
   onExpandedChange,
   onChildResize,
   onChildExpandedChange,
@@ -277,30 +445,17 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
     const bodyInner = bodyInnerRef.current;
     if (!headerTrack || !headerInner || !bodyTrack || !bodyInner) return;
 
-    const headerHeight = Math.round(headerInner.offsetHeight || headerInner.getBoundingClientRect().height);
-    const bodyHeight = Math.round(bodyInner.offsetHeight || bodyInner.getBoundingClientRect().height);
     const collapsing = transitionPhase === "collapsing";
     const keepBodyOpen = !collapsing && isExpanded;
-
-    if (keepBodyOpen) {
-      bodyTrack.style.height = "";
-      bodyTrack.style.opacity = "1";
-    }
-
-    const apply = (eased: number) => {
-      const headerRatio = collapsing ? eased : 1 - eased;
-      headerTrack.style.height = `${Math.round(headerHeight * headerRatio)}px`;
-      headerTrack.style.opacity = `${headerRatio}`;
-      if (!keepBodyOpen) {
-        const bodyRatio = collapsing ? 1 - eased : eased;
-        bodyTrack.style.height = `${Math.round(bodyHeight * bodyRatio)}px`;
-        bodyTrack.style.opacity = `${bodyRatio}`;
-      }
-    };
-
-    apply(0);
-    syncTransitionAnchorScroll();
-    return registerCardsTransitionRow(apply);
+    return registerCardsTransitionRow({
+      headerTrack,
+      headerInner,
+      bodyTrack,
+      bodyInner,
+      collapsing,
+      keepBodyOpen,
+      active: null,
+    });
   }, [isGlobalTransition, transitionPhase, isExpanded]);
 
   const toggleExpanded = useCallback(() => {
@@ -320,10 +475,6 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
     if (child) onChildExpandedChange?.(child, next, card);
     onChildResize?.(next, card);
   }, [items, onChildExpandedChange, onChildResize]);
-
-  const motionTransition = reduceMotion ? { duration: 0 } : CARDS_MOTION;
-  const bodyInitial = reduceMotion ? false : { gridTemplateRows: "0fr", opacity: 0 };
-  const bodyAnimate = { gridTemplateRows: "1fr", opacity: 1 };
 
   const headerButton = (
     <button
@@ -355,7 +506,8 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
         <SummaryChildCard
           key={child.id}
           item={child}
-          expanded={childExpanded.get(child.id)}
+          expanded={childExpanded.get(child.id) ?? getChildExpanded?.(child.id)}
+          defaultThinkingExpanded={defaultThinkingExpanded}
           onExpandedChange={handleChildExpanded}
         />
       ))}
@@ -374,7 +526,7 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
           <div
             ref={headerTrackRef}
             className="activity-summary-header-track"
-            style={{ width: "100%", minWidth: 0, overflow: "hidden", pointerEvents: "none" }}
+            style={{ width: "100%", minWidth: 0, overflow: "hidden", contain: "layout style", pointerEvents: "none" }}
           >
             <div
               ref={headerInnerRef}
@@ -391,7 +543,7 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
           <div
             ref={bodyTrackRef}
             className="activity-summary-body-track"
-            style={{ width: "100%", minWidth: 0, overflow: "hidden" }}
+            style={{ width: "100%", minWidth: 0, overflow: "hidden", contain: "layout style" }}
           >
             <div ref={bodyInnerRef} style={{ width: "100%", minWidth: 0 }}>
               {cardsList}
@@ -401,22 +553,9 @@ export const ActivitySummaryRow: React.FC<ActivitySummaryRowProps> = memo(({
       ) : (
         <>
           {headerButton}
-          <AnimatePresence initial={false}>
-            {isExpanded && (
-              <motion.div
-                key="summary-body"
-                initial={bodyInitial}
-                animate={bodyAnimate}
-                exit={{ gridTemplateRows: "0fr", opacity: 0 }}
-                transition={motionTransition}
-                style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", width: "100%", minWidth: 0, overflow: "hidden" }}
-              >
-                <div style={{ minHeight: 0, minWidth: 0, width: "100%", overflow: "hidden" }}>
-                  {cardsList}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <CollapsibleCardBody expanded={isExpanded} durationMs={CARDS_TRANSITION_DURATION_MS}>
+            {() => cardsList}
+          </CollapsibleCardBody>
         </>
       )}
     </div>

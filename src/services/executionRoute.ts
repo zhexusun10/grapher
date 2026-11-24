@@ -69,3 +69,30 @@ export function shouldShowRouteBadge({
     (state?.planType === "undecided" || state?.planning?.planType === "undecided");
 }
 
+export function resolveRunRouteType({
+  runId,
+  activeRunId,
+  activeRouteType,
+  cachedSnapshot,
+  runMode,
+}: {
+  runId: string;
+  activeRunId?: string;
+  activeRouteType?: PlanRouteType;
+  cachedSnapshot?: Snapshot;
+  runMode?: PlanMode;
+}): PlanRouteType {
+  if (runId && runId === activeRunId && activeRouteType && activeRouteType !== "undecided") {
+    return activeRouteType;
+  }
+  if (cachedSnapshot) {
+    const deduced = deduceRouteType(cachedSnapshot);
+    if (deduced !== "undecided") return deduced;
+  }
+  if (runMode === "serial" || runMode === "graph") {
+    return runMode;
+  }
+  return "undecided";
+}
+
+

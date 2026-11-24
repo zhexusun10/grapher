@@ -33,10 +33,12 @@ impl Record {
         {
             return Err("Invalid detached workspace receipt".into());
         }
-        let (root, original) = self.target.location(data, &self.run_id)?;
-        let destination = original
-            .parent()
-            .ok_or("Missing workspace parent")?
+        let (root, _) = self.target.location(data, &self.run_id)?;
+        let Target::Workspace { parent, bucket, .. } = &self.target else {
+            return Err("Invalid detached workspace receipt".into());
+        };
+        let destination = parent
+            .join(bucket)
             .join(format!(".grapher-cleanup-{}", self.id));
         Ok((root, destination))
     }
@@ -68,7 +70,7 @@ pub(crate) fn take_wakeup() -> bool {
 /// Caller already validated ownership, sharing, source protection and event
 /// generation under the Run mutex. A receipt is committed before rename; the
 /// detached bit is committed before any recursive deletion is permitted.
-pub(super) fn retire(
+pub(crate) fn retire(
     root: &Path,
     store: &Store,
     run_id: &str,
@@ -89,16 +91,19 @@ pub(super) fn retire(
     if real_child_path(&parent, &destination, false)?.is_some() {
         return Err("Detached workspace destination already exists".into());
     }
-    // Use the existing, checked physical parent. Rename stays on this volume;
-    // no project bytes are copied while the Run is locked.
-    let destination = original
+    // Use the existing, checked physical bucket directory (`.grapher-worktrees`).
+    // Rename stays on this volume; no project bytes are copied while the Run is
+    // locked, and retired slots never live inside the active Run directory.
+    let destination_parent = destination
         .parent()
-        .ok_or("Missing physical workspace parent")?
-        .join(
-            destination
-                .file_name()
-                .ok_or("Missing detached workspace name")?,
-        );
+        .ok_or("Missing detached workspace parent")?;
+    let physical_parent = real_child_path(&parent, destination_parent, false)?
+        .ok_or("Missing physical workspace parent")?;
+    let destination = physical_parent.join(
+        destination
+            .file_name()
+            .ok_or("Missing detached workspace name")?,
+    );
     store.save_detached_workspace(&record)?;
     let result = (|| {
         fs::rename(&original, &destination)

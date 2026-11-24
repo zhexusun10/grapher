@@ -17,7 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { toolchainEnv } from './cargo.mjs';
+import { macosDesktopToolchainEnv, toolchainEnv } from './cargo.mjs';
 import { root } from './ensure-deps.mjs';
 import { signMacosAppBundle } from './desktop-sign-macos.mjs';
 import {
@@ -608,7 +608,14 @@ export async function buildDesktopBundle({
   const normalizedIdentity = typeof signingIdentity === 'string' && signingIdentity.trim()
     ? signingIdentity.trim()
     : '-';
-  const buildEnv = toolchainEnv(sanitizedBuildEnv(baseEnv));
+  const buildEnv = target.platform === 'darwin'
+    ? macosDesktopToolchainEnv(sanitizedBuildEnv(baseEnv))
+    : toolchainEnv(sanitizedBuildEnv(baseEnv));
+  if (target.platform === 'darwin' && buildEnv.SDKROOT) {
+    console.log(
+      `[desktop:build] Using macOS compatibility SDK (${buildEnv.SDKROOT}) so UIDesignRequiresCompatibility remains active on macOS 26/27.`,
+    );
+  }
   const updaterSigning = validateUpdaterSigningConfig({
     env: baseEnv,
     tauriConfPath: join(root, 'src-tauri', 'tauri.conf.json'),

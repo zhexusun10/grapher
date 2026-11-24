@@ -40,6 +40,20 @@ export function hydrationKeyForItem(item: TranscriptItem): string | null {
   return null;
 }
 
+/** Return true only when the cached hydration patch already satisfies every
+ * currently-omitted part of `item`. A tool call whose arguments were hydrated
+ * while running still needs result hydration once `tool_execution_end` arrives. */
+export function isItemHydrated(item: TranscriptItem, patch?: HydratedCardPatch): boolean {
+  if (!item.bodyOmitted) return true;
+  if (!patch) return false;
+  if (item.type === "thinking") return patch.bodyOmitted === false;
+  if (item.type === "tool_call") {
+    return (!item.argsOmitted || patch.argsOmitted === false) &&
+      (!item.resultOmitted || patch.resultOmitted === false);
+  }
+  return false;
+}
+
 export function itemHydrationRanges(item: TranscriptItem): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   if (item.type === "thinking") {

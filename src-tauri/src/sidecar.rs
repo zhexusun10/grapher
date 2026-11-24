@@ -391,20 +391,64 @@ fn configure_child_isolation(command: &mut Command) {
     }
 }
 
+const MAX_STDERR_LINE_BYTES: usize = 8 * 1024;
+const MAX_READY_LINE_BYTES: usize = 64 * 1024;
+
 fn spawn_stderr_drain(stderr: impl std::io::Read + Send + 'static, buffer: Arc<Mutex<StderrBuffer>>) {
     let _ = thread::Builder::new()
         .name("grapher-sidecar-stderr".into())
         .spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(text) => {
-                        eprintln!("[grapher-backend] {text}");
-                        if let Ok(mut guard) = buffer.lock() {
-                            guard.push(text);
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::with_capacity(512);
+            let emit = |bytes: &[u8]| {
+                let mut trimmed = bytes;
+                if trimmed.ends_with(b"\n") {
+                    trimmed = &trimmed[..trimmed.len() - 1];
+                }
+                if trimmed.ends_with(b"\r") {
+                    trimmed = &trimmed[..trimmed.len() - 1];
+                }
+                let text = String::from_utf8_lossy(trimmed).into_owned();
+                eprintln!("[grapher-backend] {text}");
+                if let Ok(mut guard) = buffer.lock() {
+                    guard.push(text);
+                }
+            };
+            loop {
+                let available = match reader.fill_buf() {
+                    Ok([]) => {
+                        if !line.is_empty() {
+                            emit(&line);
                         }
+                        break;
                     }
-                    Err(_) => break,
+                    Ok(buf) => buf,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        if !line.is_empty() {
+                            emit(&line);
+                        }
+                        break;
+                    }
+                };
+                if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                    let take = pos + 1;
+                    let remaining_cap = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
+                    line.extend_from_slice(&available[..take.min(remaining_cap)]);
+                    reader.consume(take);
+                    emit(&line);
+                    line.clear();
+                } else {
+                    let count = available.len();
+                    let remaining_cap = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
+                    if remaining_cap > 0 {
+                        line.extend_from_slice(&available[..count.min(remaining_cap)]);
+                    }
+                    reader.consume(count);
+                    if line.len() >= MAX_STDERR_LINE_BYTES {
+                        emit(&line);
+                        line.clear();
+                    }
                 }
             }
         });
@@ -418,46 +462,68 @@ fn spawn_stdout_reader(
         .name("grapher-sidecar-stdout".into())
         .spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
+            let mut raw = Vec::with_capacity(256);
             let mut announced = false;
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => {
-                        if !announced {
-                            let _ = tx.send(StdoutEvent::Closed);
+            while !announced {
+                raw.clear();
+                let mut overflowed = false;
+                loop {
+                    let available = match reader.fill_buf() {
+                        Ok([]) => break,
+                        Ok(buf) => buf,
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => {
+                            raw.clear();
+                            break;
                         }
+                    };
+                    if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                        let take = pos + 1;
+                        let cap = MAX_READY_LINE_BYTES.saturating_sub(raw.len());
+                        raw.extend_from_slice(&available[..take.min(cap)]);
+                        if take > cap {
+                            overflowed = true;
+                        }
+                        reader.consume(take);
                         break;
                     }
-                    Ok(_) => {
-                        if announced {
-                            continue;
-                        }
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        match parse_ready_line(trimmed) {
-                            Ok(info) => {
-                                announced = true;
-                                let _ = tx.send(StdoutEvent::Ready(info));
-                            }
-                            Err(reason) => {
-                                announced = true;
-                                let _ = tx.send(StdoutEvent::InvalidLine(format!(
-                                    "{reason} (line: {trimmed:?})"
-                                )));
-                            }
-                        }
+                    let count = available.len();
+                    let cap = MAX_READY_LINE_BYTES.saturating_sub(raw.len());
+                    raw.extend_from_slice(&available[..count.min(cap)]);
+                    if count > cap {
+                        overflowed = true;
                     }
-                    Err(_) => {
-                        if !announced {
-                            let _ = tx.send(StdoutEvent::Closed);
-                        }
-                        break;
+                    reader.consume(count);
+                }
+                if raw.is_empty() && !overflowed {
+                    let _ = tx.send(StdoutEvent::Closed);
+                    return;
+                }
+                if overflowed {
+                    let _ = tx.send(StdoutEvent::InvalidLine(
+                        "Backend readiness line exceeded 64 KiB".into(),
+                    ));
+                    break;
+                }
+                let text = String::from_utf8_lossy(&raw);
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                announced = true;
+                match parse_ready_line(trimmed) {
+                    Ok(info) => {
+                        let _ = tx.send(StdoutEvent::Ready(info));
+                    }
+                    Err(reason) => {
+                        let _ = tx.send(StdoutEvent::InvalidLine(format!(
+                            "{reason} (line: {trimmed:?})"
+                        )));
                     }
                 }
             }
+            // Drain any subsequent stdout without heap allocations so the pipe never blocks.
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
         });
     rx
 }
@@ -726,6 +792,27 @@ exit 0"#,
         let err = BackendSidecar::start(config).err().unwrap();
         assert!(err.contains("exited before becoming ready"), "{err}");
         assert!(err.contains("fatal startup failure: lock busy"), "{err}");
+    }
+
+    #[test]
+    fn stderr_drain_survives_non_utf8_bytes_and_captures_following_lines() {
+        let buffer = Arc::new(Mutex::new(StderrBuffer::new()));
+        let mut payload = b"first line\nlegacy byte: ".to_vec();
+        payload.extend_from_slice(&[0xff, 0xfe]);
+        payload.extend_from_slice(b"\nafter invalid utf8\n");
+        spawn_stderr_drain(std::io::Cursor::new(payload), Arc::clone(&buffer));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snap = read_stderr_tail(&buffer);
+            if snap.contains("after invalid utf8") {
+                assert!(snap.contains("first line"), "{snap}");
+                assert!(snap.contains("legacy byte: "), "{snap}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "stderr drain dropped trailing lines: {snap}");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

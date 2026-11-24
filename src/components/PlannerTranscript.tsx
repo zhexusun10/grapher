@@ -1,12 +1,13 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { stripPlannerContext } from "../services/plannerText";
 import type { ChatMessage, TranscriptItem } from "../types";
 import { VirtualizedList } from "./VirtualizedList";
-import { visibleTranscriptRows } from "../services/transcriptLayout";
+import { visibleTranscriptRows, matchActivitySummary, stabilizeActivitySummaryIds, type ActivitySummaryAnchor } from "../services/transcriptLayout";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { ActivitySummaryRow, type CardsTransitionPhase } from "./ActivitySummaryRow";
+import { markCardsPresented } from "../services/cardAnimations";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
@@ -22,10 +23,11 @@ type Props = {
   onUserResize: (expanded?: boolean, card?: HTMLElement) => void;
 };
 
-const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, draft, expanded, cardsTransition, onExpandedChange, onChildResize, onChildExpandedChange,
+const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, draft, expanded, cardsTransition, getChildExpanded, onExpandedChange, onChildResize, onChildExpandedChange,
   onDraftChange, onEditMessage, onCancelEdit, onEditSubmit, onSendMessage }: Omit<Props, "items" | "isPlanning" | "editingMessage" | "onUserResize"> & {
   item: TranscriptItem; streaming: boolean; editing: boolean; expanded?: boolean;
   cardsTransition?: CardsTransitionPhase;
+  getChildExpanded?: (id: string) => boolean | undefined;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
   onChildResize: (expanded: boolean, card?: HTMLElement) => void;
   onChildExpandedChange?: (child: TranscriptItem, expanded: boolean, card?: HTMLElement) => void;
@@ -40,7 +42,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
       disabled={locked} />
   </AnimatedUserTurn>;
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
-  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
+  if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} defaultThinkingExpanded={true} getChildExpanded={getChildExpanded} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.errorItems || (item.type === "system" && (item.isError || item.status === "error")) ||
       (item.type === "text" && item.role === "assistant" && (item.isError || item.status === "error"))) {
@@ -72,24 +74,50 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
 
 const noop = () => {};
 export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
-  const items = useMemo(
-    () => visibleTranscriptRows(props.items, undefined, { collapseCards: props.cardsCollapsed, live: props.isPlanning }).rows,
-    [props.items, props.cardsCollapsed, props.isPlanning],
-  );
+  const previousSummariesRef = useRef<TranscriptItem[]>([]);
+  const items = useMemo(() => {
+    const raw = visibleTranscriptRows(props.items, undefined, {
+      collapseCards: props.cardsCollapsed,
+      live: props.isPlanning,
+      canPrepend: false,
+    }).rows;
+    if (!props.cardsCollapsed || previousSummariesRef.current.length === 0) return raw;
+    return stabilizeActivitySummaryIds(raw, previousSummariesRef.current);
+  }, [props.items, props.cardsCollapsed, props.isPlanning]);
+  const prevCardsCollapsedRef = useRef(props.cardsCollapsed);
+  if (prevCardsCollapsedRef.current && !props.cardsCollapsed) {
+    markCardsPresented(
+      items
+        .filter(item => item.type === "tool_call" || item.type === "thinking")
+        .map(item => item.id),
+    );
+  }
+  prevCardsCollapsedRef.current = props.cardsCollapsed;
+  useLayoutEffect(() => {
+    previousSummariesRef.current = props.cardsCollapsed
+      ? items.filter(row => row.type === "activity_summary")
+      : [];
+  }, [props.cardsCollapsed, items]);
   const expanded = useRef(new Map<string, boolean>());
-  const expandedSummaryMeta = useRef(new Map<string, { toolCallIds: string[]; ordinalFromEnd: number }>());
+  const expandedSummaryMeta = useRef(new Map<string, ActivitySummaryAnchor>());
   const itemsRef = useRef<TranscriptItem[]>(items);
   itemsRef.current = items;
   if (props.cardsCollapsed && expandedSummaryMeta.current.size > 0) {
     const summaries = items.filter(row => row.type === "activity_summary");
-    const summaryIds = new Set(summaries.map(row => row.id));
+    const summaryById = new Map(summaries.map((row, index) => [row.id, { row, index }]));
     for (const [savedId, meta] of [...expandedSummaryMeta.current.entries()]) {
-      if (summaryIds.has(savedId)) continue;
-      const byToolCall = meta.toolCallIds.length > 0
-        ? summaries.find(row => (row.summaryItems ?? []).some(child => child.toolCallId && meta.toolCallIds.includes(child.toolCallId)))
-        : undefined;
-      const byOrdinal = summaries[summaries.length - 1 - meta.ordinalFromEnd];
-      const matched = byToolCall ?? byOrdinal;
+      const existing = summaryById.get(savedId);
+      if (existing) {
+        expandedSummaryMeta.current.set(savedId, {
+          toolCallIds: (existing.row.summaryItems ?? [])
+            .map(child => child.toolCallId)
+            .filter((callId): callId is string => Boolean(callId)),
+          itemIds: (existing.row.summaryItems ?? []).map(child => child.id),
+          ordinalFromEnd: summaries.length - 1 - existing.index,
+        });
+        continue;
+      }
+      const matched = matchActivitySummary(summaries, meta);
       if (matched) {
         expanded.current.delete(savedId);
         expanded.current.set(matched.id, true);
@@ -99,6 +127,7 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
           toolCallIds: (matched.summaryItems ?? [])
             .map(child => child.toolCallId)
             .filter((callId): callId is string => Boolean(callId)),
+          itemIds: (matched.summaryItems ?? []).map(child => child.id),
           ordinalFromEnd: summaries.length - 1 - nextIndex,
         });
       }
@@ -129,6 +158,7 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
             toolCallIds: (target.summaryItems ?? [])
               .map(child => child.toolCallId)
               .filter((callId): callId is string => Boolean(callId)),
+            itemIds: (target.summaryItems ?? []).map(child => child.id),
             ordinalFromEnd: summaries.length - 1 - summaryIndex,
           });
         }
@@ -142,11 +172,12 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
   const handleChildExpandedChange = useCallback((child: TranscriptItem, value: boolean) => {
     expanded.current.set(child.id, value);
   }, []);
+  const getChildExpanded = useCallback((id: string) => expanded.current.get(id), []);
   const renderRow = (item: TranscriptItem, index: number, allowTransition = true) => <PlannerRow item={item}
     streaming={props.isPlanning && item.status === "running" && (item.type === "thinking" || index === items.length - 1)}
     locked={props.locked && !props.isPlanning} editing={props.editingMessage?.id === item.id}
     draft={props.editingMessage?.id === item.id ? props.draft : ""}
-    expanded={expanded.current.get(item.id)} cardsTransition={allowTransition ? props.cardsTransition : "idle"} onExpandedChange={expand} onChildResize={props.onUserResize}
+    expanded={expanded.current.get(item.id)} cardsTransition={allowTransition ? props.cardsTransition : "idle"} getChildExpanded={getChildExpanded} onExpandedChange={expand} onChildResize={props.onUserResize}
     onChildExpandedChange={handleChildExpandedChange}
     onDraftChange={props.onDraftChange || noop} onEditMessage={props.onEditMessage} onCancelEdit={props.onCancelEdit}
     onEditSubmit={props.onEditSubmit} onSendMessage={props.onSendMessage} />;

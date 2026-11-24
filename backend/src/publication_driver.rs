@@ -261,6 +261,16 @@ pub(super) fn publish_batch(
     if let Err(error) = runtime.defer_cleanup_worktrees() {
         eprintln!("Cannot retire completed run worktrees: {error}");
     }
+    if runtime.batch_workspaces() && runtime.state.phase != "completed" {
+        if let Err(error) = runtime.retire_idle_workspace_slots() {
+            eprintln!("Cannot retire idle batch workspace slots: {error}");
+        }
+    }
+    if runtime.state.phase == "completed" {
+        if let Err(error) = runtime.prune_stale_environment_snapshots() {
+            eprintln!("Cannot prune stale environment snapshots: {error}");
+        }
+    }
     drop(runtime);
     crate::file_changes::record_publication_git_changes(
         run_id,

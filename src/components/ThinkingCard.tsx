@@ -11,6 +11,7 @@ import { useCardAppear } from "../services/cardAnimations";
 import { useAutoExpandCot } from "../services/displayPreferences";
 import { notifyTranscriptContentGrowth, syncOverscrollContainment } from "../services/transcriptScroll";
 import { observeElementResize } from "../services/sharedResizeObserver";
+import { copyTextToClipboard } from "../services/externalLink";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -238,9 +239,9 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
       const textToCopy = rawContent || smoothContent;
-      if (!textToCopy || !navigator.clipboard?.writeText) return;
-      navigator.clipboard.writeText(textToCopy).then(() => {
-        if (!mountedRef.current) return;
+      if (!textToCopy) return;
+      void copyTextToClipboard(textToCopy).then((ok) => {
+        if (!ok || !mountedRef.current) return;
         setIsCopied(true);
         if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
         copyTimerRef.current = setTimeout(() => { if (mountedRef.current) setIsCopied(false); }, 1800);

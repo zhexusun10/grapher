@@ -412,59 +412,112 @@ pub(crate) fn path_key(path: &Path) -> String {
 
 #[cfg(target_os = "macos")]
 fn macos_case_insensitive(path: &Path) -> bool {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    use std::{
+        collections::HashMap,
+        ffi::CString,
+        os::unix::ffi::OsStrExt,
+        sync::{OnceLock, RwLock},
+    };
+    static VOLUME_CACHE: OnceLock<RwLock<HashMap<u64, bool>>> = OnceLock::new();
     let mut probe = None;
     for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() {
             break;
         }
-        if fs::metadata(ancestor).is_ok() {
-            probe = Some(ancestor);
+        if let Ok(meta) = fs::metadata(ancestor) {
+            probe = Some((ancestor, meta.dev()));
             break;
         }
     }
-    let Some(probe) = probe else {
+    let Some((probe, dev)) = probe else {
         return false;
     };
-    if let Ok(c_path) = CString::new(probe.as_os_str().as_bytes()) {
-        let value = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
-        if value == 0 {
-            return true;
-        }
-        if value > 0 {
-            return false;
+    let cache = VOLUME_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(guard) = cache.read() {
+        if let Some(&cached) = guard.get(&dev) {
+            return cached;
         }
     }
-    let Some(actual) = actual_existing(probe) else {
-        return false;
-    };
-    let (Some(parent), Some(name)) = (actual.parent(), actual.file_name()) else {
-        return false;
-    };
-    let (Ok(orig), Ok(parent_meta)) = (fs::metadata(&actual), fs::metadata(parent)) else {
-        return false;
-    };
-    if orig.dev() != parent_meta.dev() {
-        return false;
-    }
-    let name_text = name.to_string_lossy();
-    let swapped: String = name_text
-        .chars()
-        .map(|character| {
-            if character.is_ascii_lowercase() {
-                character.to_ascii_uppercase()
-            } else if character.is_ascii_uppercase() {
-                character.to_ascii_lowercase()
-            } else {
-                character
+    let result = (|| {
+        if let Ok(c_path) = CString::new(probe.as_os_str().as_bytes()) {
+            let value = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+            if value == 0 {
+                return Some(true);
             }
-        })
-        .collect();
-    if swapped == name_text {
-        return false;
+            if value > 0 {
+                return Some(false);
+            }
+        }
+        let actual = actual_existing(probe)?;
+        let (parent, name) = (actual.parent()?, actual.file_name()?);
+        let (Ok(orig), Ok(parent_meta)) = (fs::metadata(&actual), fs::metadata(parent)) else {
+            return None;
+        };
+        if orig.dev() != parent_meta.dev() {
+            return None;
+        }
+        let name_text = name.to_string_lossy();
+        let swapped: String = name_text
+            .chars()
+            .map(|character| {
+                if character.is_ascii_lowercase() {
+                    character.to_ascii_uppercase()
+                } else if character.is_ascii_uppercase() {
+                    character.to_ascii_lowercase()
+                } else {
+                    character
+                }
+            })
+            .collect();
+        if swapped == name_text {
+            return None;
+        }
+        Some(
+            fs::metadata(parent.join(swapped))
+                .is_ok_and(|other| orig.dev() == other.dev() && orig.ino() == other.ino()),
+        )
+    })();
+    if let Some(insensitive) = result {
+        if let Ok(mut guard) = cache.write() {
+            guard.insert(dev, insensitive);
+        }
+        return insensitive;
     }
-    fs::metadata(parent.join(swapped))
-        .is_ok_and(|other| orig.dev() == other.dev() && orig.ino() == other.ino())
+    false
+}
+
+/// Normalize a slash-separated relative path into a lookup key matching the
+/// host volume's case and Unicode equivalence rules.
+pub(crate) fn fold_relative_path(value: &str, case_insensitive: bool) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if value.is_ascii() {
+            if case_insensitive {
+                value.to_ascii_lowercase()
+            } else {
+                value.to_owned()
+            }
+        } else {
+            value
+                .split('/')
+                .map(|part| macos_fold_component(part, case_insensitive))
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    }
+    #[cfg(windows)]
+    {
+        if case_insensitive {
+            value.to_ascii_lowercase()
+        } else {
+            value.to_owned()
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = case_insensitive;
+        value.to_owned()
+    }
 }
 
 /// Whether lexical aliases should fold case on this path's volume. Relative

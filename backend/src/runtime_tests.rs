@@ -5738,3 +5738,89 @@ fn clear_history_rejects_active_merger_and_launching_result_runs() {
     let error = runtime.clear_history().unwrap_err();
     assert!(error.contains("another Run is active"), "{error}");
 }
+
+#[test]
+fn fresh_workspace_path_uses_short_node_name_and_avoids_collisions() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+
+    let first = runtime.fresh_workspace_path("audit_backend");
+    assert_eq!(
+        Path::new(&first).file_name().and_then(|n| n.to_str()),
+        Some("audit_backend")
+    );
+
+    // Existing execution path (including case-insensitive match) forces -2.
+    runtime.state.executions.push(Execution {
+        id: "exec-1".into(),
+        node: "audit_backend".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "s1".into(),
+        worktree: first.clone(),
+        before: String::new(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None,
+        result: None,
+        status: "completed".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 0,
+        completed_at: None,
+        metrics: None,
+    });
+    let second = runtime.fresh_workspace_path("Audit_Backend");
+    assert_eq!(
+        Path::new(&second).file_name().and_then(|n| n.to_str()),
+        Some("Audit_Backend-2")
+    );
+
+    // Existing directory on disk also forces the next suffix.
+    fs::create_dir_all(runtime.run_workspace_root().join("audit_backend-2")).unwrap();
+    let third = runtime.fresh_workspace_path("audit_backend");
+    assert_eq!(
+        Path::new(&third).file_name().and_then(|n| n.to_str()),
+        Some("audit_backend-3")
+    );
+
+    // Names starting with "publication-" are escaped so slot scans never skip them.
+    let pub_node = runtime.fresh_workspace_path("publication-check");
+    assert_eq!(
+        Path::new(&pub_node).file_name().and_then(|n| n.to_str()),
+        Some("n-publication-check")
+    );
+
+    // Paths outside the run workspace root (e.g. source-direct executions) must not
+    // collide with node slot names inside the run workspace root.
+    let repo_name = _source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .to_string();
+    runtime.state.executions.push(Execution {
+        id: "exec-source".into(),
+        node: repo_name.clone(),
+        revision: 1,
+        attempt: 1,
+        session_id: "s-source".into(),
+        worktree: _source.to_string_lossy().into_owned(),
+        before: String::new(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None,
+        result: None,
+        status: "completed".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 0,
+        completed_at: None,
+        metrics: None,
+    });
+    let same_as_repo = runtime.fresh_workspace_path(&repo_name);
+    assert_eq!(
+        Path::new(&same_as_repo).file_name().and_then(|n| n.to_str()),
+        Some(repo_name.as_str())
+    );
+}

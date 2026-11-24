@@ -434,10 +434,14 @@ test("consecutive transcript errors render as a compact counted card with full e
   assert.ok(planner.includes(t(" - {0}", 2)));
 
   const single = renderToStaticMarkup(createElement(TranscriptErrorCard, { item: items[0] }));
-  assert.match(single, /FIRST_FULL_ERROR_DETAIL/);
+  assert.match(single, /aria-expanded="false"/);
   assert.ok(single.includes(`aria-label="${t("复制错误")}"`));
   assert.doesNotMatch(single, /transcript-error-count/, "a single error has no count label");
-  assert.doesNotMatch(single, /aria-expanded|transcript-error-details|tool-expand-chevron/, "a single error is not expandable");
+  assert.doesNotMatch(single, /transcript-error-details/, "collapsed single errors do not mount the full details");
+
+  const expandedSingle = renderToStaticMarkup(createElement(TranscriptErrorCard, { item: items[0], expanded: true }));
+  assert.match(expandedSingle, /FIRST_FULL_ERROR_DETAIL/);
+  assert.match(expandedSingle, /transcript-error-details/);
 
   const expanded = renderToStaticMarkup(createElement(TranscriptErrorCard, {
     item: { ...items[0], errorItems: items }, expanded: true,
