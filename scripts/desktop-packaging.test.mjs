@@ -624,7 +624,7 @@ test('stageLeanPiRuntime omits .git, devDependencies, dist/test/docs/apps, and w
     cpSync(join(root, 'scripts', script), join(outRoot, 'scripts', script));
   }
   cpSync(join(root, 'engine', 'pi-lock.json'), join(outRoot, 'engine', 'pi-lock.json'));
-  for (const ext of ['pi-trim', 'pi-continuity', 'pi-better-web-search']) {
+  for (const ext of ['pi-trim', 'pi-continuity', 'pi-simple-timeout', 'pi-better-web-search']) {
     cpSync(join(root, 'node_modules', ext), join(outRoot, 'node_modules', ext), { recursive: true });
   }
 

@@ -220,6 +220,96 @@ export async function loadBundledWebSearch() {
     return factory(wrappedPi);
   };
 }
+
+export interface BashTimeoutPolicy {
+  parameters: any;
+  getDefaultTimeoutSeconds: () => number | null;
+  prefixDefaultTimeoutMessage: (message: string) => string;
+}
+
+export interface BashTimeoutBridge {
+  hasBashHost(): boolean;
+  setBashHost(host: (policy: BashTimeoutPolicy) => void): void;
+  getPolicy(): BashTimeoutPolicy | undefined;
+  setPolicy(policy: BashTimeoutPolicy): void;
+}
+
+export function createBashTimeoutBridge(): BashTimeoutBridge {
+  let host: ((policy: BashTimeoutPolicy) => void) | undefined;
+  let currentPolicy: BashTimeoutPolicy | undefined;
+  return {
+    hasBashHost: () => host !== undefined,
+    setBashHost: nextHost => {
+      host = nextHost;
+    },
+    getPolicy: () => currentPolicy,
+    setPolicy: policy => {
+      currentPolicy = policy;
+      host?.(policy);
+    },
+  };
+}
+
+export async function loadBundledSimpleTimeout(bridge?: BashTimeoutBridge) {
+  const [{ createJiti }, { VIRTUAL_MODULES }] = await Promise.all([
+    import('../pi/packages/coding-agent/src/core/extensions/jiti-loader.ts'),
+    import('../pi/packages/coding-agent/src/core/extensions/virtual-modules.ts'),
+  ]);
+  const bashTimeoutPath = fileURLToPath(new URL('../node_modules/pi-simple-timeout/lib/bash-timeout.ts', import.meta.url));
+  const loader = createJiti(import.meta.url, { moduleCache: false, virtualModules: VIRTUAL_MODULES, tsconfigPaths: true });
+  const originalBashTimeout = await loader.import<Record<string, any>>(bashTimeoutPath);
+  const toolPolicies = new WeakMap<object, BashTimeoutPolicy>();
+  const bashTimeout = {
+    ...originalBashTimeout,
+    createDefaultTimeoutBashToolDefinition: (options: any) => {
+      const tool = originalBashTimeout.createDefaultTimeoutBashToolDefinition(options);
+      toolPolicies.set(tool, {
+        parameters: tool.parameters,
+        getDefaultTimeoutSeconds: options.getDefaultTimeoutSeconds,
+        prefixDefaultTimeoutMessage: originalBashTimeout.prefixDefaultTimeoutMessage,
+      });
+      return tool;
+    },
+  };
+  const jiti = createJiti(import.meta.url, {
+    moduleCache: false,
+    virtualModules: {
+      ...VIRTUAL_MODULES,
+      '../lib/bash-timeout.ts': bashTimeout,
+    },
+    tsconfigPaths: true,
+  });
+  const factory = await jiti.import<import('../pi/packages/coding-agent/src/index.ts').ExtensionFactory>(
+    fileURLToPath(new URL('../node_modules/pi-simple-timeout/extensions/index.ts', import.meta.url)),
+    { default: true },
+  );
+  // When grapher-workspace-policy owns `bash` (Planner, Graph Node, Merger),
+  // route timeout schema/policy updates through the shared bridge instead of
+  // registering a second conflicting `bash` tool. Serial leaves Pi's bash
+  // untouched, so pi-simple-timeout registers `bash` directly there.
+  return (pi: any) => {
+    if (!bridge) return factory(pi);
+    const wrappedPi = new Proxy(pi, {
+      get(target, prop) {
+        if (prop === 'registerTool') {
+          return (tool: any) => {
+            if (tool?.name === 'bash' && bridge.hasBashHost()) {
+              const policy = toolPolicies.get(tool);
+              if (policy) {
+                bridge.setPolicy(policy);
+                return;
+              }
+            }
+            return target.registerTool(tool);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return factory(wrappedPi);
+  };
+}
 export type { InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
 // RPC does not dispatch interactive-mode builtins. Delegate command actions
 // through the SDK, keeping their idle/settle boundaries inside Pi.

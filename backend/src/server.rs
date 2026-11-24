@@ -1740,9 +1740,9 @@ fn stored_planner_session_id(
             return Ok(None);
         };
         let node = crate::workspace_state::is_managed_worktrees_bucket(bucket)
-            && leaf
-                .get(leaf.len().saturating_sub(36)..)
-                .is_some_and(|id| Uuid::parse_str(id).is_ok());
+            && crate::cleanup::valid_workspace_checkout(leaf)
+            && !crate::cleanup::is_publication_workspace_checkout(leaf)
+            && !leaf.starts_with('.');
         if Uuid::parse_str(owner).is_err() || !node {
             return Ok(None);
         }

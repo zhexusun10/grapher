@@ -10,13 +10,16 @@ import {
   obj,
   str,
   type BashOperations,
+  type BashTimeoutBridge,
+  type BashTimeoutPolicy,
   type ExtensionAPI,
 } from './pi-compat.ts';
 
 const INTERRUPTED_CONTINUATION = '__grapher_continue_interrupted__';
 const FEEDBACK_RULE = 'End your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.';
 
-export default function (pi: ExtensionAPI) {
+export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
+  return function workspacePolicy(pi: ExtensionAPI) {
   const continuation = process.env.GRAPHER_CONTINUE_INTERRUPTED === 'true';
   const cwd = process.cwd();
   // This is Grapher's workspace policy: a Grapher role always carries GRAPHER_MODE
@@ -235,59 +238,78 @@ export default function (pi: ExtensionAPI) {
     const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
     const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
     const baseBashTool = createBashToolDefinition(cwd);
-    pi.registerTool({
-      ...baseBashTool,
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        // Preserve native bash semantics. Callers can request errexit/pipefail
-        // explicitly; injecting them changes otherwise valid shell programs.
-        const rawCmd = params.command;
+    let activeBashTimeout: BashTimeoutPolicy | undefined = bashTimeoutBridge?.getPolicy();
+    const registerBashTool = (timeoutPolicy?: BashTimeoutPolicy) => {
+      activeBashTimeout = timeoutPolicy;
+      pi.registerTool({
+        ...baseBashTool,
+        ...(timeoutPolicy ? { parameters: timeoutPolicy.parameters } : {}),
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          // Preserve native bash semantics. Callers can request errexit/pipefail
+          // explicitly; injecting them changes otherwise valid shell programs.
+          const rawCmd = params.command;
+          const configuredDefault = activeBashTimeout?.getDefaultTimeoutSeconds() ?? null;
+          const usedDefaultTimeout = params.timeout === undefined && configuredDefault !== null;
 
-        let callExitCode: number | null = null;
-        const scopedOps: BashOperations = {
-          exec: async (command, cwd, options) => {
-            const workspaceCwd = activePaths?.root || cwd;
-            const res = await localOps.exec(
-              managedBashCommand(command, workspaceCwd),
-              workspaceCwd,
-              managedBashOptions(options, managedShell),
-            );
-            callExitCode = res.exitCode;
-            return res;
-          },
-        };
+          let callExitCode: number | null = null;
+          const scopedOps: BashOperations = {
+            exec: async (command, cwd, options) => {
+              const workspaceCwd = activePaths?.root || cwd;
+              const res = await localOps.exec(
+                managedBashCommand(command, workspaceCwd),
+                workspaceCwd,
+                managedBashOptions(options, managedShell),
+              );
+              callExitCode = res.exitCode;
+              return res;
+            },
+          };
 
-        const scopedBashTool = createBashToolDefinition(cwd, { operations: scopedOps });
-        let result: any;
-        let execError: any;
-        try {
-          const mapped = { ...params, command: activePaths ? activePaths.command(rawCmd) : rawCmd };
-          const toolContext = activePaths && ctx ? { ...ctx, cwd: activePaths.root } : ctx;
-          result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
-            onUpdate ? update => onUpdate(view(update)) : undefined, toolContext));
-        } catch (err) {
-          execError = err;
-        }
+          const scopedBashTool = createBashToolDefinition(cwd, { operations: scopedOps });
+          let result: any;
+          let execError: any;
+          try {
+            const mapped = {
+              ...params,
+              ...(usedDefaultTimeout ? { timeout: configuredDefault } : {}),
+              command: activePaths ? activePaths.command(rawCmd) : rawCmd,
+            };
+            const toolContext = activePaths && ctx ? { ...ctx, cwd: activePaths.root } : ctx;
+            result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
+              onUpdate ? update => onUpdate(view(update)) : undefined, toolContext));
+          } catch (err) {
+            execError = err;
+          }
 
-        const exitCode = callExitCode;
-        const isTruncated = !!(result?.details?.truncation?.truncated || result?.details?.truncated);
-        toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
+          const exitCode = callExitCode;
+          const isTruncated = !!(result?.details?.truncation?.truncated || result?.details?.truncated);
+          toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
-        if (execError) {
-          if (execError instanceof Error && activePaths) execError.message = view(execError.message);
-          throw execError;
-        }
+          if (execError) {
+            if (usedDefaultTimeout && execError instanceof Error && activeBashTimeout) {
+              const rewritten = activeBashTimeout.prefixDefaultTimeoutMessage(execError.message);
+              if (rewritten !== execError.message) {
+                execError = new Error(rewritten, { cause: execError });
+              }
+            }
+            if (execError instanceof Error && activePaths) execError.message = view(execError.message);
+            throw execError;
+          }
 
-        return {
-          ...result,
-          details: view({
-            ...result?.details,
-            exitCode,
-            command: rawCmd,
-            truncated: isTruncated,
-          }),
-        };
-      },
-    });
+          return {
+            ...result,
+            details: view({
+              ...result?.details,
+              exitCode,
+              command: rawCmd,
+              truncated: isTruncated,
+            }),
+          };
+        },
+      });
+    };
+    registerBashTool(activeBashTimeout);
+    bashTimeoutBridge?.setBashHost(policy => registerBashTool(policy));
 
     pi.on("tool_result", async event => {
       if (event.toolName !== "bash") return;
@@ -301,4 +323,8 @@ export default function (pi: ExtensionAPI) {
       return { details: view(details), isError: event.isError };
     });
   }
+  };
 }
+
+const defaultWorkspacePolicy = createWorkspacePolicy();
+export default defaultWorkspacePolicy;

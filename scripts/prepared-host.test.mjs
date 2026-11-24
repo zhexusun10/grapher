@@ -306,7 +306,10 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const marker = join(directory, 'loaded.jsonl');
     const bashSources = join(directory, 'bash-sources.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
-    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, feedback: process.env.GRAPHER_FEEDBACK_SOURCE, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); pi.on('session_start', () => appendFileSync(${JSON.stringify(bashSources)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, bash: pi.getAllTools().find(tool => tool.name === 'bash')?.sourceInfo }) + '\\n')); }`);
+    const probePath = join(global, 'extensions/probe.ts');
+    await writeFile(probePath, `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, feedback: process.env.GRAPHER_FEEDBACK_SOURCE, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); pi.on('session_start', () => appendFileSync(${JSON.stringify(bashSources)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, bash: pi.getAllTools().find(tool => tool.name === 'bash')?.sourceInfo }) + '\\n')); }`);
+    const { pathKey } = await import('../engine/path-identity.mjs');
+    await writeFile(join(agent, 'extensions.json'), JSON.stringify({ overrides: { [pathKey(probePath)]: true } }));
     await new Promise(completed => server.listen(0, '127.0.0.1', completed));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -477,8 +480,11 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     assert.ok(loaded.every(value => value.run === `run-${value.role}` && value.execution === `execution-${value.role}` && value.graph === join(directory, `graph-${value.role}.json`)));
     const bashToolSources = (await readFile(bashSources, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
     assert.deepEqual(bashToolSources.map(value => value.role).sort(), ['node', 'planner']);
-    assert.equal(bashToolSources.find(value => value.role === 'node' && value.agentKind === 'serial').bash.path, 'builtin:bash',
-      'a bound Serial Agent must retain Pi\'s native Bash tool');
+    const serialBashPath = bashToolSources.find(value => value.role === 'node' && value.agentKind === 'serial').bash.path;
+    assert.ok(!serialBashPath.includes('grapher-workspace-policy'),
+      `a bound Serial Agent must not use the Grapher workspace Bash adapter (got ${serialBashPath})`);
+    assert.match(serialBashPath, /pi-simple-timeout/,
+      'a bound Serial Agent uses bundled pi-simple-timeout directly when enabled');
     assert.match(bashToolSources.find(value => value.role === 'planner').bash.path, /grapher-workspace-policy/,
       'Planner keeps the Grapher Bash adapter');
 

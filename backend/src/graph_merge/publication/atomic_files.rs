@@ -684,6 +684,7 @@ fn install_file_with_tracked(
         remove_publication_dir(repository, &target, tracked).map_err(|e| e.to_string())?;
     }
     let replacing_marker = journal.join("replacing.json");
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(unused_mut))]
     let mut recorded_replace = false;
     #[cfg(target_os = "macos")]
     if let Ok(metadata) = fs::symlink_metadata(&target) {

@@ -15,6 +15,7 @@ export function ExtensionItem({ extension, disabled, onToggle, statusNote }: {
 }) {
   const bundledDescriptions: Record<string, string> = {
     'npm:pi-continuity': t('更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。'),
+    'npm:pi-simple-timeout': t('为 bash 工具提供可配置的默认超时（默认 180 秒），并在触发默认超时时明确标注；可通过 /timeout 随时调整或关闭。'),
     'npm:pi-better-web-search': t('支持已配置的专用搜索 API 和已认证的兼容 Provider；仅在有可用搜索接口时注册 web_search 工具。'),
   };
   const description = extension.bundled
@@ -184,8 +185,8 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       <Puzzle size={16} /><h4 id="extension-settings-title">{t('Pi 全局扩展')}</h4>
       <button type="button" className="icon-button" aria-label={t('刷新扩展')} disabled={busy || disabled} onClick={() => void update()}><RefreshCw size={14} /></button>
     </div>
-    <p className="section-desc">{t('移除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
-    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
+    <p className="section-desc">{t('移除仅在 Grapher 中停用，不卸载全局扩展；检测到的外部全局扩展默认不挂载，需在待选列表中手动添加。')}</p>
+    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 与 pi-simple-timeout 默认启用，对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他外部扩展默认不挂载，手动添加后仅对 Planner、Node Agent 生效，MCP 和 Skill 同样仅对 Planner、Node Agent 生效。')}</p>
     {catalog && <code className="extension-settings-directory">{catalog.globalDirectory}</code>}
     {busy && <p role="status" className="section-desc">{t('正在读取扩展…')}</p>}
     {error && <p role="alert" className="settings-language-error">{localizeError(error)}</p>}

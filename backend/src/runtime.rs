@@ -1227,7 +1227,7 @@ impl Runtime {
         if !config.isolate_parallel_nodes {
             return 0;
         }
-        let ready = self
+        let ready: Vec<&str> = self
             .state
             .graph
             .nodes
@@ -1249,11 +1249,15 @@ impl Runtime {
                             .is_some_and(|parent| parent.status == "completed")
                 })
             })
-            .count();
-        if ready > workspace_policy::SHARED_SOURCE_BATCH_LIMIT {
-            ready
+            .map(|node| node.id.as_str())
+            .collect();
+        if ready.len() > workspace_policy::SHARED_SOURCE_BATCH_LIMIT {
+            ready.len()
         } else {
-            0
+            ready
+                .iter()
+                .filter(|node| self.state.private_batch.iter().any(|member| member == **node))
+                .count()
         }
     }
 

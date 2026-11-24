@@ -4,21 +4,24 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { isCaseInsensitive, pathKey, toHostInput } from './path-identity.mjs';
 import { fileURLToPath } from 'node:url';
-import { DefaultPackageManager, SettingsManager, createMcpExtension, composerCommandsExtension, loadBundledWebSearch, type InlineExtension } from './pi-compat.ts';
+import { DefaultPackageManager, SettingsManager, createBashTimeoutBridge, createMcpExtension, composerCommandsExtension, loadBundledSimpleTimeout, loadBundledWebSearch, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
 import { hasConfiguredDedicatedSearchApiInDir, isKeenableDisabledInDir } from './search-credentials.mjs';
-import workspacePolicy from './prompt-extension.ts';
+import workspacePolicy, { createWorkspacePolicy } from './prompt-extension.ts';
 
 // Native ESM reuses the already loaded Pi SDK. Passing this mandatory adapter
 // through jiti would load its relative SDK dependency graph a second time.
 // Import only code here: the factory captures task paths/role after binding.
 export const workspacePolicyName = 'grapher-workspace-policy';
+export const simpleTimeoutName = 'pi-simple-timeout';
 
 const builtins = ['llama.cpp', 'codemode', 'tool-search', 'mcp'];
 export const trimId = 'npm:pi-trim';
 export const bundledTrim = fileURLToPath(new URL('../node_modules/pi-trim/extensions/index.ts', import.meta.url));
 export const continuityId = 'npm:pi-continuity';
 export const bundledContinuity = fileURLToPath(new URL('../node_modules/pi-continuity/extensions/index.ts', import.meta.url));
+export const simpleTimeoutId = 'npm:pi-simple-timeout';
+export const bundledSimpleTimeout = fileURLToPath(new URL('../node_modules/pi-simple-timeout/extensions/index.ts', import.meta.url));
 export const webSearchId = 'npm:pi-better-web-search';
 export const bundledWebSearch = fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url));
 export const webSearchExtension: InlineExtension = {
@@ -28,6 +31,7 @@ export const webSearchExtension: InlineExtension = {
 const bundledExtensions = [
   { id: trimId, name: 'pi-trim', path: bundledTrim, required: true, defaultEnabled: true },
   { id: continuityId, name: 'pi-continuity', path: bundledContinuity, required: false, defaultEnabled: true },
+  { id: simpleTimeoutId, name: 'pi-simple-timeout', path: bundledSimpleTimeout, required: false, defaultEnabled: true },
   { id: webSearchId, name: 'pi-better-web-search', path: bundledWebSearch, required: false, defaultEnabled: false },
 ];
 const bundledDefault = (id: string) => bundledExtensions.find(extension => extension.id === id)?.defaultEnabled ?? true;
@@ -157,7 +161,7 @@ export async function extensionCatalog(directory: string) {
     if (seen.has(id)) continue;
     seen.add(id);
     extensions.push({ id, name: extensionName(resource), source: resource.metadata.source,
-      path: resource.path, enabled: state[id] ?? resource.enabled, bundled: false, required: false });
+      path: resource.path, enabled: state[id] === true, bundled: false, required: false });
   }
   const globalDirectory = globalAgentDir();
   return {
@@ -203,14 +207,20 @@ export async function setExtensionEnabled(
 
 export async function executionResources(args: string[], directory: string, role = process.env.GRAPHER_MODE) {
   const state = overrides(directory);
-  const extensionFactories: InlineExtension[] = [{ name: workspacePolicyName, factory: workspacePolicy }];
+  const discoverExtensions = !args.includes('--no-extensions') && !args.includes('-ne');
+  const discoverSkills = !args.includes('--no-skills') && !args.includes('-ns');
+  const simpleTimeoutAllowed = role === 'planner' || role === 'node' || role === 'merger';
+  const simpleTimeoutEnabled = simpleTimeoutAllowed && discoverExtensions && (state[simpleTimeoutId] ?? bundledDefault(simpleTimeoutId));
+  const bashTimeoutBridge = simpleTimeoutEnabled ? createBashTimeoutBridge() : undefined;
+  const extensionFactories: InlineExtension[] = [{
+    name: workspacePolicyName,
+    factory: bashTimeoutBridge ? createWorkspacePolicy(bashTimeoutBridge) : workspacePolicy,
+  }];
   if ((role === 'planner' || role === 'node') && args.some((arg, index) => arg === '--mode' && args[index + 1] === 'rpc')) {
     extensionFactories.push(composerCommandsExtension);
   }
   const extensions: string[] = [];
   const skills: string[] = [];
-  const discoverExtensions = !args.includes('--no-extensions') && !args.includes('-ne');
-  const discoverSkills = !args.includes('--no-skills') && !args.includes('-ns');
   const allowed = (role === 'planner' || role === 'node') && (discoverExtensions || discoverSkills);
   if (allowed) {
     const settingsManager = SettingsManager.create(process.cwd(), directory, { projectTrusted: args.includes('--approve') });
@@ -218,6 +228,7 @@ export async function executionResources(args: string[], directory: string, role
     // Independent discovery only. Both inputs remain fresh for this binding;
     // precedence and factory initialization are applied after both complete.
     const [global, local] = await Promise.all([resolveGlobal(), manager.resolve(async () => 'skip')]);
+    const sameGlobalAndDedicated = identity(directory) === identity(globalAgentDir());
     const globalById = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isBundled(r)).map(r => [identity(r.path), r]));
     const globalByKey = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isBundled(r)).map(r => [resourceKey(r), r]));
     const seenExtensions = new Set<string>();
@@ -255,9 +266,16 @@ export async function executionResources(args: string[], directory: string, role
 
       const original = builtin ? global.extensions.find(r => r.path === id) : (globalById.get(id) ?? globalByKey.get(key));
       const originalId = original ? identity(original.path) : undefined;
+      const explicitOverride = state[id] ?? (originalId ? state[originalId] : undefined);
+      // Discovered external Pi extensions are opt-in: users must explicitly add
+      // them in Grapher Settings before they are mounted. Trusted project-local
+      // and dedicated-only Grapher extensions keep their local enable state.
+      const requiresOptIn = !isLocal || (resource.metadata.scope === 'user' && (sameGlobalAndDedicated || original !== undefined));
       const enabled = builtin
         ? (original?.enabled ?? true) && (local.extensions.find(r => r.path === id)?.enabled ?? true)
-        : state[id] ?? (originalId ? state[originalId] : undefined) ?? original?.enabled ?? resource.enabled;
+        : requiresOptIn
+          ? explicitOverride === true
+          : (explicitOverride ?? resource.enabled);
 
       if (!enabled || seenExtensions.has(id) || seenKeys.has(key)) continue;
       seenExtensions.add(id);
@@ -305,6 +323,12 @@ export async function executionResources(args: string[], directory: string, role
         }),
       }) });
     }
+  }
+  if (simpleTimeoutEnabled && bashTimeoutBridge) {
+    extensionFactories.push({
+      name: simpleTimeoutName,
+      factory: async pi => { await (await loadBundledSimpleTimeout(bashTimeoutBridge))(pi); },
+    });
   }
   const continuityAllowed = role === 'planner' || role === 'node' || role === 'merger';
   if (continuityAllowed && discoverExtensions && (state[continuityId] ?? bundledDefault(continuityId))) {

@@ -10,11 +10,13 @@ import { join, relative, isAbsolute } from 'node:path';
 import { Agent } from '../pi/packages/agent/src/index.ts';
 import { InMemoryCredentialStore } from '../pi/packages/ai/src/auth/credential-store.ts';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
-import { bundledTrim, bundledContinuity, bundledWebSearch } from '../engine/global-extensions.ts';
+import { DefaultResourceLoader } from '../pi/packages/coding-agent/src/core/resource-loader.ts';
+import { bundledTrim, bundledContinuity, bundledSimpleTimeout, bundledWebSearch, simpleTimeoutName, workspacePolicyName } from '../engine/global-extensions.ts';
+import { createWorkspacePolicy } from '../engine/prompt-extension.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities, composerCommandsExtension, clearUnreadQueue,
-  createBashToolDefinition, createLocalBashOperations,
+  createBashTimeoutBridge, createBashToolDefinition, createLocalBashOperations, loadBundledSimpleTimeout,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
   assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager, installDefaultAggressiveTrim, installQueueIdentity,
 } from '../engine/pi-compat.ts';
@@ -292,6 +294,7 @@ test('bundled extension peer providers match the reviewed Pi baseline', () => {
 for (const [name, entry] of [
   ['pi-trim', './extensions/index.ts'],
   ['pi-continuity', './extensions/index.ts'],
+  ['pi-simple-timeout', './extensions/index.ts'],
   ['pi-better-web-search', './extensions/index.ts'],
 ]) {
   test(`bundled ${name} matches the selected exact release, manifest and lock integrity`, () => {
@@ -330,6 +333,106 @@ test('bundled web search loads its provider-native tool against the pinned Pi pu
   assert.ok(extension.tools.has('web_search'));
   for (const event of ['session_start', 'session_tree', 'model_select', 'before_agent_start']) {
     assert.ok(extension.handlers.has(event), `${event}: dynamic exposure boundary registered`);
+  }
+});
+
+test('bundled pi-simple-timeout cooperates with grapher-workspace-policy without bash tool conflicts', async () => {
+  const standalone = await loadExtensions([bundledSimpleTimeout], process.cwd());
+  assert.deepEqual(standalone.errors, []);
+  assert.equal(standalone.extensions.length, 1);
+  assert.ok(standalone.extensions[0].tools.has('bash'));
+  assert.ok(standalone.extensions[0].commands.has('timeout'));
+
+  const dir = mkdtempSync(join(tmpdir(), 'grapher-simple-timeout-bridge-'));
+  const envKeys = ['GRAPHER_MODE', 'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'PI_TIMEOUT_SETTINGS'];
+  const previous = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+  try {
+    const settingsPath = join(dir, 'pi-timeout.json');
+    process.env.PI_TIMEOUT_SETTINGS = settingsPath;
+
+    // Non-serial role: grapher-workspace-policy owns `bash`, pi-simple-timeout bridges schema/default timeout & /timeout live updates.
+    process.env.GRAPHER_MODE = 'node';
+    process.env.GRAPHER_AGENT_KIND = 'node';
+    process.env.GRAPHER_EXECUTION_KIND = 'source';
+    const bridge = createBashTimeoutBridge();
+    const loader = new DefaultResourceLoader({
+      cwd: dir,
+      agentDir: dir,
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      extensionFactories: [
+        { name: workspacePolicyName, factory: createWorkspacePolicy(bridge) },
+        { name: simpleTimeoutName, factory: async pi => { await (await loadBundledSimpleTimeout(bridge))(pi); } },
+      ],
+    });
+    await loader.reload();
+    const loaded = loader.getExtensions();
+    assert.deepEqual(loaded.errors, [], 'must not trigger Tool "bash" conflict');
+    const policyExt = loaded.extensions.find(ext => ext.path.includes(workspacePolicyName))!;
+    const timeoutExt = loaded.extensions.find(ext => ext.path.includes(simpleTimeoutName))!;
+    assert.ok(policyExt.tools.has('bash'), 'grapher-workspace-policy remains the sole bash owner');
+    assert.equal(timeoutExt.tools.has('bash'), false, 'pi-simple-timeout delegates bash registration through the bridge');
+    assert.ok(timeoutExt.commands.has('timeout'), '/timeout command stays registered');
+    assert.match(
+      (policyExt.tools.get('bash')!.definition.parameters as any).properties.timeout.description,
+      /default 180s/,
+    );
+
+    // Live /timeout update refreshes grapher-workspace-policy's bash schema and applies default timeout + prefix.
+    const timeoutCmd = timeoutExt.commands.get('timeout')!;
+    const notices: string[] = [];
+    await timeoutCmd.handler('0.2s', { hasUI: false, ui: { notify: (msg: string) => notices.push(msg) } } as any);
+    assert.match(notices[0] ?? '', /0\.2s/);
+    assert.match(
+      (policyExt.tools.get('bash')!.definition.parameters as any).properties.timeout.description,
+      /default 0\.2s/,
+    );
+    await assert.rejects(
+      policyExt.tools.get('bash')!.definition.execute(
+        'bash-timeout-test',
+        { command: `"${process.execPath}" -e "setTimeout(() => {}, 5000)"` },
+        undefined,
+        undefined,
+        { cwd: dir, sessionManager: SessionManager.inMemory(dir) } as any,
+      ),
+      /Default timeout: Command timed out after 0\.2 seconds/,
+    );
+
+    // Disabling via /timeout off updates the schema back to no default timeout.
+    await timeoutCmd.handler('off', { hasUI: false, ui: { notify: (msg: string) => notices.push(msg) } } as any);
+    assert.match(
+      (policyExt.tools.get('bash')!.definition.parameters as any).properties.timeout.description,
+      /no default timeout/,
+    );
+
+    // Serial role: grapher-workspace-policy does not register bash, so pi-simple-timeout registers bash directly.
+    process.env.GRAPHER_AGENT_KIND = 'serial';
+    const serialBridge = createBashTimeoutBridge();
+    const serialLoader = new DefaultResourceLoader({
+      cwd: dir,
+      agentDir: dir,
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      extensionFactories: [
+        { name: workspacePolicyName, factory: createWorkspacePolicy(serialBridge) },
+        { name: simpleTimeoutName, factory: async pi => { await (await loadBundledSimpleTimeout(serialBridge))(pi); } },
+      ],
+    });
+    await serialLoader.reload();
+    const serialLoaded = serialLoader.getExtensions();
+    assert.deepEqual(serialLoaded.errors, []);
+    assert.equal(serialLoaded.extensions.find(ext => ext.path.includes(workspacePolicyName))!.tools.has('bash'), false);
+    assert.equal(serialLoaded.extensions.find(ext => ext.path.includes(simpleTimeoutName))!.tools.has('bash'), true);
+  } finally {
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

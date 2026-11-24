@@ -5,13 +5,15 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ExtensionCommands } from '../engine/extension-commands.ts';
+import { pathKey } from '../engine/path-identity.mjs';
 
 async function fixture(run: (host: ExtensionCommands, paths: { base: string; own: string; global: string; a: string; b: string }) => Promise<void>) {
   const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'grapher-extension-commands-')));
   const paths = { base, own: join(base, 'own'), global: join(base, 'global'), a: join(base, 'project-a'), b: join(base, 'project-b') };
   for (const directory of [paths.own, paths.global, paths.a, paths.b]) mkdirSync(directory);
   mkdirSync(join(paths.global, 'extensions'));
-  writeFileSync(join(paths.global, 'extensions/custom.ts'), `export default function(pi) {
+  const customExt = join(paths.global, 'extensions/custom.ts');
+  writeFileSync(customExt, `export default function(pi) {
     pi.registerCommand('custom-settings', { description: 'User-defined settings', handler: async (_args, ctx) => {
       const choice = await ctx.ui.select('Choose action', ['Inspect', 'Cancel']);
       if (choice !== 'Inspect') return;
@@ -22,7 +24,9 @@ async function fixture(run: (host: ExtensionCommands, paths: { base: string; own
       ctx.compact({ onError: () => ctx.ui.notify('An active conversation is required', 'warning') });
     }});
   }`);
-  writeFileSync(join(paths.own, 'extensions.json'), JSON.stringify({ overrides: { 'npm:pi-better-web-search': true } }));
+  writeFileSync(join(paths.own, 'extensions.json'), JSON.stringify({
+    overrides: { 'npm:pi-better-web-search': true, [pathKey(customExt)]: true },
+  }));
   for (const [directory, name] of [[paths.a, 'project-a-command'], [paths.b, 'project-b-command']]) {
     mkdirSync(join(directory, '.pi/extensions'), { recursive: true });
     writeFileSync(join(directory, '.pi/extensions/project.ts'), `export default function(pi) {
@@ -68,13 +72,17 @@ const respond = (host: ExtensionCommands, fields: object, prompt: any, response:
 test('standalone command discovery loads user extensions, bundled commands and MCP without a conversation', { timeout: 30_000 }, () => fixture(async (host, paths) => {
   const catalog: any = await host.dispatch({ repository: paths.a, operation: 'catalog' });
   const names = catalog.commands.map((command: any) => command.name);
-  for (const name of ['custom-settings', 'pi-better-web-search', 'web-search-provider', 'web-search-api', 'mcp', 'project-a-command']) assert.ok(names.includes(name), name);
+  for (const name of ['custom-settings', 'timeout', 'pi-better-web-search', 'web-search-provider', 'web-search-api', 'mcp', 'project-a-command']) assert.ok(names.includes(name), name);
   const withoutProject: any = await host.dispatch({ operation: 'catalog' });
   assert.ok(withoutProject.commands.some((command: any) => command.name === 'custom-settings'));
   assert.ok(!withoutProject.commands.some((command: any) => command.name === 'project-a-command'));
   const help = await start(host, '', '/pi-better-web-search help');
   const helpResult = await poll(host, help, state => state.status === 'complete');
   assert.ok(helpResult.events.some((event: any) => /web-search-provider/.test(event.message ?? '')));
+  const timeoutCmd = await start(host, '', '/timeout 90s');
+  const timeoutResult = await poll(host, timeoutCmd, state => state.status === 'complete');
+  assert.ok(timeoutResult.events.some((event: any) => /90s/.test(event.message ?? '')));
+  assert.equal(JSON.parse(readFileSync(join(paths.own, 'pi-timeout.json'), 'utf8')).defaultTimeoutSeconds, 90);
   const fields = await start(host, paths.a, '/custom-settings');
   const choice = dialog(await poll(host, fields, state => !!dialog(state, 'select')), 'select');
   await respond(host, fields, choice, { value: 'Inspect' });

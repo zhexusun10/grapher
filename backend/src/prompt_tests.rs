@@ -3506,8 +3506,8 @@ fn fast_sibling_releases_slot_for_downstream_before_slow_sibling() {
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"cat >/dev/null
 case "$PWD" in
-  *a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
-  *z_fast-*) echo completed > fast.txt ;;
+  */a_slow|*/a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
+  */z_fast|*/z_fast-*) echo completed > fast.txt ;;
   *) echo completed > downstream.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'

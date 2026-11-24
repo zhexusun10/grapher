@@ -215,6 +215,13 @@ test('Settings IPC discovers extensions and persists removal/restoration without
     assert.equal(call({ operation: 'set_enabled', id: continuity.id, enabled: false }).extensions.find(value => value.id === continuity.id).enabled, false);
     assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === continuity.id).enabled, false);
     assert.equal(call({ operation: 'set_enabled', id: continuity.id, enabled: true }).extensions.find(value => value.id === continuity.id).enabled, true);
+    const simpleTimeout = catalog.extensions.find(extension => extension.id === 'npm:pi-simple-timeout');
+    assert.ok(simpleTimeout?.bundled);
+    assert.equal(simpleTimeout.required, false);
+    assert.equal(simpleTimeout.enabled, true);
+    assert.equal(call({ operation: 'set_enabled', id: simpleTimeout.id, enabled: false }).extensions.find(value => value.id === simpleTimeout.id).enabled, false);
+    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === simpleTimeout.id).enabled, false);
+    assert.equal(call({ operation: 'set_enabled', id: simpleTimeout.id, enabled: true }).extensions.find(value => value.id === simpleTimeout.id).enabled, true);
     const webSearch = catalog.extensions.find(extension => extension.id === 'npm:pi-better-web-search');
     assert.ok(webSearch?.bundled);
     assert.equal(webSearch.required, false);
@@ -224,9 +231,10 @@ test('Settings IPC discovers extensions and persists removal/restoration without
     assert.equal(call({ operation: 'set_enabled', id: webSearch.id, enabled: false }).extensions.find(value => value.id === webSearch.id).enabled, false);
     const extension = catalog.extensions.find(extension => !extension.bundled);
     assert.ok(extension);
-    assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: false }).extensions.find(value => value.id === extension.id).enabled, false);
-    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === extension.id).enabled, false);
+    assert.equal(extension.enabled, false, 'discovered external global extensions default to disabled until manually added');
     assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: true }).extensions.find(value => value.id === extension.id).enabled, true);
+    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === extension.id).enabled, true);
+    assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: false }).extensions.find(value => value.id === extension.id).enabled, false);
     assert.equal(readFileSync(file, 'utf8'), code);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

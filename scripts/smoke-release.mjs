@@ -65,6 +65,7 @@ try {
   for (const file of ['scripts/pi-baseline.mjs', 'scripts/pi-dependencies.mjs', 'scripts/prepare-native-runtime.mjs',
     'scripts/cargo.mjs', 'scripts/bundled-extensions.mjs', 'scripts/model-data-manifest.mjs', 'package.json', 'dist/index.html', 'pi/.git/HEAD',
     'node_modules/pi-trim/extensions/index.ts', 'node_modules/pi-continuity/extensions/index.ts',
+    'node_modules/pi-simple-timeout/extensions/index.ts',
     'node_modules/pi-better-web-search/extensions/index.ts',
     'START-HERE.md', platform === 'windows' ? 'start.bat' : 'start.sh']) {
     assert.ok(existsSync(join(installation, file)), `Missing package file: ${file}`);
@@ -190,7 +191,7 @@ try {
   assert.ok(catalog.providers.length > 0 && catalog.models.length > 0);
   const extensions = await api('pi_extensions', { version: 1, operation: 'catalog' });
   for (const [id, enabled] of [
-    ['npm:pi-trim', true], ['npm:pi-continuity', true], ['npm:pi-better-web-search', false],
+    ['npm:pi-trim', true], ['npm:pi-continuity', true], ['npm:pi-simple-timeout', true], ['npm:pi-better-web-search', false],
   ]) {
     const extension = extensions.extensions.find(value => value.id === id);
     assert.ok(extension?.bundled, `${id} must be bundled`);
