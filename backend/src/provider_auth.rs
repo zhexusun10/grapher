@@ -392,7 +392,14 @@ mod tests {
         let project_alias = directory.path().join("project-alias");
         crate::path_safety::directory_link(&project, &project_alias);
         let project = project_alias;
-        std::fs::write(global.join("extensions/probe.ts"), "export default function(pi) { pi.registerCommand('custom-settings', { handler: async (_args, ctx) => ctx.ui.notify(ctx.cwd, 'info') }); }").unwrap();
+        let probe = global.join("extensions/probe.ts");
+        std::fs::write(&probe, "export default function(pi) { pi.registerCommand('custom-settings', { handler: async (_args, ctx) => ctx.ui.notify(ctx.cwd, 'info') }); }").unwrap();
+        let probe_key = crate::path_identity::path_key(&probe);
+        std::fs::write(
+            own.join("extensions.json"),
+            serde_json::json!({ "overrides": { probe_key: true } }).to_string(),
+        )
+        .unwrap();
         let root = crate::native::installation_root();
         let transport = Transport::new();
         let request = |command: Value| {
