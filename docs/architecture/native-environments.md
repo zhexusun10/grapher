@@ -316,7 +316,7 @@ from the current managed composite when the result contract requires it.
 Environment evidence alone does not reconstruct ordinary project files; those
 follow the [Git workspace contract](workspace-snapshots-and-feedback.md#cleanup-and-reproducibility).
 
-Environment evidence participates in [feedback generation/drain checks](runtime.md#bounded-feedback) and [pinned workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Failed and pending-feedback views are not opportunistically reclaimed. Managed layouts and snapshots remain until explicit conversation deletion; bounded long-term retention/reference GC is not implemented.
+Environment evidence participates in [feedback generation/drain checks](runtime.md#bounded-feedback) and [pinned workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Failed and pending-feedback views are not opportunistically reclaimed. Recorded E/L snapshots remain until explicit conversation deletion; settling a Run reclaims only captures unreachable from current state or append-only history, including inheritance references. Superseding a batch never expires its recorded evidence. [Storage cleanup](storage.md#detached-workspace-cleanup) defines the separate lifetime of physical layouts and the fail-closed orphan sweep; bounded historical retention is not implemented.
 
 ### Native runtime inputs during recovery
 

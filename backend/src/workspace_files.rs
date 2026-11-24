@@ -454,7 +454,11 @@ impl Files {
             }
             let version = match self.load(&version_id) {
                 Ok(version) => version,
-                Err(_) => return Ok(0),
+                Err(error) => {
+                    return Err(format!(
+                        "Cannot verify retained environment snapshot {version_id}: {error}"
+                    ))
+                }
             };
             for entry in version.entries.values() {
                 if let Entry::File { blob, .. } = entry {

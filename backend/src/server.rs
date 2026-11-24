@@ -4225,7 +4225,10 @@ fn drive(service: Arc<Service>) {
             .map(|runtime| {
                 runtime.state.approved
                     && !runtime.state.paused
-                    && runtime.state.phase == "running"
+                    // A completed result can accept a source follow-up while
+                    // this driver is joining its output writer. That wakeup
+                    // must restart scheduling after teardown too.
+                    && matches!(runtime.state.phase.as_str(), "running" | "followup")
                     && !runtime.active()
             })
             .unwrap_or(false);

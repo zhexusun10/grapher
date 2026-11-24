@@ -1156,8 +1156,8 @@ impl Runtime {
     }
 
     /// Prune obsolete environment snapshots (`versions/`, `blobs/`, `launches/`)
-    /// after a Graph Run settles so earlier superseded batches or failed retries
-    /// do not retain large environment blobs until conversation deletion.
+    /// after a Graph Run settles. Recorded inputs/results remain roots even
+    /// when a later batch supersedes them; only unreferenced captures are garbage.
     pub(crate) fn prune_stale_environment_snapshots(&self) -> Result<usize, String> {
         if !self.batch_workspaces()
             || self.state.phase != "completed"
@@ -1168,9 +1168,11 @@ impl Runtime {
                 .nodes
                 .values()
                 .any(|node| node.status != "completed")
-            || self.state.result_execution.as_ref().is_some_and(|execution| {
-                matches!(execution.status.as_str(), "running" | "failed")
-            })
+            || self
+                .state
+                .result_execution
+                .as_ref()
+                .is_some_and(|execution| matches!(execution.status.as_str(), "running" | "failed"))
         {
             return Ok(0);
         }
@@ -1186,34 +1188,73 @@ impl Runtime {
         if !env_dir.is_dir() {
             return Ok(0);
         }
-        let Ok(store) = crate::environment::Environments::new(&self.root, &self.state.run_id, policy)
+        let Ok(store) =
+            crate::environment::Environments::new(&self.root, &self.state.run_id, policy)
         else {
             return Ok(0);
         };
         let mut retained_env_refs = BTreeSet::new();
         let mut retained_launch_refs = BTreeSet::new();
-        let current_result = self.require_current_batch_result().is_ok();
-        if current_result {
-            if let Some(descriptor) = self.state.published_result.as_ref() {
-                for result in std::iter::once(&descriptor.result)
-                    .chain(descriptor.entries.iter().map(|entry| &entry.result))
-                {
-                    if !result.environment_ref.is_empty() {
-                        retained_env_refs.insert(result.environment_ref.clone());
-                    }
-                    if !result.launch_ref.is_empty() {
-                        retained_launch_refs.insert(result.launch_ref.clone());
-                    }
+        let mut results = Vec::new();
+        results.extend(self.state.environment_baseline.iter());
+        for execution in self.state.executions.iter().chain(&self.state.mergers) {
+            results.extend(execution.input.iter().chain(execution.result.iter()));
+        }
+        results.extend(
+            self.state
+                .nodes
+                .values()
+                .filter_map(|node| node.result.as_ref()),
+        );
+        if let Some(execution) = &self.state.result_execution {
+            results.push(&execution.input);
+            results.extend(execution.result.iter());
+        }
+        if let Some(descriptor) = &self.state.published_result {
+            results.push(&descriptor.result);
+            results.extend(descriptor.entries.iter().map(|entry| &entry.result));
+        }
+        // The latest projection can replace prior result launches and Planner
+        // captures. Their append-only events still own the historical evidence.
+        for event in &self.state.events {
+            match &event.kind {
+                EventKind::EnvironmentInitialized { result }
+                | EventKind::ExecutionInputRecorded { input: result, .. }
+                | EventKind::ExecutionResultRecorded { result, .. }
+                | EventKind::ResultExecutionStarted { input: result, .. }
+                | EventKind::ResultExecutionPrepared { input: result }
+                | EventKind::PlannerWorkspaceSnapshotted {
+                    result: Some(result),
+                    ..
+                } => {
+                    results.push(result);
                 }
+                EventKind::ResultPublished { descriptor }
+                | EventKind::ResultExecutionFinished { descriptor } => {
+                    results.push(&descriptor.result);
+                    results.extend(descriptor.entries.iter().map(|entry| &entry.result));
+                }
+                EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => {
+                    results.extend(execution.input.iter().chain(execution.result.iter()));
+                }
+                _ => {}
             }
         }
-        if !policy.discovery {
-            if let Some(baseline) = self.state.environment_baseline.as_ref() {
-                if !baseline.environment_ref.is_empty() {
-                    retained_env_refs.insert(baseline.environment_ref.clone());
+        for result in results {
+            let refs = std::iter::once((&result.environment_ref, &result.launch_ref)).chain(
+                result.inheritance.iter().flat_map(|inheritance| {
+                    inheritance
+                        .inputs
+                        .iter()
+                        .map(|input| (&input.environment_ref, &input.launch_ref))
+                }),
+            );
+            for (environment_ref, launch_ref) in refs {
+                if !environment_ref.is_empty() {
+                    retained_env_refs.insert(environment_ref.clone());
                 }
-                if !baseline.launch_ref.is_empty() {
-                    retained_launch_refs.insert(baseline.launch_ref.clone());
+                if !launch_ref.is_empty() {
+                    retained_launch_refs.insert(launch_ref.clone());
                 }
             }
         }
@@ -3860,9 +3901,7 @@ impl Runtime {
     }
 
     /// Post-publication conversations with a completed node edit the user's source
-    /// directory directly instead of rebuilding a Graph worktree. Managed
-    /// environments keep their fixed-layout workspace contract, so they are
-    /// excluded from source-direct follow-ups.
+    /// directory directly instead of rebuilding a Graph worktree.
     fn source_direct_context(&self, node: &str) -> bool {
         if self
             .state

@@ -1356,13 +1356,13 @@ impl Environments {
         retained_env_refs: &std::collections::BTreeSet<String>,
         retained_launch_refs: &std::collections::BTreeSet<String>,
     ) -> Result<usize, String> {
-        let mut removed = self.files.prune_unreferenced(retained_env_refs)?;
-        // Verify all retained launches exist before pruning obsolete launch records.
+        // Preflight both record families before deleting either one.
         for launch_ref in retained_launch_refs {
             if !launch_ref.is_empty() && self.load_launch(launch_ref).is_err() {
-                return Ok(removed);
+                return Ok(0);
             }
         }
+        let mut removed = self.files.prune_unreferenced(retained_env_refs)?;
         let launches_dir = self.directory.join("launches");
         if let Some(dir) = real_child_path(&self.directory, &launches_dir, false)? {
             for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {

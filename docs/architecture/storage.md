@@ -79,9 +79,12 @@ via the same detached receipt queue into `.grapher-worktrees/.grapher-cleanup-<U
 retaining only slots needed for live work, recovery, feedback, bound fixed
 layouts, uninstalled publication journals, failed Mergers, or the immediately
 ready next private batch. Once a Graph Run settles, obsolete environment
-snapshots (`versions/`, `blobs/`, `launches/`) under `.grapher/environments/<run>/`
-that are unreachable from a current published result (or explicit baseline) are
-pruned automatically. Offline `--cleanup-workspaces` also supports
+captures (`versions/`, `blobs/`, `launches/`) under `.grapher/environments/<run>/`
+are pruned only when unreachable from recorded inputs/results, baselines,
+publication descriptors and inheritance evidence in both current state and
+append-only history. A later batch does not release historical E/L references.
+Retained launch records and environment manifests/ancestors are verified before
+pruning either record family; missing or damaged evidence blocks the sweep. Offline `--cleanup-workspaces` also supports
 `--stale-days DAYS` to preview and optionally reclaim abandoned incomplete Run
 workspace directories (preserving conversation history and source projects) and
 drains pending detached receipts on `--apply`.

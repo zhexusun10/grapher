@@ -1642,13 +1642,19 @@ fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_resu
             .unwrap();
     let work_a = source.parent().unwrap().join("env-work-a");
     fs::create_dir_all(work_a.join(".venv")).unwrap();
-    fs::write(work_a.join(".venv/stale.txt"), "stale-blob-content").unwrap();
+    fs::write(work_a.join(".venv/stale.txt"), "historical-input-content").unwrap();
     let files = crate::workspace_files::Files::environment(
         &env_dir.join("files"),
         &policy.scopes,
         &policy.caches,
     )
-    .unwrap();
+    .unwrap()
+    .with_project_index(false);
+    let historical_env_ref = Uuid::new_v4().to_string();
+    files
+        .capture(&work_a, &historical_env_ref, "head-input", &[])
+        .unwrap();
+    fs::write(work_a.join(".venv/stale.txt"), "stale-blob-content").unwrap();
     let stale_env_ref = Uuid::new_v4().to_string();
     files
         .capture(&work_a, &stale_env_ref, "head-stale", &[])
@@ -1698,9 +1704,20 @@ fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_resu
         default_entry: Some("default".into()),
     };
 
+    let mut historical_launch = policy.launch.clone();
+    historical_launch
+        .variables
+        .insert("HISTORY".into(), "input".into());
+    let historical_launch_ref = store.launch(&historical_launch).unwrap();
+    let historical = crate::environment::CompositeResult {
+        environment_ref: historical_env_ref.clone(),
+        launch_ref: historical_launch_ref.clone(),
+        ..descriptor.result.clone()
+    };
     let exec_id = Uuid::new_v4().to_string();
     let mut exec = execution(&runtime, &exec_id);
     exec.node = "task".into();
+    exec.input = Some(historical);
     runtime
         .emit(EventKind::Started {
             execution: exec,
@@ -1726,6 +1743,31 @@ fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_resu
         })
         .unwrap();
 
+    // A bad retained launch must prevent E deletion as well as L deletion.
+    let launch_path = env_dir.join("launches").join(format!("{launch_ref}.json"));
+    let launch_bytes = fs::read(&launch_path).unwrap();
+    fs::write(&launch_path, "damaged").unwrap();
+    assert_eq!(runtime.prune_stale_environment_snapshots().unwrap(), 0);
+    let stale_version = env_dir
+        .join("files/versions")
+        .join(format!("{stale_env_ref}.json"));
+    assert!(stale_version.is_file());
+    fs::write(&launch_path, launch_bytes).unwrap();
+
+    // A bad retained E must prevent launch pruning too.
+    let kept_version = env_dir
+        .join("files/versions")
+        .join(format!("{kept_env_ref}.json"));
+    let version_bytes = fs::read(&kept_version).unwrap();
+    fs::write(&kept_version, "damaged").unwrap();
+    assert!(runtime.prune_stale_environment_snapshots().is_err());
+    assert!(env_dir
+        .join("launches")
+        .join(format!("{stale_launch_ref}.json"))
+        .is_file());
+    assert!(stale_version.is_file());
+    fs::write(&kept_version, version_bytes).unwrap();
+
     // Case A: current published result stays intact; stale version, blob and launch are pruned.
     let removed = runtime.prune_stale_environment_snapshots().unwrap();
     assert!(removed >= 2);
@@ -1746,8 +1788,22 @@ fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_resu
         .join(format!("{stale_launch_ref}.json"))
         .exists());
 
-    // Case B: a later shared-source batch runs and settles, making the earlier
-    // published_result historical so all remaining snapshots can be pruned.
+    assert!(env_dir
+        .join("files/versions")
+        .join(format!("{historical_env_ref}.json"))
+        .is_file());
+    assert!(env_dir
+        .join("launches")
+        .join(format!("{historical_launch_ref}.json"))
+        .is_file());
+    files
+        .validate(std::slice::from_ref(&historical_env_ref))
+        .unwrap();
+    store.load_launch(&historical_launch_ref).unwrap();
+
+    // Case B: later source work cannot turn recorded input/publication evidence
+    // into garbage. Replace the descriptor so the earlier publication survives
+    // only in events, then replay the Run before sweeping again.
     runtime
         .emit(EventKind::ExecutionBatchStarted {
             nodes: vec!["task".into()],
@@ -1757,14 +1813,51 @@ fn completed_run_prunes_stale_environment_snapshots_while_keeping_published_resu
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "completed");
-    let removed_all = runtime.prune_stale_environment_snapshots().unwrap();
-    assert!(removed_all >= 2);
-    assert!(!env_dir
+    let mut newer_descriptor = runtime.state.published_result.clone().unwrap();
+    let input = runtime
+        .state
+        .executions
+        .last()
+        .unwrap()
+        .input
+        .clone()
+        .unwrap();
+    newer_descriptor.result = input.clone();
+    for entry in &mut newer_descriptor.entries {
+        entry.result = input.clone();
+    }
+    runtime
+        .emit(EventKind::ResultPublished {
+            descriptor: newer_descriptor,
+        })
+        .unwrap();
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(runtime.prune_stale_environment_snapshots().unwrap(), 0);
+    assert!(env_dir
         .join("files/versions")
         .join(format!("{kept_env_ref}.json"))
         .exists());
-    assert!(fs::read_dir(env_dir.join("files/blobs"))
+    files.validate(std::slice::from_ref(&kept_env_ref)).unwrap();
+    files
+        .validate(std::slice::from_ref(&historical_env_ref))
+        .unwrap();
+    store.load_launch(&historical_launch_ref).unwrap();
+    store.load_launch(&launch_ref).unwrap();
+    let restored = source
+        .parent()
         .unwrap()
-        .next()
-        .is_none());
+        .join("historical-environment-restored");
+    fs::create_dir_all(&restored).unwrap();
+    files
+        .materialize(
+            &restored,
+            std::slice::from_ref(&historical_env_ref),
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(restored.join(".venv/stale.txt")).unwrap(),
+        "historical-input-content"
+    );
 }
