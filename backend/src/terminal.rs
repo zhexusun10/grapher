@@ -7,10 +7,12 @@
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{sync_channel, SyncSender, TrySendError},

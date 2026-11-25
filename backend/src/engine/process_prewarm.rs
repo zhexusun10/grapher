@@ -53,7 +53,7 @@ pub(super) fn request(config: &Config, role: PiRole, refill: bool) {
     {
         return;
     }
-    if let Err(error) = schedule(config, role, refill) {
+    if let Err(error) = schedule(config, role, refill, Duration::from_secs(30)) {
         eprintln!(
             "[Grapher] {} process preparation unavailable: {error}",
             role.name()
@@ -61,7 +61,12 @@ pub(super) fn request(config: &Config, role: PiRole, refill: bool) {
     }
 }
 
-fn schedule(config: &Config, role: PiRole, refill: bool) -> Result<(), String> {
+fn schedule(
+    config: &Config,
+    role: PiRole,
+    refill: bool,
+    readiness_timeout: Duration,
+) -> Result<(), String> {
     // No model/session/resource state exists yet. Model or thinking changes
     // can reuse imports; role, project and auth invalidation still isolate hosts.
     let key = key(config)?;
@@ -78,7 +83,7 @@ fn schedule(config: &Config, role: PiRole, refill: bool) -> Result<(), String> {
         let process = ReadyProcess::start_with(
             &mut command,
             &ticket,
-            Duration::from_secs(30),
+            readiness_timeout,
             json!({"type":"grapher_prepare", "role":mode(role)}),
         )?;
         Ok((prepare_key, process))
@@ -178,12 +183,30 @@ pub(super) fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            invalidate();
+            for slot in [&PARTITIONER, &PLANNER, &NODE_SOURCE] {
+                if let Some(pool) = slot.get() {
+                    if !pool.wait_idle(Duration::from_secs(5)) {
+                        eprintln!("Prepared-role test cleanup did not settle");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn prepared_roles_are_project_scoped_and_model_selection_is_late_bound() {
         // No model request and no session construction: test the unbound host.
         let _guard = super::super::tests::lock_env();
         invalidate();
         let temp = tempfile::tempdir().unwrap();
+        // Cancel asynchronous preparation before removing its project or
+        // releasing the environment lock, including when an assertion fails.
+        let _cleanup = Cleanup;
         let repository = temp.path().join("repository");
         std::fs::create_dir(&repository).unwrap();
         let config = Config {
@@ -201,10 +224,18 @@ mod tests {
             role_models: Default::default(),
         };
         for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
-            schedule(&config, role, false).unwrap();
+            // This checks ownership and late binding, not cold-import latency.
+            // Concurrent native SDK imports can be slow on hosted Windows.
+            schedule(&config, role, false, Duration::from_secs(90)).unwrap();
         }
         for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
-            assert!(slot(role).get().unwrap().wait_idle(Duration::from_secs(30)));
+            // Include command construction, spawn, handshake and pool teardown;
+            // racing an outer wait against the same RPC deadline hides errors.
+            assert!(
+                slot(role).get().unwrap().wait_idle(Duration::from_secs(120)),
+                "{} preparation did not settle",
+                role.name(),
+            );
             let other = Config {
                 model: "example/other".into(),
                 ..config.clone()
@@ -213,7 +244,7 @@ mod tests {
                 assert!(claim(&config, role, temp.path()).is_none());
                 claim(&other, role, &repository)
             })
-            .expect("matching prepared role with a late-selected model");
+            .unwrap_or_else(|| panic!("{} was not ready with a late-selected model", role.name()));
             assert!(claim(&config, role, &repository).is_none());
             let (mut child, _tree, _, _) = process.commit();
             drop(child.stdin.take());
