@@ -290,7 +290,6 @@ export function createWorkspacePaths(
   // mapping that already redirects source paths into the current tree. Without
   // the source here, a denied source path would echo its physical location
   // instead of the model-visible `./...` spelling.
-  const aliases = [...new Set([...allWorkspaces, ...projectRoots].flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set(projectRoots.flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
   function replaceable(text, at, length) {

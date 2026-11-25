@@ -88,7 +88,11 @@ tracked-file conflicts fail. Windows case aliases and reserved names are checked
 New automatic launches inherit ordinary host business variables transiently,
 including proxy/certificate settings, package-manager configuration, credentials
 and Bash startup controls. They do not inherit an outer Agent's `GRAPHER_*`/`PI_*`
-identity. `NODE_OPTIONS`/`NODE_PATH` are transported transiently and applied only
+identity. Before private-HOME redirection replaces `HOME`/`USERPROFILE`, automatic
+policies and workspace environments also resolve existing host `$HOME/.rustup`
+(`RUSTUP_HOME`) and `$HOME/.cargo` (`CARGO_HOME`) directories outside the
+project/workspace root, while respecting any explicit host `RUSTUP_HOME`/`CARGO_HOME`
+override carried via ambient inheritance. `NODE_OPTIONS`/`NODE_PATH` are transported transiently and applied only
 to business Bash/result children, never to the trusted Node bootstrap, activation
 capture, extension/MCP factories or baseline probes. Explicit business-child
 settings still override those inherited defaults. Host Git overrides are cleared;
@@ -132,9 +136,9 @@ rewritten. Effective overrides/removals are respected; external paths, relative
 paths, startup expressions and Conda names stay unchanged. Arbitrary variable
 strings, `NODE_OPTIONS` contents and script bytes are not rewritten; this is not
 environment relocation. No host HOME/configuration tree is copied as a fallback.
-A PATH shim may still depend on missing HOME defaults: the offline project
+A PATH shim for tools other than the preserved host Rust toolchain may still depend on missing HOME defaults: the offline project
 [baseline and explicit setup guidance](../development/environment-baselines.md#private-home-discovery-is-not-mutable-state)
-reproduce this with real Rustup/Cargo. Tool discovery/configuration, per-slot
+reproduce this failure class with isolated Rustup/Cargo HOME settings. Tool discovery/configuration, per-slot
 writable state, cache and credential helpers are distinct inputs; there is no
 generic automatic host-config import. Rebuilding an existing fixed-layout private
 environment at another physical path is an explicit non-goal under the current
@@ -556,9 +560,13 @@ observed tool invocations, not arbitrary scripts, explicit executables or custom
 wrappers that bypass observation; the OS permission boundary is unchanged.
 
 Scopes support basic files/directories, Unix modes/Windows readonly and supported
-links. Special files, escaping directory links and nested Runtime/Git metadata
-are rejected; managed Unix trees also reject hardlinks and special permission
-bits. An unreadable or unresolvable link (for example a Windows reparse point
+links. Special files, escaping directory links and managed scopes that are themselves
+Git/Runtime metadata paths are rejected; managed Unix trees also reject hardlinks
+and special permission bits. Nested `.git` or `.grapher*` directories inside an
+otherwise valid managed scope (for example `$HOME/.grapher/pi-agent` or editable
+`.venv` git checkouts) cannot enter snapshot manifests and are skipped untouched
+with a log instead of failing the whole environment snapshot. Similarly, an
+unreadable or unresolvable link (for example a Windows reparse point
 whose target no longer resolves, such as Chrome's `INetCache\Content.IE5`) is
 skipped with a log instead of failing the whole snapshot: it has no content to
 inherit, the live entry is left untouched, and the rest of the scope still

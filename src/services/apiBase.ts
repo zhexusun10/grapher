@@ -306,13 +306,17 @@ export function resolveBackendBaseUrl(options?: {
   }
   if (!inFlightResolution) {
     const generation = ++resolutionGeneration;
-    publishDesktopState({
-      isDesktop: true,
-      phase: "connecting",
-      baseUrl: null,
-      error: null,
-      closed: false,
-    });
+    // Keep the visible desktop error state intact across background re-probes
+    // so polling does not flash a duplicate generic floating error banner.
+    if (desktopState.phase !== "error" || options?.forceRefresh) {
+      publishDesktopState({
+        isDesktop: true,
+        phase: "connecting",
+        baseUrl: null,
+        error: null,
+        closed: false,
+      });
+    }
     const task = invokeBackendUrl().then(
       baseUrl => {
         if (generation !== resolutionGeneration) return resolveBackendBaseUrl();

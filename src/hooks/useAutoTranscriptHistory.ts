@@ -22,12 +22,21 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
   const load = useStableCallback(loadOlder);
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
+  const filledInitialRef = useRef(false);
   const measuredViewportRef = useRef("");
   const busyRetryRef = useRef<number | null>(null);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const holdingOlderRef = useRef(holdingOlder);
+  holdingOlderRef.current = holdingOlder;
+  const olderSourceRef = useRef(olderSource);
+  olderSourceRef.current = olderSource;
   // The prompt or an earlier turn is already in the DOM above a partially
   // loaded transcript. A fast fling can cross that gap before the page arrives,
   // briefly exposing content that is not actually adjacent to the loaded rows.
   // Treat the missing page as a temporary scroll boundary, not as empty history.
+  // Keep busy/holdingOlder/olderSource in refs so a sibling scroll listener
+  // starting an older-page load cannot remove and re-add this listener mid-event.
   useLayoutEffect(() => {
     const element = ref.current;
     const parent = transcriptScrollParent(element);
@@ -51,7 +60,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
     const containMissingHistory = () => {
       if (element.closest("[data-transcript-staged='true']") || parent.dataset.transcriptScrollMode === "latest" ||
           (parent.dataset.transcriptHistoryReading !== "true" && performance.now() - lastGesture > 1000)) return;
-      const top = olderInsertionTop(element, olderSource);
+      const top = olderInsertionTop(element, olderSourceRef.current);
       if (top === null) return;
       const overshoot = top - parent.getBoundingClientRect().top - parent.clientTop;
       if (overshoot <= 1) return;
@@ -61,7 +70,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       if (parent.scrollTop + overshoot > parent.scrollHeight - parent.clientHeight + 1) return;
       parent.scrollTop += overshoot;
       parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
-      if (!busy && !holdingOlder) load(true);
+      if (!busyRef.current && !holdingOlderRef.current) load(true);
     };
     parent.addEventListener("scroll", containMissingHistory, { passive: true });
     parent.addEventListener("wheel", noteGesture, { passive: true });
@@ -75,7 +84,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       parent.removeEventListener("pointerdown", noteGesture);
       parent.removeEventListener("keydown", noteGesture);
     };
-  }, [ref, ready, hasOlder, error, busy, holdingOlder, olderSource, load]);
+  }, [ref, ready, hasOlder, error, load]);
   useLayoutEffect(() => {
     if (!ready) { measuredViewportRef.current = ""; return; }
     const element = ref.current;
@@ -121,7 +130,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         // cards shrink height below two viewports.
         const needsFill = needsInitialTranscriptFill(element, hasOlder, error);
         const withinBudget = budget.remaining >= 4;
-        const scrolledAway = initialReadyRef.current &&
+        const scrolledAway = filledInitialRef.current &&
           parent.scrollHeight - parent.scrollTop - parent.clientHeight > CONVERSATION_BOTTOM_THRESHOLD;
         // A prefetched page may be waiting for the reader to reach its
         // insertion point. It is not an in-flight fill: retrying it on every
@@ -131,6 +140,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
           load(readingNearTop || scrolledAway);
           return;
         }
+        if (loadedBytes > 0 && !needsFill) filledInitialRef.current = true;
         if (!initialReadyRef.current) {
           // Check sufficiency on consecutive frames: the virtualizer may replace
           // estimated padding with shorter measured rows in a microtask. Don't

@@ -117,8 +117,11 @@ or unisolated acceptance.
 
 ## Private HOME: discovery is not mutable state
 
-The Cargo case demonstrates a general failure class: retaining a tool shim on
-PATH does not retain the configuration the shim normally finds through HOME.
+Automatic Runtime policies now preserve existing host `RUSTUP_HOME`/`CARGO_HOME`
+directories (outside the workspace) before private-HOME redirection, but the
+Cargo baseline intentionally isolates `HOME`, `RUSTUP_HOME`, and `CARGO_HOME` to
+demonstrate the broader failure class: retaining a tool shim on PATH does not
+retain the configuration the shim normally finds through HOME.
 The probe queries `rustup default` with private HOME/RUSTUP_HOME/CARGO_HOME and
 records its exit status, stdout and diagnostic. A missing default is a real
 failure mode even though the host can build; Homebrew's wrapper can instead

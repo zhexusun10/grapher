@@ -11,7 +11,12 @@ import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs
 
 function spawnInherited(command, args, env) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { cwd: root, env, stdio: 'inherit' });
+    const child = spawn(command, args, {
+      cwd: root,
+      env,
+      stdio: 'inherit',
+      shell: process.platform === 'win32' && /\.cmd$/i.test(command),
+    });
     const forward = signal => {
       if (process.platform === 'win32' && child.pid) {
         try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}

@@ -4532,3 +4532,70 @@ for (const cardsCollapsed of [false, true]) {
     }
   });
 }
+
+test("toggling node agent session details does not jitter the paused/error banner below it", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    await route.fulfill({
+      json: {
+        result: {
+          runId: body.runId,
+          executionId: body.executionId,
+          content: `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Worker reply before pause." }] } })}\n`,
+          startOffset: 0,
+          nextOffset: 100,
+          totalBytes: 100,
+          complete: true,
+          status: "failed",
+        },
+      },
+    });
+  }, "no-preference");
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    const toggle = page.locator(".workspace-details-trigger").first();
+    await toggle.waitFor();
+    await page.evaluate(() => {
+      const details = document.querySelector(".workspace-details");
+      if (details && !document.querySelector(".node-error")) {
+        const banner = document.createElement("div");
+        banner.className = "node-error";
+        banner.textContent = "Execution paused";
+        details.insertAdjacentElement("afterend", banner);
+      }
+    });
+    const measureJitter = async () => {
+      await page.evaluate(() => {
+        window.__bannerSamples = [];
+        window.__samplingBanner = true;
+        const tick = () => {
+          const el = document.querySelector(".node-error");
+          if (el) window.__bannerSamples.push(el.getBoundingClientRect().top);
+          if (window.__samplingBanner) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      await toggle.click();
+      await page.waitForTimeout(360);
+      return page.evaluate(() => {
+        window.__samplingBanner = false;
+        return window.__bannerSamples;
+      });
+    };
+    const expandSamples = await measureJitter();
+    assert.ok(expandSamples.length > 4, "expected multiple frames during expand");
+    for (let i = 1; i < expandSamples.length; i++) {
+      assert.ok(expandSamples[i] >= expandSamples[i - 1] - 0.5,
+        `banner jittered upward during expand: ${JSON.stringify(expandSamples)}`);
+    }
+    const collapseSamples = await measureJitter();
+    assert.ok(collapseSamples.length > 4, "expected multiple frames during collapse");
+    for (let i = 1; i < collapseSamples.length; i++) {
+      assert.ok(collapseSamples[i] <= collapseSamples[i - 1] + 0.5,
+        `banner jittered downward during collapse: ${JSON.stringify(collapseSamples)}`);
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});

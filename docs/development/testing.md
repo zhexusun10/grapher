@@ -206,199 +206,31 @@ for the no-venv-relocation boundary. This is a Runtime component check, not nati
 sandbox acceptance or a claim that paths embedded in copied configuration relocate.
 The ordinary environment library suite includes these tests.
 
-## Offline project environment baseline (opt-in)
+## Opt-in baselines and microbenchmarks
+
+All probes below are explicitly opt-in (`#[ignore]`), run in Cargo's test profile with disposable fixtures, make no model calls, enforce no timing thresholds, and are local component measurements—not native sandbox acceptance or end-to-end Run latency claims:
 
 ```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_project_baseline -- --ignored --nocapture --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib <filter> -- --ignored --nocapture --test-threads=1
 ```
 
-[Procedures and report definitions](environment-baselines.md) cover offline
-Node/npm, real Python venv/PEP-517/uv and Rustup/Cargo projects, source drift,
-concurrent forks, composition, managed E capture/materialization and storage
-amplification. Missing uv is explicitly NOT RUN unless required (CI requires it).
-This component probe does not run a native sandbox, validate host compatibility
-or gate publication. Failed profiles retain diagnostics and completed measurements
-before failing; missing phases are not validated. Native boundary/lifecycle
-acceptance remains separate below.
-
-For the narrower dirty managed-state preflight/materialization cost, without
-project Git preparation:
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib managed_recovery_preflight_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-Its synthetic distributions and measurement limits are documented in
-[the baseline procedure](environment-baselines.md#managed-dirty-view-recovery-cost-opt-in).
-Use `--lib workspace_files::tests` for regressions covering read-only successful
-and refused preflight, same-size/mtime blob corruption and legacy restoration.
-
-## Immutable dependency sealing comparison (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_dependency_sealing_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[Procedure and limits](environment-baselines.md#immutable-dependency-sealing-optimization)
-cover no-op/changed E capture, duplicate dependencies, concurrent writers and
-store growth versus a test-only unbatched reference. `GRAPHER_ENV_SEAL_PROBE_REPORT`
-can retain a new JSON report. There are no timing thresholds or native sandbox
-claims. Use the existing `--lib workspace_files::tests` and
-`--lib environment::snapshot_tests` checks for full-byte, scope/mode, legacy,
-corruption/missing-history and append-only generation-record regressions. The
-real Python baseline separately asserts three no-op seals have zero store growth
-and restores both captured and explicitly patched installed dependencies.
-
-## Workspace staging microbenchmark (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib staging_bench::delta_index_staging -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/graph_merge/publication/staging_bench.rs) creates disposable
-repositories with 64 and 50,000 result paths, then compares warm full-index and
-delta-index staging for a small delta, plus an all-files-changed case on the small
-repository. It checks staged bytes and index entries, and reports time and index
-size without timing thresholds. This does **not** measure
-source collection, composition, atomic delivery or end-to-end Run latency.
-
-## Workspace view equality microbenchmark (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib view_equality_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The comparison probe](../../backend/src/workspace_view/equality_tests.rs) measures
-legacy normalized-JSON equality against borrowed-field equality on 5,000 project
-and 1,000 Git metadata entries, including a late difference. It excludes filesystem
-scanning and checksum computation. The adjacent differential tests pin the
-schema-5 serializer/checksum and cover schema-6 ACL/path identity separately.
-
-## Workspace view normalization probe (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib view_normalization_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/workspace_view/equality_tests.rs) compares the
-legacy full-JSON construction, the previous borrowed-projection/JSON-DOM path,
-and direct borrowed serialization. Cases include empty, ordinary and large
-security descriptors; every output must match
-byte-for-byte. Five warm samples alternate order and report medians in Cargo's
-test profile. The adjacent differential tests cover serialized scalars, variants,
-optional fields, nested repositories and legacy owners, and pin the historical
-checksum and full stored JSON. Current-schema tests also reject ACL corruption
-while loading legacy records without rewriting them. Native ACL-only snapshot,
-fork and composition checks on Windows/macOS use `--lib workspace_view::acl_tests`.
-This measures in-memory normalization only, not
-filesystem scans, object staging or end-to-end task latency.
-
-## Native project-index flag batching probe (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib index_flag_batching_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/workspace_git_index_tests.rs) compares the former
-per-path Git flag updates with batched restoration on 65/257 index entries,
-including zero-flag and mixed assume-unchanged/skip-worktree cases. Three warm
-samples alternate order, resetting the disposable index outside the timed region
-and independently checking all resulting paths, modes, object IDs and flags.
-It measures flag restoration only, not scanning, staged-object transfer, full
-composition, publication or end-to-end handoff latency; there are no timing
-assertions. Adjacent SHA-1/SHA-256 regressions cover literal unusual paths,
-intent-to-add combinations, deleted intent paths and their recorded executable/
-link modes, `core.ignorestat` flag injection, staged binary content, deletions,
-flag clearing, intent-only changes on a committed empty blob, sparse-checkout
-selection, foreign index locks during initial copying as well as flag updates,
-copy failure/absent-index recovery, byte-exact case/Unicode aliases and aliased
-directory prefixes under `core.ignorecase`, unchanged input indexes and retry. The
-[workspace-view regressions](../../backend/src/workspace_view_tests.rs) also
-exercise deleted, case-aliased intent-to-add through snapshot, fan-in, publication
-and follow-up preparation without recreating the missing project files.
-
-## Workspace scan and staging phase probes (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib scan_bench::file_scanning_benchmark -- --ignored --nocapture --test-threads=1
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib scan_bench::snapshot_staging_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The disposable-fixture probes](../../backend/src/workspace_view/scan_bench.rs)
-compare the former fixed file-count partitions with the production collector.
-The scan cases cover below-threshold projects, uniform small files, clustered
-or scattered large files, and one dominant large file. Each strategy performs
-fresh content/metadata reads; full serialized entries must match. Five warm
-samples alternate strategy order and report median file-resolution time, with
-walk/enumeration time reported separately. The staging probe reports fresh-scan
-and warm object/index-staging times separately for 64 files in SHA-1 and SHA-256
-repositories, checking that each repeat produces the same tree.
-
-These are local component measurements in Cargo's test profile, not cold-cache
-or end-to-end preparation/handoff/publication speedups. Below-threshold scans
-use the same sequential code in both strategies, so small differences there
-are measurement noise. There are no timing assertions or production diagnostics.
-
-## SHA-256 blob batching probe (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib sha256_blob_batching_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/workspace_view/sha256_stage_bench.rs) retains the
-former per-file implementation as a test-only reference. Separate disposable
-SHA-256 object stores compare a singleton, 64/256 small files, and mixed small
-files with larger streaming inputs. It checks identical result trees after each
-operation, reports empty-object-store timings and three alternating warm samples
-per strategy, and excludes fixture creation and the independent initial scan.
-File caches are already warm even for the empty-store measurements. This is a
-staging-component measurement in Cargo's test profile, not an end-to-end speedup.
-
-[Focused regressions](../../backend/src/workspace_view/sha256_stage_tests.rs)
-cover raw binary/protocol-looking bytes, path/mode preservation, batch limits,
-pre/post-import changes, malformed/failed/null-OID imports, unchanged Git evidence,
-Windows byte-exact executable-bit inheritance, and retry. `publication_recovery` also covers SHA-256 packed-object delivery without
-source-Git leakage and SHA-1/SHA-256 partial-checkout recovery.
-
-## Workspace cleanup lock probe (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib workspace_cleanup_lock_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/cleanup_bench.rs) creates disposable completed Runs
-with 64, 5,000 and 20,000 small files. It compares synchronous cleanup under the
-Run mutex with durable directory retirement followed by out-of-lock deletion.
-Three fresh fixtures per strategy alternate order and report medians for Run-lock
-hold time, a concurrent metadata reader's wait, and cleanup total time (including
-deletion for both strategies). Source sentinels and session history must survive,
-and all detached receipts must be drained. It performs no model calls and touches
-no retained user workspace. This is a local test-profile filesystem/lock probe,
-not an HTTP, provider or end-to-end task benchmark. Lower lock/read latency does
-not imply faster physical deletion; there are no timing assertions.
-
-## File-change persistence lock probe (opt-in)
-
-```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib file_summary_persistence_benchmark -- --ignored --nocapture --test-threads=1
-```
-
-[The probe](../../backend/src/file_changes/persistence_bench.rs) seeds temporary
-sidecars and cache entries for 4×20, 20×500 and 40×1,250 execution/path pairs,
-with overlapping log/Git summaries and an unloaded historical execution. Three
-samples alternate the former locked-merge algorithm and the production snapshot/
-merge helpers, resetting the prior sidecar each time. It reports cache-copy time,
-global cache-lock hold time, an unrelated cache reader's wait, and processing
-through sidecar publication. All serialized results must match byte-for-byte,
-including the actual `persist_run` entry point. This local test-profile probe
-makes no model calls and changes no retained user data. It does not measure
-HTTP latency or end-to-end node completion; lower global lock contention does
-not imply that full-sidecar read/serialization/write costs disappeared. There
-are no timing assertions.
+| `--lib` filter | Source | Scope and limits |
+| --- | --- | --- |
+| `environment_project_baseline` | [environment_probe.rs](../../backend/src/workspace_view/environment_probe.rs) | Offline Node/npm, Python venv/PEP-517/uv, and Rustup/Cargo baseline (source drift, forks, composition, managed E sealing/materialization, storage ratios). Missing `uv` is `NOT RUN` unless required. See [environment-baselines.md](environment-baselines.md). |
+| `managed_recovery_preflight_benchmark` | [environment_probe.rs](../../backend/src/workspace_view/environment_probe.rs) | Dirty managed-state preflight/materialization cost without project Git preparation; see [managed dirty-view recovery](environment-baselines.md#managed-dirty-view-recovery-cost-opt-in). |
+| `environment_dependency_sealing_benchmark` | [seal_tests.rs](../../backend/src/workspace_files/seal_tests.rs) | No-op/changed E capture, duplicate dependencies, concurrent writers, and store growth (`GRAPHER_ENV_SEAL_PROBE_REPORT`); see [sealing optimization](environment-baselines.md#immutable-dependency-sealing-optimization). |
+| `staging_bench::delta_index_staging` | [staging_bench.rs](../../backend/src/graph_merge/publication/staging_bench.rs) | Warm full-index vs. delta-index staging on 64 and 50,000 paths (excludes source collection, composition, and atomic delivery). |
+| `view_equality_benchmark` | [equality_tests.rs](../../backend/src/workspace_view/equality_tests.rs) | Legacy normalized-JSON vs. borrowed-field equality on 5,000 project + 1,000 Git metadata entries (excludes scanning/checksums). |
+| `view_normalization_benchmark` | [equality_tests.rs](../../backend/src/workspace_view/equality_tests.rs) | Legacy JSON DOM vs. direct borrowed serialization for schema-6 checksums (in-memory only; use `--lib workspace_view::acl_tests` for native ACL regressions). |
+| `index_flag_batching_benchmark` | [workspace_git_index_tests.rs](../../backend/src/workspace_git_index_tests.rs) | Per-path vs. batched Git index flag restoration on 65/257 entries (flag restoration only; adjacent tests cover SHA-1/SHA-256 intent-to-add, sparse checkout, and case aliases). |
+| `scan_bench::file_scanning_benchmark`, `scan_bench::snapshot_staging_benchmark` | [scan_bench.rs](../../backend/src/workspace_view/scan_bench.rs) | Parallel regular-file scanning and SHA-1/SHA-256 object/index staging on disposable fixtures (warm caches only). |
+| `sha256_blob_batching_benchmark` | [sha256_stage_bench.rs](../../backend/src/workspace_view/sha256_stage_bench.rs) | Per-file vs. batched `fast-import` SHA-256 blob staging (adjacent [sha256_stage_tests.rs](../../backend/src/workspace_view/sha256_stage_tests.rs) covers correctness/limits). |
+| `workspace_cleanup_lock_benchmark` | [cleanup_bench.rs](../../backend/src/cleanup_bench.rs) | Run-lock hold time and concurrent reader wait for synchronous vs. detached out-of-lock cleanup on 64–20,000 files (lower lock wait does not imply faster disk deletion). |
+| `file_summary_persistence_benchmark` | [persistence_bench.rs](../../backend/src/file_changes/persistence_bench.rs) | Global cache-lock hold time and reader wait for file-change sidecar persistence on 4×20 to 40×1,250 execution/path pairs. |
 
 ## Broader suites (on demand)
 
-[test-suites.mjs](../../scripts/test-suites.mjs) owns the exact composition; `npm run test:<suite> -- --list` previews it. These are available tools, not completion requirements.
+[test-suites.mjs](../../scripts/test-suites.mjs) owns the exact composition; pass `-- --list` to any `test:*` script in `package.json` to preview its commands. These are available tools, not completion requirements.
 
 | Script | Scope / prerequisites |
 | --- | --- |
@@ -416,6 +248,7 @@ are no timing assertions.
 | `test:hardening`, `test:windows-native`, `test:macos-browser` | Production HTTP/filesystem or host-specific acceptance; macOS browser acceptance also needs a browser. |
 | `test:concurrent` | Fixture HTTP concurrency; needs `/bin/sh`, skipped on Windows. |
 | `test:conversation-acceptance` | Current-format logs, restart and browser acceptance; see [prerequisites](conversation-logs.md#acceptance-prerequisites). |
+| `test:build-cache`, `test:release`, `test:desktop` | Temporary Cargo target isolation (`build-cache`), release launcher/updater/signing contracts (`release`), and full Tauri v2 desktop shell/migration/packaging suite (`desktop`). |
 
 Native suites need the real [platform boundary](../architecture/filesystem-isolation.md#platform-boundaries): bubblewrap/permitted namespaces on Linux, Seatbelt on macOS. Windows environment tests accept `GRAPHER_ENV_TEST_PARENT` for a short path. Environment-native, environment-chain and node-Merger fixtures seed historical runs to test retained private-workspace compatibility; new adaptive behavior lives in workspace-policy/batch tests and shared-native acceptance.
 

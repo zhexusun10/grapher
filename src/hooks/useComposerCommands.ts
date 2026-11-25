@@ -5,6 +5,7 @@ import type { ThinkingLevel } from "../types";
 import { providerAuth } from "../services/providerAuth";
 import { piExtensions } from "../services/piExtensions";
 import { runtimeService } from "../services/runtime";
+import { copyTextToClipboard } from "../services/externalLink";
 import { createUuid } from "../lib/uuid";
 import { blockedCommands, ComposerModels, mergeCommands, parseSlashCommand, type ExtensionUIRequest, type PiCommandCatalog } from "../services/composerCommands";
 
@@ -324,8 +325,8 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       if (isCurrent() && command.name === "copy") {
         const value = (result as { text?: string | null })?.text;
         if (!value) throw new Error(t("当前会话还没有可复制的回复。"));
-        if (!navigator.clipboard?.writeText) throw new Error(t("复制提示词失败，请检查剪贴板权限。"));
-        await navigator.clipboard.writeText(value);
+        const copied = await copyTextToClipboard(value);
+        if (!copied) throw new Error(t("复制提示词失败，请检查剪贴板权限。"));
         if (isCurrent()) showNotice(t("已复制"), AUTO_DISMISS_NOTICE_MS);
       }
       return editorChanged || !isCurrent() ? "menu" : "handled";

@@ -122,6 +122,43 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
             caches.push(".agent-home/Library/Caches".to_string());
         }
     }
+    let mut variables = BTreeMap::from([
+        ("HOME".into(), "{state}/.agent-home".into()),
+        ("USERPROFILE".into(), "{state}/.agent-home".into()),
+        (
+            "APPDATA".into(),
+            "{state}/.agent-home/AppData/Roaming".into(),
+        ),
+        (
+            "LOCALAPPDATA".into(),
+            "{state}/.agent-home/AppData/Local".into(),
+        ),
+        (
+            "XDG_CONFIG_HOME".into(),
+            "{state}/.agent-home/.config".into(),
+        ),
+        (
+            "XDG_DATA_HOME".into(),
+            "{state}/.agent-home/.local/share".into(),
+        ),
+        ("XDG_CACHE_HOME".into(), "{state}/.runtime-cache/xdg".into()),
+        (
+            "npm_config_cache".into(),
+            "{state}/.runtime-cache/npm".into(),
+        ),
+        ("PIP_CACHE_DIR".into(), "{state}/.runtime-cache/pip".into()),
+        ("CONDA_ENVS_PATH".into(), "{state}/.environments".into()),
+        (
+            "CONDA_PKGS_DIRS".into(),
+            "{state}/.runtime-cache/conda".into(),
+        ),
+        ("PYTHONUTF8".into(), "1".into()),
+        ("PYTHONIOENCODING".into(), "utf-8".into()),
+        ("CONDA_ALWAYS_COPY".into(), "true".into()),
+    ]);
+    for (key, path) in native::host_rust_toolchain_variables(Some(&source)) {
+        variables.insert(key.into(), path.to_string_lossy().into_owned());
+    }
     let config = EnvironmentConfig {
         mode: "native-workspace".into(),
         platform: environment::platform().into(),
@@ -135,40 +172,7 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
             shell: text(&shell),
             unbound_path: Some(path.clone()),
             path,
-            variables: BTreeMap::from([
-                ("HOME".into(), "{state}/.agent-home".into()),
-                ("USERPROFILE".into(), "{state}/.agent-home".into()),
-                (
-                    "APPDATA".into(),
-                    "{state}/.agent-home/AppData/Roaming".into(),
-                ),
-                (
-                    "LOCALAPPDATA".into(),
-                    "{state}/.agent-home/AppData/Local".into(),
-                ),
-                (
-                    "XDG_CONFIG_HOME".into(),
-                    "{state}/.agent-home/.config".into(),
-                ),
-                (
-                    "XDG_DATA_HOME".into(),
-                    "{state}/.agent-home/.local/share".into(),
-                ),
-                ("XDG_CACHE_HOME".into(), "{state}/.runtime-cache/xdg".into()),
-                (
-                    "npm_config_cache".into(),
-                    "{state}/.runtime-cache/npm".into(),
-                ),
-                ("PIP_CACHE_DIR".into(), "{state}/.runtime-cache/pip".into()),
-                ("CONDA_ENVS_PATH".into(), "{state}/.environments".into()),
-                (
-                    "CONDA_PKGS_DIRS".into(),
-                    "{state}/.runtime-cache/conda".into(),
-                ),
-                ("PYTHONUTF8".into(), "1".into()),
-                ("PYTHONIOENCODING".into(), "utf-8".into()),
-                ("CONDA_ALWAYS_COPY".into(), "true".into()),
-            ]),
+            variables,
             inherit: vec![
                 "CONDA_ENVS_PATH".into(),
                 "CONDA_PKGS_DIRS".into(),
@@ -176,6 +180,8 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
                 "CONDA_PREFIX".into(),
                 "CONDA_DEFAULT_ENV".into(),
                 "CONDA_SHLVL".into(),
+                "RUSTUP_HOME".into(),
+                "CARGO_HOME".into(),
             ],
             inherit_ambient: true,
             managed_scopes: vec![],
@@ -514,5 +520,21 @@ mod tests {
         files
             .capture(&state, &version, &"0".repeat(40), &[])
             .unwrap();
+    }
+
+    #[test]
+    fn automatic_policy_carries_existing_host_rust_toolchain_homes() {
+        let source = project();
+        let policy = resolve(source.path(), false).unwrap().0.unwrap();
+        assert!(policy.launch.inherit.iter().any(|key| key == "RUSTUP_HOME"));
+        assert!(policy.launch.inherit.iter().any(|key| key == "CARGO_HOME"));
+        let expected = native::host_rust_toolchain_variables(Some(source.path()));
+        for (key, path) in expected {
+            assert_eq!(
+                policy.launch.variables.get(key).map(String::as_str),
+                Some(path.to_string_lossy().as_ref()),
+                "missing or mismatched {key}"
+            );
+        }
     }
 }

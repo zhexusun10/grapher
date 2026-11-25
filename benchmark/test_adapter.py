@@ -41,13 +41,13 @@ class AdapterTests(unittest.TestCase):
             config = config_for(repo, "anthropic/sonnet", "low", 2)
             self.assertTrue(config["autoApprove"])
             self.assertEqual(config["maxFeedback"], 3)
-            client = FakeClient(state("awaiting_approval", approved=False),
-                                [state("running"), state("completed")])
+            client = FakeClient(state("running"), [state("completed")])
             finished = run_goal(client, "Build the feature", config, 2, 0)
             self.assertEqual(finished["phase"], "completed")
             self.assertEqual(client.calls[0], ("plan_goal", {"goal": "Build the feature", "config": config}))
-            self.assertEqual(client.calls[1], ("control", {"action": "approve"}))
-            self.assertEqual(client.calls[2][0], "snapshot")
+            self.assertEqual(client.calls[1][0], "snapshot")
+            with self.assertRaisesRegex(RuntimeError, "awaiting_approval"):
+                run_goal(FakeClient(state("awaiting_approval", approved=False)), "Build the feature", config, 2, 0)
 
     def test_plan_failure_never_retries_as_serial(self):
         class FailingClient(FakeClient):

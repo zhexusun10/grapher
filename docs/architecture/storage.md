@@ -116,7 +116,7 @@ completion's critical section; it does not promise faster disk deletion or chang
 node dependencies, publication ordering, or source-edit permissions. Evidence:
 [receipt/recovery tests](../../backend/src/cleanup/detached_tests.rs),
 [maintenance integration](../../backend/src/detached_cleanup_service_tests.rs),
-and the opt-in [lock probe](../development/testing.md#workspace-cleanup-lock-probe-opt-in).
+and the opt-in [lock probe](../development/testing.md#opt-in-baselines-and-microbenchmarks).
 
 ## Workspace removal transaction
 

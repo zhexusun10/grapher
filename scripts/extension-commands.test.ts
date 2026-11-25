@@ -157,3 +157,9 @@ test('bundled pi-better-web-search login, status, and api menu work over Grapher
   await poll(host, apiStart, state => state.status === 'complete');
   assert.equal(existsSync(join(paths.own, 'sessions')), false);
 }));
+
+test('failed worker spawn settles catalog and close without hanging', { timeout: 15_000 }, () => fixture(async (host, paths) => {
+  const missingRepo = join(paths.own, 'does-not-exist-repo');
+  await assert.rejects(host.dispatch({ operation: 'catalog', repository: missingRepo }), /Extension command worker stopped|disconnected/);
+  await host.close();
+}));

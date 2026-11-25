@@ -38,7 +38,7 @@
   width: 100%;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
-  padding: 24px 20px calc(var(--composer-height, 100px) + 20px);
+  padding: 24px 20px calc(var(--composer-height, 100px) + 16px);
 }
 
 .conversation-pane.full-width .chat-messages-stream,
@@ -230,8 +230,8 @@
   max-width: calc(100% - 4px);
   box-sizing: border-box;
   border-radius: 8px;
-  border: 1px solid rgba(139, 92, 246, 0.2);
-  background: rgba(139, 92, 246, 0.032);
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
   overflow: hidden;
   /* Same row rhythm as the tool card: the list gap owns the vertical space. */
   margin: 0 2px;
@@ -240,7 +240,7 @@
 
 .thinking-card.streaming {
   border-color: rgba(139, 92, 246, 0.4);
-  background: rgba(139, 92, 246, 0.048);
+  background: var(--bg-canvas);
   box-shadow: 0 0 16px rgba(139, 92, 246, 0.1), inset 0 1px 0 rgba(139, 92, 246, 0.13);
 }
 
@@ -255,12 +255,8 @@
   padding: 8px 12px;
   cursor: pointer;
   user-select: none;
-  background: rgba(139, 92, 246, 0.036);
+  background: transparent;
   font-size: 12.5px;
-}
-
-.thinking-card-header:hover {
-  background: rgba(139, 92, 246, 0.062);
 }
 
 .thinking-header-left {
@@ -284,7 +280,7 @@
 .thinking-icon-box {
   width: 14px;
   height: 14px;
-  color: #7c3aed;
+  color: #8b5cf6;
   display: grid;
   place-items: center;
   flex-shrink: 0;
@@ -297,7 +293,6 @@
 }
 
 .thinking-icon-box.pulse {
-  color: #6d28d9;
   animation: thinking-glow 2s infinite alternate;
 }
 
@@ -337,7 +332,7 @@
 }
 
 .thinking-status.streaming {
-  color: #7c3aed;
+  color: #8b5cf6;
   background: rgba(139, 92, 246, 0.12);
   font-weight: 500;
 }
@@ -346,7 +341,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #7c3aed;
+  background: #8b5cf6;
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
@@ -393,12 +388,6 @@
   background: var(--bg-surface-hover);
 }
 
-.thinking-toggle-btn {
-  color: var(--text-secondary);
-  display: grid;
-  place-items: center;
-}
-
 .thinking-card-body {
   padding: 10px 14px;
   font-size: 12.5px;
@@ -415,21 +404,27 @@
      vertical edges. Horizontal overflow remains contained when present. */
   overscroll-behavior-y: auto;
   overscroll-behavior-x: contain;
-  border-top: 1px solid rgba(139, 92, 246, 0.09);
-  background: #fdfdfe;
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-canvas);
 }
 
 .thinking-card-body .thinking-markdown,
 .tool-call-body {
-  color: #334155;
+  color: var(--text-primary);
 }
 
 .thinking-card-body .thinking-markdown p {
-  margin: 6px 0;
-  color: #334155;
+  margin: 0 0 6px;
+  color: var(--text-primary);
 }
 
-.thinking-card-body .thinking-markdown p:last-child {
+.thinking-card-body .thinking-markdown > :first-child {
+  margin-top: 0;
+}
+
+.thinking-card-body .thinking-markdown > :last-child,
+.thinking-card-body .thinking-markdown > ul:last-child > li:last-child,
+.thinking-card-body .thinking-markdown > ol:last-child > li:last-child {
   margin-bottom: 0;
 }
 
@@ -437,9 +432,9 @@
   font-size: 12px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(139, 92, 246, 0.08);
-  color: #6d28d9;
-  border: 1px solid rgba(139, 92, 246, 0.18);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
 }
 
 .thinking-card-body .thinking-markdown pre {
@@ -453,7 +448,7 @@
 }
 
 .thinking-card-body .thinking-markdown pre code {
-  color: #1e293b;
+  color: var(--text-primary);
   background: transparent;
   border: none;
   padding: 0;
@@ -524,11 +519,6 @@
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
-}
-
-.transcript-row.thinking-row {
-  width: 100%;
-  margin-bottom: 10px;
 }
 
 .transcript-row.tool-row {
@@ -773,7 +763,7 @@ button.transcript-error-toggle {
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--brand-subtle);
-  color: var(--brand-default);
+  color: var(--text-primary);
   border: 1px solid var(--brand-border);
   white-space: nowrap;
 }
@@ -1693,18 +1683,6 @@ button.transcript-error-toggle {
   flex: 0 0 auto;
 }
 
-.pi-auth-icon-badge {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: var(--brand-subtle);
-  color: var(--brand-default);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
 .pi-auth-main-title {
   display: flex;
   align-items: center;
@@ -2007,10 +1985,6 @@ button.transcript-error-toggle {
   gap: 8px;
   font-size: 13px;
   color: var(--text-primary);
-}
-
-.configured-key-icon {
-  color: var(--status-success-strong);
 }
 
 .configured-list {

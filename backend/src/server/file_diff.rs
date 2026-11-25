@@ -301,11 +301,12 @@ fn resolve_file_diff(
     status: Option<&str>,
 ) -> Result<ParsedFileDiff, String> {
     if let Some(ids) = scope {
-        let selected: Vec<&DiffExecution> = context
+        let mut selected: Vec<&DiffExecution> = context
             .executions
             .iter()
             .filter(|exec| ids.contains(&exec.id))
             .collect();
+        selected.sort_by_key(|exec| exec.started_at);
         // Prefer live working-tree diff on a running attempt, then the full
         // before..after span across attempts, then individual attempts newest-first.
         if let Some(running) = selected.iter().rev().find(|exec| exec.status == "running") {
@@ -471,13 +472,25 @@ pub(super) fn get_file_diff(
         .unwrap_or_default();
 
     let context = {
-        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-        let state = if requested_run_id.is_empty() || runtime.state.run_id == requested_run_id {
-            runtime.state.clone()
-        } else {
-            runtime.store.load(&requested_run_id)?
+        let (active_context, root) = {
+            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+            if requested_run_id.is_empty() || runtime.state.run_id == requested_run_id {
+                (
+                    Some(build_diff_context(&runtime.state, runtime.root.clone())),
+                    PathBuf::new(),
+                )
+            } else {
+                (None, runtime.root.clone())
+            }
         };
-        build_diff_context(&state, runtime.root.clone())
+        match active_context {
+            Some(context) => context,
+            None => {
+                let store = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+                let state = store.load(&requested_run_id)?;
+                build_diff_context(&state, root)
+            }
+        }
     };
 
     let parsed = resolve_file_diff(
@@ -500,4 +513,107 @@ pub(super) fn get_file_diff(
     };
 
     serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_changes::file_diff::DiffLineKind;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git_commit(repo: &Path, file: &str, content: &str, msg: &str) -> String {
+        fs::write(repo.join(file), content).unwrap();
+        let add = Command::new("git")
+            .current_dir(repo)
+            .args(["add", file])
+            .output()
+            .unwrap();
+        assert!(add.status.success(), "{:?}", add);
+        let commit = Command::new("git")
+            .current_dir(repo)
+            .args([
+                "-c",
+                "user.name=Grapher Test",
+                "-c",
+                "user.email=test@grapher.invalid",
+                "commit",
+                "-m",
+                msg,
+            ])
+            .output()
+            .unwrap();
+        assert!(commit.status.success(), "{:?}", commit);
+        let rev = Command::new("git")
+            .current_dir(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(rev.status.success(), "{:?}", rev);
+        String::from_utf8_lossy(&rev.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn resolve_file_diff_sorts_scoped_executions_by_started_at() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        let init = Command::new("git")
+            .current_dir(repo)
+            .args(["init"])
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{:?}", init);
+
+        let c0 = git_commit(repo, "app.txt", "line0\n", "c0");
+        let c1 = git_commit(repo, "app.txt", "line0\nline1\n", "c1");
+        let c2 = git_commit(repo, "app.txt", "line0\nline1\nline2\n", "c2");
+
+        // Deliberately provide executions in reverse chronological order.
+        let context = FileDiffContext {
+            run_id: "run-1".into(),
+            repository: repo.to_path_buf(),
+            base: c0.clone(),
+            publication: None,
+            planning_id: None,
+            planning_worktree: None,
+            open_file: open_file_context(&Snapshot::default()),
+            store_root: repo.to_path_buf(),
+            executions: vec![
+                DiffExecution {
+                    id: "exec-2".into(),
+                    node: "n1".into(),
+                    status: "completed".into(),
+                    superseded: false,
+                    started_at: 200,
+                    before: c1.clone(),
+                    after: Some(c2.clone()),
+                    worktree: repo.to_path_buf(),
+                    output: String::new(),
+                    output_bytes: 0,
+                },
+                DiffExecution {
+                    id: "exec-1".into(),
+                    node: "n1".into(),
+                    status: "completed".into(),
+                    superseded: false,
+                    started_at: 100,
+                    before: c0.clone(),
+                    after: Some(c1.clone()),
+                    worktree: repo.to_path_buf(),
+                    output: String::new(),
+                    output_bytes: 0,
+                },
+            ],
+        };
+
+        let scope = vec!["exec-2".to_string(), "exec-1".to_string()];
+        let diff = resolve_file_diff(&context, Some(&scope), &[], "app.txt", None, None).unwrap();
+        let added: Vec<&str> = diff
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(added, vec!["line1", "line2"]);
+    }
 }

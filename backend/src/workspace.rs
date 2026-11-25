@@ -3818,7 +3818,8 @@ impl<'a> TrackedPathIndex<'a> {
     }
 
     /// True when at least one project-tracked file lives inside `relative`
-    /// under a generated-artifact directory (e.g. `__pycache__/tracked.pyc`),
+    /// under an excluded generated-artifact or reserved Grapher runtime
+    /// directory (e.g. `__pycache__/tracked.pyc` or `.grapher/tracked.txt`),
     /// so directory traversal must descend into it instead of pruning the
     /// entire directory.
     pub(crate) fn has_tracked_generated_descendant(&self, relative: &str) -> bool {
@@ -3826,7 +3827,7 @@ impl<'a> TrackedPathIndex<'a> {
             let mut set = std::collections::HashSet::new();
             for entry in self.exact {
                 let path = Path::new(entry);
-                if is_generated_artifact(path) {
+                if is_generated_artifact(path) || is_reserved_grapher_runtime_path(path) {
                     let mut parent = path.parent();
                     while let Some(dir) = parent.filter(|p| !p.as_os_str().is_empty()) {
                         set.insert(dir.to_string_lossy().replace('\\', "/"));
@@ -3862,39 +3863,105 @@ impl<'a> TrackedPathIndex<'a> {
     }
 }
 
-pub(crate) fn collection_excluded_with_index(
-    root: &Path,
-    relative: &Path,
-    tracked: &TrackedPathIndex<'_>,
-    exclusions: &[String],
-) -> bool {
+/// Grapher-owned runtime directories and in-flight publish temp files that may
+/// coexist inside a checkout (for example a dev backend writing `.grapher/events.sqlite*`
+/// while a packaged desktop app runs against the same repository). Ordinary
+/// project files such as `.grapher-project.json` or `.grapher-project/config`
+/// remain collected.
+pub(crate) fn is_reserved_grapher_runtime_path(relative: &Path) -> bool {
     if relative
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix(".grapher-publish-"))
         .and_then(|name| name.strip_suffix(".tmp"))
         .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        && !tracked.matches(&relative.to_string_lossy().replace('\\', "/"))
     {
         return true;
     }
+    relative.components().any(|component| match component {
+        std::path::Component::Normal(raw) => {
+            let name = raw.to_string_lossy();
+            name.eq_ignore_ascii_case(".grapher")
+                || name.eq_ignore_ascii_case(".grapher-worktrees")
+                || name.eq_ignore_ascii_case(".grapher-workspaces")
+                || name.eq_ignore_ascii_case(".grapher-state")
+        }
+        _ => false,
+    })
+}
+
+fn is_host_metadata_path(relative: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && relative.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.eq_ignore_ascii_case(".DS_Store") || name.starts_with("._")
+        })
+}
+
+pub(crate) fn collection_excluded_with_index(
+    root: &Path,
+    relative: &Path,
+    tracked: &TrackedPathIndex<'_>,
+    exclusions: &[String],
+) -> bool {
     if exclusions
         .iter()
         .any(|scope| scope_contains_at(root, relative, Path::new(scope)))
     {
         return true;
     }
+    // Most entries are ordinary project files. Check cheap name/path predicates
+    // before allocating a normalized path and querying the tracked set.
+    let reserved = is_reserved_grapher_runtime_path(relative);
+    let host_meta = is_host_metadata_path(relative);
+    let generated = !reserved && !host_meta && is_generated_artifact(relative);
+    if !reserved && !host_meta && !generated {
+        return false;
+    }
     let portable = relative.to_string_lossy().replace('\\', "/");
-    if is_host_metadata(&portable) && !tracked.matches(&portable) {
+    if tracked.matches(&portable) {
+        return false;
+    }
+    if host_meta {
         return true;
     }
-    if is_generated_artifact(relative)
-        && !tracked.matches(&portable)
-        && !tracked.has_tracked_generated_descendant(&portable)
+    !tracked.has_tracked_generated_descendant(&portable)
+}
+
+#[cfg(test)]
+fn tracked_has_descendant(
+    root: Option<&Path>,
+    tracked: &std::collections::BTreeSet<String>,
+    relative: &str,
+) -> bool {
+    let prefix = format!("{}/", relative.trim_end_matches('/'));
+    if tracked
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|candidate| candidate.starts_with(&prefix))
     {
         return true;
     }
-    false
+    #[cfg(target_os = "macos")]
+    {
+        let insensitive = root.is_some_and(crate::path_identity::case_insensitive_volume);
+        if !insensitive && relative.is_ascii() {
+            return false;
+        }
+        let target_folded = format!(
+            "{}/",
+            crate::path_identity::fold_relative_path(relative.trim_end_matches('/'), insensitive)
+        );
+        return tracked.iter().any(|candidate| {
+            crate::path_identity::fold_relative_path(candidate, insensitive)
+                .starts_with(&target_folded)
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -3904,21 +3971,10 @@ fn collection_excluded_inner(
     tracked: &std::collections::BTreeSet<String>,
     exclusions: &[String],
 ) -> bool {
-    // Other Runs may capture the source while an adjacent copy is in flight.
-    // As with generated artifacts, an explicitly tracked project file wins
-    // over the reserved-name convention.
-    // Most entries are ordinary project files. Check the cheap name predicate
-    // before allocating a normalized path and searching the tracked set.
-    if relative
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix(".grapher-publish-"))
-        .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        && !tracked_path_matches(root, tracked, &relative.to_string_lossy().replace('\\', "/"))
-    {
-        return true;
-    }
+    // Other Runs may capture the source while an adjacent copy or another
+    // Grapher instance's `.grapher/` runtime store is live. As with generated
+    // artifacts, an explicitly tracked project file wins over the reserved-name
+    // convention.
     if exclusions.iter().any(|scope| {
         root.map_or_else(
             || scope_contains(relative, Path::new(scope)),
@@ -3927,19 +3983,20 @@ fn collection_excluded_inner(
     }) {
         return true;
     }
+    let reserved = is_reserved_grapher_runtime_path(relative);
+    let host_meta = is_host_metadata_path(relative);
+    let generated = !reserved && !host_meta && is_generated_artifact(relative);
+    if !reserved && !host_meta && !generated {
+        return false;
+    }
     let portable = relative.to_string_lossy().replace('\\', "/");
-    if is_host_metadata(&portable) && !tracked_path_matches(root, tracked, &portable) {
+    if tracked_path_matches(root, tracked, &portable) {
+        return false;
+    }
+    if host_meta {
         return true;
     }
-    if is_generated_artifact(relative)
-        && !tracked_path_matches(root, tracked, &portable)
-        && !root.is_some_and(|root| {
-            TrackedPathIndex::new(root, tracked).has_tracked_generated_descendant(&portable)
-        })
-    {
-        return true;
-    }
-    false
+    !tracked_has_descendant(root, tracked, &portable)
 }
 
 /// Git pathspecs that exclude generated artifacts from a forced `git add` or

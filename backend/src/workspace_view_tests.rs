@@ -3474,3 +3474,80 @@ fn poisoned_unrecorded_shadow_head_recovers_prior_recorded_ancestor_for_composit
         base
     );
 }
+
+#[test]
+fn untracked_grapher_runtime_directory_is_excluded_from_byte_snapshots_and_preparation() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = source(&temp);
+    fs::create_dir_all(repo.join(".grapher/shadow_repos/nested/.git")).unwrap();
+    fs::write(repo.join(".grapher/events.sqlite-shm"), b"initial-shm").unwrap();
+    fs::write(repo.join(".grapher/events.sqlite-wal"), b"initial-wal").unwrap();
+    fs::write(
+        repo.join(".grapher/shadow_repos/nested/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".grapher-project")).unwrap();
+    fs::write(repo.join(".grapher-project/config"), "keep me\n").unwrap();
+
+    let view_before = inspect(&repo).unwrap();
+    assert!(
+        !view_before
+            .entries
+            .keys()
+            .any(|key| key == ".grapher" || key.starts_with(".grapher/")),
+        "untracked .grapher runtime dir must not enter project view"
+    );
+    assert!(view_before.entries.contains_key(".grapher-project/config"));
+
+    let base = workspace::snapshot_repository(&repo).unwrap();
+    // Mutating another Grapher instance's live SQLite WAL/SHM files inside
+    // `.grapher/` must not invalidate snapshot binding or preparation.
+    fs::write(repo.join(".grapher/events.sqlite-shm"), b"mutated-shm").unwrap();
+    fs::write(repo.join(".grapher/events.sqlite-wal"), b"mutated-wal").unwrap();
+    assert_eq!(inspect(&repo).unwrap(), view_before);
+
+    let target = slot(&temp, "node-without-runtime-dir");
+    workspace::prepare(&repo, &target, &base, &[]).unwrap();
+    assert!(!target.join(".grapher").exists());
+    assert_eq!(
+        fs::read_to_string(target.join(".grapher-project/config")).unwrap(),
+        "keep me\n"
+    );
+}
+
+#[test]
+fn view_unobservable_preserves_directories_with_tracked_descendants_in_reserved_or_generated_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("dir_reserved/.grapher")).unwrap();
+    fs::write(root.join("dir_reserved/.grapher/tracked.txt"), "keep").unwrap();
+    fs::write(root.join("dir_reserved/.grapher/events.sqlite-shm"), "tmp").unwrap();
+
+    fs::create_dir_all(root.join("dir_generated/__pycache__")).unwrap();
+    fs::write(root.join("dir_generated/__pycache__/tracked.pyc"), "keep").unwrap();
+
+    fs::create_dir_all(root.join("dir_untracked/.grapher")).unwrap();
+    fs::write(root.join("dir_untracked/.grapher/events.sqlite-shm"), "tmp").unwrap();
+    fs::create_dir_all(root.join("dir_untracked/__pycache__")).unwrap();
+    fs::write(root.join("dir_untracked/__pycache__/ephemeral.pyc"), "tmp").unwrap();
+
+    let tracked = std::collections::BTreeSet::from([
+        "dir_reserved/.grapher/tracked.txt".to_string(),
+        "dir_generated/__pycache__/tracked.pyc".to_string(),
+    ]);
+    let index = workspace::TrackedPathIndex::new(root, &tracked);
+
+    assert!(
+        !view_unobservable(root, Path::new("dir_reserved"), &index).unwrap(),
+        "directory with tracked file inside .grapher must stay observable"
+    );
+    assert!(
+        !view_unobservable(root, Path::new("dir_generated"), &index).unwrap(),
+        "directory with tracked file inside __pycache__ must stay observable"
+    );
+    assert!(
+        view_unobservable(root, Path::new("dir_untracked"), &index).unwrap(),
+        "directory containing only untracked runtime/generated leftovers is unobservable"
+    );
+}

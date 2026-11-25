@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { samePath } from './path-identity.mjs';
 import { CONFIG_DIR_NAME, loadMcpConfig, mcpNamespace, validateMcpServerConfig,
   type LoadedMcpConfig, type McpServerEntry } from './pi-compat.ts';
 
@@ -17,7 +18,9 @@ export function loadGrapherMcpConfig(options: {
     if (clash) errors.push(`${entry.source}: server "${entry.name}" conflicts with "${clash}"`);
     else servers.set(entry.name, entry);
   };
-  const directories = [...new Set([options.globalDir, options.agentDir].map(directory => resolve(directory)))];
+  const directories = samePath(options.globalDir, options.agentDir)
+    ? [resolve(options.agentDir)]
+    : [resolve(options.globalDir), resolve(options.agentDir)];
   for (const agentDir of directories) {
     const loaded = loadMcpConfig({ agentDir, cwd: options.cwd, projectTrusted: false });
     errors.push(...loaded.errors);
@@ -27,7 +30,7 @@ export function loadGrapherMcpConfig(options: {
   const projectConfig = options.projectTrusted ? join(options.cwd, CONFIG_DIR_NAME, 'mcp.json') : undefined;
   if (projectConfig && existsSync(projectConfig)) {
     let parsed: unknown;
-    try { parsed = JSON.parse(readFileSync(projectConfig, 'utf8')); }
+    try { parsed = JSON.parse(readFileSync(projectConfig, 'utf8').replace(/^\uFEFF/, '')); }
     catch (error) { errors.push(`${projectConfig}: ${error instanceof Error ? error.message : String(error)}`); }
     if (parsed !== undefined) {
       if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {

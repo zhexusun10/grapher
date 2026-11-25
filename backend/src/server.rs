@@ -7618,6 +7618,7 @@ fn handle_http_request_with_options(
             });
 
             struct StreamPlanRequest {
+                receipt_body: serde_json::Value,
                 goal: String,
                 config: Config,
                 plan_mode: Option<String>,
@@ -7626,6 +7627,7 @@ fn handle_http_request_with_options(
                 continue_planning_id: Option<String>,
             }
             let StreamPlanRequest {
+                receipt_body,
                 goal,
                 config,
                 plan_mode,
@@ -7642,6 +7644,7 @@ fn handle_http_request_with_options(
                 let continue_planning_id: Option<String> =
                     argument(&body, "continuePlanningId").ok();
                 Ok(StreamPlanRequest {
+                    receipt_body: body,
                     goal,
                     config,
                     plan_mode,
@@ -7678,8 +7681,6 @@ fn handle_http_request_with_options(
                 return;
             }
 
-            let receipt_body: serde_json::Value =
-                serde_json::from_str(&input).expect("validated stream input");
             let stream_receipt = if let Some(token) = &operation_id {
                 match api_transport::begin(token, command, &receipt_body, port, &request_id) {
                     api_transport::Begin::New(guard) => Some(guard),

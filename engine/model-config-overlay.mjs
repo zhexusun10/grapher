@@ -31,7 +31,8 @@ function merge(base, preferred, key = '') {
       && !Array.isArray(base) && !Array.isArray(preferred)) {
     const result = { ...base };
     for (const [name, value] of Object.entries(preferred)) {
-      Object.defineProperty(result, name, { value: merge(base[name], value, name), enumerable: true, configurable: true, writable: true });
+      const baseValue = Object.hasOwn(base, name) ? base[name] : undefined;
+      Object.defineProperty(result, name, { value: merge(baseValue, value, name), enumerable: true, configurable: true, writable: true });
     }
     return result;
   }

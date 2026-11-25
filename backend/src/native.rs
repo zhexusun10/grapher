@@ -541,6 +541,62 @@ pub(crate) fn bind_workspace_state(command: &mut Command, workspace: &Path) -> R
     Ok(())
 }
 
+fn env_var_non_empty(name: &str) -> bool {
+    if cfg!(windows) {
+        std::env::vars_os().any(|(key, value)| {
+            key.to_string_lossy().eq_ignore_ascii_case(name)
+                && !value.to_string_lossy().trim().is_empty()
+        })
+    } else {
+        std::env::var_os(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+    }
+}
+
+/// Resolve existing host Rust toolchain directories (`RUSTUP_HOME`, `CARGO_HOME`)
+/// before private-HOME redirection replaces `HOME`/`USERPROFILE`.
+///
+/// Respects any explicit host `RUSTUP_HOME`/`CARGO_HOME` environment override
+/// (which ambient inheritance already carries) and skips directories that do not
+/// exist or fall inside `excluded_root`.
+pub(crate) fn host_rust_toolchain_variables(
+    excluded_root: Option<&Path>,
+) -> Vec<(&'static str, PathBuf)> {
+    let home = home_dir();
+    host_rust_toolchain_variables_for(home.as_deref(), env_var_non_empty, excluded_root)
+}
+
+fn host_rust_toolchain_variables_for(
+    home: Option<&Path>,
+    has_env: impl Fn(&str) -> bool,
+    excluded_root: Option<&Path>,
+) -> Vec<(&'static str, PathBuf)> {
+    let Some(home) = home.filter(|path| path.is_absolute()) else {
+        return Vec::new();
+    };
+    let mut resolved = Vec::new();
+    for (key, subdir) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+        if has_env(key) {
+            continue;
+        }
+        let candidate = home.join(subdir);
+        if !candidate.is_dir() {
+            continue;
+        }
+        if let Some(root) = excluded_root {
+            if crate::workspace::scope_contains(&candidate, root)
+                || candidate
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|real| crate::workspace::scope_contains(&real, root))
+            {
+                continue;
+            }
+        }
+        resolved.push((key, host_path(&candidate)));
+    }
+    resolved
+}
+
 pub(crate) fn workspace_environment(
     workspace: &Path,
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
@@ -572,6 +628,9 @@ pub(crate) fn workspace_environment(
             key.to_string(),
             host_path(&path).to_string_lossy().into_owned(),
         );
+    }
+    for (key, path) in host_rust_toolchain_variables(Some(workspace)) {
+        bindings.insert(key.to_string(), path.to_string_lossy().into_owned());
     }
     Ok(bindings)
 }
@@ -2336,5 +2395,55 @@ export default async function () {
         fs::write(&models_path, custom).unwrap();
         ensure_default_models_file(temp.path()).unwrap();
         assert_eq!(fs::read_to_string(&models_path).unwrap(), custom);
+    }
+
+    #[test]
+    fn host_rust_toolchain_variables_preserve_existing_host_dirs_and_respect_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("user-home");
+        let rustup = home.join(".rustup");
+        let cargo = home.join(".cargo");
+        fs::create_dir_all(&rustup).unwrap();
+        fs::create_dir_all(&cargo).unwrap();
+
+        let vars = host_rust_toolchain_variables_for(Some(&home), |_| false, None);
+        assert_eq!(
+            vars,
+            vec![
+                ("RUSTUP_HOME", host_path(&rustup)),
+                ("CARGO_HOME", host_path(&cargo)),
+            ]
+        );
+
+        let with_override =
+            host_rust_toolchain_variables_for(Some(&home), |key| key == "CARGO_HOME", None);
+        assert_eq!(with_override, vec![("RUSTUP_HOME", host_path(&rustup))]);
+
+        let excluded = host_rust_toolchain_variables_for(Some(&home), |_| false, Some(&home));
+        assert!(excluded.is_empty());
+
+        let empty_home = temp.path().join("empty-home");
+        fs::create_dir_all(&empty_home).unwrap();
+        assert!(host_rust_toolchain_variables_for(Some(&empty_home), |_| false, None).is_empty());
+
+        assert!(
+            host_rust_toolchain_variables_for(Some(Path::new("relative-home")), |_| false, None)
+                .is_empty()
+        );
+
+        let project_root = temp.path().join("project");
+        let inside_project = project_root.join("linked-cargo");
+        fs::create_dir_all(&inside_project).unwrap();
+        let symlink_home = temp.path().join("symlink-home");
+        fs::create_dir_all(&symlink_home).unwrap();
+        crate::path_safety::directory_link(&inside_project, &symlink_home.join(".cargo"));
+        assert!(
+            host_rust_toolchain_variables_for(
+                Some(&symlink_home),
+                |_| false,
+                Some(&project_root),
+            )
+            .is_empty()
+        );
     }
 }

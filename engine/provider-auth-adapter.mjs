@@ -4,21 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { toHostInput } from './path-identity.mjs';
 import { readModelVisibility, saveModelVisibility } from './model-visibility.mjs';
-
-const KNOWN_PROVIDER_ENV_VARS = {
-  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"],
-  openai: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
-  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
-  deepseek: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"],
-  groq: ["GROQ_API_KEY"],
-  mistral: ["MISTRAL_API_KEY"],
-  together: ["TOGETHER_API_KEY"],
-  openrouter: ["OPENROUTER_API_KEY"],
-  "github-copilot": ["COPILOT_GITHUB_TOKEN"],
-  cohere: ["COHERE_API_KEY", "CO_API_KEY"],
-  perplexity: ["PERPLEXITY_API_KEY"],
-  xai: ["XAI_API_KEY"],
-};
+import { KNOWN_PROVIDER_ENV_VARS } from './agent-dir.mjs';
 
 // Credentials are emitted verbatim as HTTP header values. Non-ASCII input can
 // only fail inside the provider client, after Pi has already stored it.
@@ -41,14 +27,13 @@ function loadDisabledProviders() {
 
 function saveDisabledProviders(set) {
   try {
-    writeFileSync(getDisabledProvidersPath(), JSON.stringify([...set], null, 2), "utf8");
+    writeFileSync(getDisabledProvidersPath(), JSON.stringify([...set], null, 2), { encoding: "utf8", mode: 0o600 });
   } catch {}
 }
 
 function purgeEnvVarsForProvider(providerId) {
-  const vars = KNOWN_PROVIDER_ENV_VARS[providerId];
-  if (vars) {
-    for (const v of vars) {
+  if (typeof providerId === "string" && Object.hasOwn(KNOWN_PROVIDER_ENV_VARS, providerId)) {
+    for (const v of KNOWN_PROVIDER_ENV_VARS[providerId]) {
       delete process.env[v];
     }
   }

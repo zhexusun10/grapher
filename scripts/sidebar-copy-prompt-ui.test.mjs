@@ -84,7 +84,7 @@ async function copyPrompt(page, runId, label = "Copy prompt") {
 async function deleteHistory(page, runId) {
   await page.locator(`.run-item[data-run-id="${runId}"]`).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Delete this history entry", exact: true }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Delete history", exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Delete conversation", exact: true }).click();
 }
 
 test("the sidebar always opens expanded, even with a stale collapsed preference", { timeout: 30_000 }, async () => {
@@ -597,7 +597,8 @@ test("a provisional conversation keeps its prompt when the durable ID arrives", 
     assert.equal(calls.filter(call => call.command === "history").length, 0);
 
     await pending.click({ button: "right" });
-    while (!requested) await page.waitForTimeout(10);
+    for (let i = 0; !requested && i < 500; i++) await page.waitForTimeout(10);
+    assert.equal(requested, true, "planning request should start before releasing");
     releasePlanning();
     await page.locator('.run-item[data-run-id="new-run"]').waitFor();
     await page.getByRole("menuitem", { name: "复制提示词", exact: true }).click();

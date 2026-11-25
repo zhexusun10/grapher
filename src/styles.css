@@ -789,24 +789,6 @@ h3 {
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
 }
 
-.proj-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-  transition: color 0.15s ease;
-}
-
-.project-workspace-item:hover .proj-icon {
-  color: var(--text-primary);
-}
-
-.project-workspace-item.active .proj-icon {
-  color: var(--brand-default);
-}
-
-
 .proj-details {
   flex: 1;
   min-width: 0;
@@ -1484,12 +1466,6 @@ h3 {
   animation: pulse-glow 1.5s infinite ease-in-out;
 }
 
-.run-dot.approval-pulse {
-  background: var(--brand-default);
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
-  animation: pulse-glow 1.5s infinite ease-in-out;
-}
-
 @keyframes pulse-glow {
 
   0%,
@@ -1684,41 +1660,6 @@ h3 {
   flex-direction: column;
   width: 100%;
   position: relative;
-}
-
-.phase-tag {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  color: var(--text-secondary);
-}
-
-.phase-tag.running {
-  background: var(--brand-subtle);
-  color: var(--brand-default);
-  border-color: var(--brand-border);
-}
-
-.phase-tag.completed {
-  background: var(--status-success-subtle);
-  color: var(--status-success);
-  border-color: var(--status-success-border);
-}
-
-.phase-tag.awaiting_approval {
-  background: var(--status-warning-subtle);
-  color: var(--status-warning);
-  border-color: var(--border-default);
-}
-
-.phase-tag.needs_attention,
-.phase-tag.rejected {
-  background: var(--status-danger-subtle);
-  color: var(--status-danger-text);
-  border-color: var(--status-danger-border);
 }
 
 .icon-button {
@@ -2790,7 +2731,6 @@ h3 {
 /* Pause infinite decorative animations when the window is hidden or unfocused
    in desktop mode so WKWebView stops burning GPU/WindowServer frames off-focus. */
 :root.window-inactive .run-dot.running-pulse,
-:root.window-inactive .run-dot.approval-pulse,
 :root.window-inactive .working-indicator-dot,
 :root.window-inactive .thinking-icon-box.pulse,
 :root.window-inactive .tool-call-card.running::before,

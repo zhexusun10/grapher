@@ -551,6 +551,17 @@ fn prepare_user_branch(
         .map(|line| serde_json::from_str(line).map_err(|_| "Invalid Pi session entry".to_string()))
         .collect::<Result<_, _>>()?;
     let header = values.first().ok_or("Empty Pi session")?;
+    if header["version"] != 3 || header["grapherFormat"] != 1 {
+        return Err("Unsupported Grapher Pi session format or identity".into());
+    }
+    let managed_session_dir = session_dir
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "planner-sessions" | "sessions" | "mergers"));
+    if header.get("grapherRunId").is_some() || managed_session_dir {
+        validate_session_header(header, session_dir, session_id)?;
+    }
     let actual_cwd = header.get("cwd").and_then(Value::as_str).map(Path::new);
     let cwd_matches = actual_cwd.is_some_and(|actual| crate::path_identity::same_path(actual, cwd));
     if header.get("type").and_then(Value::as_str) != Some("session")
@@ -843,7 +854,9 @@ mod tests {
             let file = temp.path().join(format!("test_{id}.jsonl"));
             let header = serde_json::json!({"type":"session","id":id,"cwd":temp.path(),
                 "version":version,"grapherFormat":format,"grapherRunId":id});
-            let original = format!("{header}\n");
+            let turn = serde_json::json!({"type":"message","id":"u1","parentId":null,
+                "message":{"role":"user","content":"old","timestamp":1}});
+            let original = format!("{header}\n{turn}\n");
             fs::write(&file, &original).unwrap();
             assert!(validate_session_format(temp.path(), &id).is_err());
             assert!(rebind_session_cwd_by_header(temp.path(), &id, temp.path()).is_err());
@@ -857,7 +870,10 @@ mod tests {
                 temp.path()
             )
             .is_err());
-            assert!(branch_before_user(temp.path(), &id, temp.path(), "old", 0, 1).is_err());
+            assert!(branch_before_user(temp.path(), &id, temp.path(), "old", 0, 2)
+                .err()
+                .expect("retired session header must be rejected")
+                .contains("Unsupported Grapher Pi session format"));
             assert_eq!(fs::read_to_string(&file).unwrap(), original);
             assert!(!target.exists());
         }
@@ -871,11 +887,17 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let header = serde_json::json!({"type":"session","version":3,"grapherFormat":1,
             "grapherRunId":Uuid::new_v4().to_string(),"id":run,"cwd":temp.path()});
-        let original = format!("{header}\n");
+        let turn = serde_json::json!({"type":"message","id":"u1","parentId":null,
+            "message":{"role":"user","content":"goal","timestamp":1}});
+        let original = format!("{header}\n{turn}\n");
         let file = directory.join(format!("test_{run}.jsonl"));
         fs::write(&file, &original).unwrap();
         assert!(rebind_session_cwd_by_header(&directory, &run, temp.path())
             .unwrap_err()
+            .contains("another Run"));
+        assert!(branch_before_planner_user(&directory, &run, temp.path(), "goal")
+            .err()
+            .expect("foreign run header must be rejected")
             .contains("another Run"));
         assert_eq!(fs::read_to_string(file).unwrap(), original);
     }

@@ -85,11 +85,20 @@ export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
   const partition = process.env.GRAPHER_MODE === 'partition';
   const graph = process.env.GRAPHER_EXECUTION_KIND === 'graph';
   const project = process.env.GRAPHER_ORIGINAL_ROOT || (planner && !graph ? cwd : undefined);
+  const plannerTargets = planner && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true'
+    ? JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}') as Record<string, unknown>
+    : {};
+  const hasPlannerWorkspaces = Boolean(planner && project && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true' && Object.keys(plannerTargets).length > 0);
   // Planner uses the same model-facing namespace before, during and after
   // private execution. Its physical cwd is backend/UI metadata, not a prompt.
-  let activePaths = !partition && (graph || planner) && project
-    ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
-  const paths = activePaths;
+  let activePaths: ReturnType<typeof createWorkspacePaths> | undefined;
+  if (hasPlannerWorkspaces && project) {
+    configurePlannerWorkspace(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project);
+    activePaths = plannerWorkspaceState().paths;
+    onPlannerWorkspaceChanged(next => { activePaths = next.paths; });
+  } else if (!partition && (graph || planner) && project) {
+    activePaths = createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project);
+  }
   const view = (value: any): any => activePaths ? activePaths.view(value) : value;
   // Private mapped roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
@@ -113,13 +122,7 @@ export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
       return changed ? { messages } : undefined;
     });
   }
-  const plannerTargets = planner && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true'
-    ? JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}') as Record<string, unknown>
-    : {};
-  if (planner && project && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true' && Object.keys(plannerTargets).length > 0) {
-    configurePlannerWorkspace(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project);
-    activePaths = plannerWorkspaceState().paths;
-    onPlannerWorkspaceChanged(next => { activePaths = next.paths; });
+  if (hasPlannerWorkspaces) {
     pi.registerTool({
       name: 'switch_workspace',
       label: 'switch workspace',
@@ -140,12 +143,12 @@ export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
       },
     } as any);
   }
-  if (!partition && (paths || !planner)) {
+  if (!partition && (activePaths || !planner)) {
     pi.on('before_agent_start', async event => {
       // Returning systemPrompt here would overwrite pi-trim's request-time edits.
       // Keep ordinary prompts structured so the upstream extension can trim them.
       const options = event.systemPromptOptions;
-      if (paths) Object.assign(options, paths.view(options));
+      if (activePaths) Object.assign(options, activePaths.view(options));
       // Normalize existing prompt paths only. Planner gets no extra addendum,
       // cwd announcement, environment hint or instruction to re-read files.
       if (planner) return;
@@ -180,7 +183,7 @@ export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
         options.sections.rules = rules;
       }
       const rawHints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
-      const hints = rawHints && paths ? paths.visible(rawHints) : rawHints;
+      const hints = rawHints && activePaths ? activePaths.visible(rawHints) : rawHints;
       // Custom/forced prompts have no Pi rules section to replace. Preserve
       // their existing guidance behavior; default graph nodes need only hints.
       const useRules = graphNode && !options.customPrompt && options.forceSystemPrompt === undefined;
@@ -202,7 +205,7 @@ export function createWorkspacePolicy(bashTimeoutBridge?: BashTimeoutBridge) {
   // settings, and edit_graph/read_graph belong to the Planner extension.
   if (partition) return;
   if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
-  if (paths && project) {
+  if (activePaths && project) {
     registerWorkspaceTools(pi, activePaths?.root || cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
       planner ? (plannerWriteTools ? ['read', 'write', 'edit'] : ['read']) : undefined, () => activePaths?.root || cwd);
 

@@ -85,11 +85,18 @@ fn acquire_lock_file(
     #[allow(unused_variables)] windows_prefix: &str,
     busy_message: &str,
 ) -> Result<RuntimeLock, String> {
-    let marker = fs::OpenOptions::new()
+    let mut open_options = fs::OpenOptions::new();
+    open_options
         .read(true)
         .write(true)
         .create(true)
-        .truncate(false)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let marker = open_options
         .open(lock_path)
         .map_err(|error| format!("Cannot open lock file {}: {error}", lock_path.display()))?;
 

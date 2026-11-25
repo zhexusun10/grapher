@@ -71,7 +71,7 @@ pub(super) fn models(body: &Value, service: &Arc<Service>) -> Result<Value, Stri
     } else {
         runtime.update_node_models(&config)?;
     }
-    serde_json::to_value(runtime.state.clone()).map_err(|e| e.to_string())
+    serde_json::to_value(&runtime.state).map_err(|e| e.to_string())
 }
 
 pub(super) fn rename(body: &Value, service: &Arc<Service>) -> Result<Value, String> {
@@ -100,7 +100,7 @@ pub(super) fn rename(body: &Value, service: &Arc<Service>) -> Result<Value, Stri
     if body.get("detail").and_then(Value::as_str) == Some("metadata") {
         crate::snapshot_view::snapshot_metadata(&runtime.state)
     } else {
-        serde_json::to_value(runtime.state.clone()).map_err(|e| e.to_string())
+        serde_json::to_value(&runtime.state).map_err(|e| e.to_string())
     }
 }
 

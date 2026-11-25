@@ -1110,6 +1110,13 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
             false,
         ),
         ("x/.grapher-publish-01234.tmp", false, false, false),
+        (".grapher", false, true, false),
+        (".grapher/events.sqlite-shm", false, true, false),
+        (".grapher-worktrees/run/node", false, true, false),
+        (".grapher-workspaces/run/node", false, true, false),
+        (".grapher-state/meta", false, true, false),
+        (".grapher-project.json", false, false, false),
+        (".grapher-project/config", false, false, false),
         ("managed/normal.txt", false, false, true),
         ("managed/tracked.pyc", false, false, true),
         (
@@ -1145,6 +1152,38 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
             }
         }
     }
+
+    // Tracked descendants under reserved/generated directories must prevent
+    // pruning their parent directory even when `collection_excluded` has no root.
+    let tracked = BTreeSet::from([
+        ".grapher/tracked.txt".to_string(),
+        "pkg/__pycache__/tracked.pyc".to_string(),
+    ]);
+    assert!(!workspace::collection_excluded(
+        Path::new(".grapher"),
+        &tracked,
+        &[]
+    ));
+    assert!(!workspace::collection_excluded(
+        Path::new(".grapher/tracked.txt"),
+        &tracked,
+        &[]
+    ));
+    assert!(workspace::collection_excluded(
+        Path::new(".grapher/events.sqlite-shm"),
+        &tracked,
+        &[]
+    ));
+    assert!(!workspace::collection_excluded(
+        Path::new("pkg/__pycache__"),
+        &tracked,
+        &[]
+    ));
+    assert!(workspace::collection_excluded(
+        Path::new("pkg/__pycache__/untracked.pyc"),
+        &tracked,
+        &[]
+    ));
 }
 
 #[cfg(unix)]

@@ -18,7 +18,7 @@ use managed_git::{
     existing_managed_git, expected_managed_git_path, GitBootstrapManager, GitBootstrapStatus,
 };
 use migration::{default_legacy_candidates, migrate_legacy_data_if_needed, MigrationOutcome};
-use paths::{resolve_runtime_paths, ResolvedRuntimePaths};
+use paths::{resolve_desktop_user_path, resolve_runtime_paths_with_path, ResolvedRuntimePaths};
 use sidecar::{BackendSidecar, SidecarConfig};
 use std::{
     path::{Path, PathBuf},
@@ -745,11 +745,13 @@ fn initialize_backend(
     dev_root: Option<&Path>,
     require_bundled_node: bool,
 ) -> Result<(BackendSidecar, GitBootstrapManager), String> {
-    let resolved: ResolvedRuntimePaths = resolve_runtime_paths(
+    let desktop_user_path = resolve_desktop_user_path();
+    let resolved: ResolvedRuntimePaths = resolve_runtime_paths_with_path(
         resource_dir,
         current_exe,
         dev_root,
         require_bundled_node,
+        desktop_user_path.as_deref(),
     )?;
 
     let (explicit_legacy, implicit_legacy) =
@@ -786,6 +788,7 @@ fn initialize_backend(
         data_dir,
     );
     config.managed_git_path = expected_managed_git_path(app_data_dir);
+    config.base_path = desktop_user_path;
     let sidecar = BackendSidecar::start(config)?;
     Ok((sidecar, git_bootstrap))
 }

@@ -5,7 +5,7 @@ import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, readFileSyn
 
 const EMPTY_MODELS_CONFIG = '{\n  "providers": {}\n}\n';
 
-const KNOWN_PROVIDER_ENV_VARS = {
+export const KNOWN_PROVIDER_ENV_VARS = {
   anthropic: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'],
   openai: ['OPENAI_API_KEY', 'OPENAI_BASE_URL'],
   google: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
@@ -29,9 +29,8 @@ export function applyDisabledProviders(env = process.env) {
   env.PYTHONDONTWRITEBYTECODE = '1';
   if (Array.isArray(disabled)) {
     for (const p of disabled) {
-      const vars = KNOWN_PROVIDER_ENV_VARS[p];
-      if (vars) {
-        for (const v of vars) delete env[v];
+      if (typeof p === 'string' && Object.hasOwn(KNOWN_PROVIDER_ENV_VARS, p)) {
+        for (const v of KNOWN_PROVIDER_ENV_VARS[p]) delete env[v];
       }
     }
   }

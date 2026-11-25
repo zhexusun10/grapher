@@ -269,6 +269,9 @@ async function setupContext({
             autostartState.enabled = false;
             return Promise.resolve(null);
           }
+          if (cmd === "take_pending_notification_click") {
+            return Promise.resolve(null);
+          }
           if (cmd !== "backend_url") {
             return Promise.reject(`Unexpected IPC command: ${cmd}`);
           }
@@ -437,7 +440,9 @@ for (const platformOverride of [
       await page.waitForFunction(() => window.__TEST_EVENT_SOURCES__.some(es => es.readyState === 1));
 
       const nonPluginCommands = await page.evaluate(
-        () => window.__TEST_TAURI__.invokedCommands.filter(cmd => !cmd.startsWith("plugin:")),
+        () => window.__TEST_TAURI__.invokedCommands.filter(
+          cmd => !cmd.startsWith("plugin:") && cmd !== "take_pending_notification_click",
+        ),
       );
       assert.deepEqual(nonPluginCommands, ["backend_url"]);
 
@@ -546,7 +551,11 @@ test("Tauri mode surfaces closed backend feedback with Retry recovery and reconn
     assert.match(errorText, /The desktop backend stopped running: Grapher backend exited before becoming ready/);
     assert.doesNotMatch(errorText, /npm run backend/);
     // No duplicate generic floating error banner for the same desktop readiness failure.
-    assert.equal(await page.locator(".floating-error-banner").count(), 0);
+    assert.equal(
+      await page.locator(".floating-error-banner").count(),
+      0,
+      `unexpected floating error banner: ${await page.locator(".floating-error-banner").allTextContents()}`,
+    );
 
     // Recover via Retry button once backend_url starts resolving.
     await page.evaluate(url => window.__TEST_TAURI__.setNextResult({ kind: "ok", value: url }), firstOrigin);

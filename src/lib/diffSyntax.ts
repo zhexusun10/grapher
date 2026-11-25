@@ -94,7 +94,7 @@ const KEYWORDS: Record<Exclude<LanguageFamily, "plain" | "json" | "markup">, Set
 };
 
 function detectLanguage(path: string): LanguageFamily {
-  const leaf = path.split("/").pop()?.toLowerCase() ?? "";
+  const leaf = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   const ext = leaf.includes(".") ? leaf.slice(leaf.lastIndexOf(".") + 1) : leaf;
   switch (ext) {
     case "rs":
@@ -224,7 +224,7 @@ function tokenizeText(text: string, family: LanguageFamily): SyntaxSpan[] {
         i++;
         if (cur === quote || (quote !== 96 && cur === 10)) break;
       }
-      spans.push({ start, end: i, kind: "string" });
+      spans.push({ start, end: Math.min(i, len), kind: "string" });
       continue;
     }
     // CSS @rules

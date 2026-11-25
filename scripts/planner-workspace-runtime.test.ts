@@ -208,3 +208,44 @@ test('the mandatory Planner extension removes steer identity from every model co
     Object.assign(process.env, previous);
   }
 });
+
+test('Planner before_agent_start normalizes systemPromptOptions with switched active workspace paths', async () => {
+  const original = process.cwd();
+  const previous = { ...process.env };
+  const root = mkdtempSync(join(tmpdir(), 'grapher-planner-active-paths-'));
+  try {
+    const project = join(root, 'project');
+    const wsA = join(root, 'ws-a');
+    const wsB = join(root, 'ws-b');
+    mkdirSync(project);
+    mkdirSync(wsA);
+    mkdirSync(wsB);
+    process.chdir(wsA);
+    process.env.GRAPHER_MODE = 'planner';
+    process.env.GRAPHER_EXECUTION_KIND = 'source';
+    process.env.GRAPHER_ORIGINAL_ROOT = project;
+    process.env.GRAPHER_SOURCE_ALIAS = project;
+    process.env.GRAPHER_PLANNER_FOLLOWUP = 'true';
+    process.env.GRAPHER_PLANNER_WORKSPACES = JSON.stringify({
+      a: { requestedNode: 'a', actualNode: 'a', executionId: 'exec-a', workspace: wsA },
+      b: { requestedNode: 'b', actualNode: 'b', executionId: 'exec-b', workspace: wsB },
+    });
+    const tools: any[] = [];
+    const handlers = new Map<string, (event: any) => any>();
+    workspacePolicy({
+      on(name: string, handler: (event: any) => any) { handlers.set(name, handler); },
+      registerTool(tool: any) { tools.push(tool); },
+    } as any);
+    const switchTool = tools.find(tool => tool.name === 'switch_workspace');
+    assert.ok(switchTool);
+    await switchTool.execute('call-1', { id: 'b' });
+    const options = { appendSystemPrompt: `Inspect ${wsB}/file.txt`, sections: {}, promptGuidelines: [] };
+    await handlers.get('before_agent_start')!({ systemPromptOptions: options });
+    assert.equal(options.appendSystemPrompt, 'Inspect ./file.txt');
+  } finally {
+    process.chdir(original);
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

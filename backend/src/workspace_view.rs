@@ -2730,7 +2730,9 @@ fn validate_git_bindings(path: &Path) -> Result<(), String> {
 fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> {
     for item in fs::read_dir(project).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
-        if is_git_entry_name(project, &item.file_name()) {
+        if is_git_entry_name(project, &item.file_name())
+            || workspace::is_reserved_grapher_runtime_path(Path::new(&item.file_name()))
+        {
             continue;
         }
         let path = item.path();
@@ -3130,14 +3132,18 @@ fn reconcile_tree_aliases(
 fn view_unobservable(
     root: &Path,
     relative: &Path,
-    tracked: &std::collections::BTreeSet<String>,
+    tracked: &workspace::TrackedPathIndex<'_>,
 ) -> Result<bool, String> {
     for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let child = relative.join(item.file_name());
         let child_name = name(&child)?;
-        if (workspace::is_generated_artifact(&child) || workspace::is_host_metadata(&child_name))
-            && !workspace::tracked_path_matches(Some(root), tracked, &child_name)
+        let reserved_or_generated = workspace::is_generated_artifact(&child)
+            || workspace::is_reserved_grapher_runtime_path(&child);
+        let host_meta = workspace::is_host_metadata(&child_name);
+        if (reserved_or_generated || host_meta)
+            && !tracked.matches(&child_name)
+            && !(reserved_or_generated && tracked.has_tracked_generated_descendant(&child_name))
         {
             continue;
         }
@@ -3861,6 +3867,7 @@ pub(crate) fn prepare(
         }
         restore_entry(&path.join(name), entry)?;
     }
+    let tracked_index = workspace::TrackedPathIndex::new(path, &tracked);
     for (name, entry) in actual.iter().rev() {
         if matches!(entry, Entry::Special { .. }) && !expected.contains_key(name) {
             fs::remove_file(path.join(name)).map_err(|e| {
@@ -3876,7 +3883,7 @@ pub(crate) fn prepare(
             if known_deleted {
                 match fs::remove_dir(&dir_path) {
                     Ok(()) => {}
-                    Err(_) if view_unobservable(path, Path::new(name), &tracked)? => {
+                    Err(_) if view_unobservable(path, Path::new(name), &tracked_index)? => {
                         crate::workspace_cleanup::remove_tree(&dir_path).map_err(|e| {
                             format!(
                                 "Unrecorded files prevent project directory deletion at {name}: {e}"
@@ -3892,7 +3899,7 @@ pub(crate) fn prepare(
             } else if !expected
                 .keys()
                 .any(|key| workspace::scope_contains_at(path, Path::new(key), Path::new(name)))
-                && view_unobservable(path, Path::new(name), &tracked)?
+                && view_unobservable(path, Path::new(name), &tracked_index)?
             {
                 // Nothing this view could ever record is left inside, so the
                 // directory is an ignored leftover of a reused slot rather than
@@ -4120,7 +4127,9 @@ fn nested_repository_views(project: &Path) -> Result<BTreeMap<String, View>, Str
     ) -> Result<(), String> {
         for item in fs::read_dir(project.join(relative)).map_err(|e| e.to_string())? {
             let item = item.map_err(|e| e.to_string())?;
-            if is_git_entry_name(project, &item.file_name()) {
+            if is_git_entry_name(project, &item.file_name())
+                || workspace::is_reserved_grapher_runtime_path(Path::new(&item.file_name()))
+            {
                 continue;
             }
             let path = relative.join(item.file_name());

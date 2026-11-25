@@ -262,6 +262,9 @@ pub async fn send_notification(
 pub fn open_notification_settings() -> Result<(), String> {
     let mut child = std::process::Command::new("/usr/bin/open")
         .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("Failed to open macOS Notification Settings: {error}"))?;
     std::thread::Builder::new()

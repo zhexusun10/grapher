@@ -181,7 +181,8 @@ test("actual App: node results render before Planner completion; edges rearrange
     endTool("failed-before-updates", true);
     await page.waitForFunction(([successes, errors]) =>
       document.querySelectorAll(".tool-call-card.success").length >= successes + 2
-      && document.querySelectorAll(".tool-call-card.error").length >= errors + 1,
+      && document.querySelectorAll(".tool-call-card.error").length >= errors + 1
+      && document.querySelector('.react-flow__node[data-id="a"] p')?.textContent === "ORDERED_NEW_TASK",
     [successesBeforeReordered, errorsBeforeReordered]);
     assert.equal(await page.locator('.react-flow__node[data-id="a"] p').textContent(), "ORDERED_NEW_TASK",
       "Late results (including a failed predecessor) must not hide or overwrite newer successful graph changes");

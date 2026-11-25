@@ -7,7 +7,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Mutex, OnceLock,
     },
     thread,
@@ -185,6 +185,7 @@ struct Transport {
     // backend too, so a second Settings opening does not re-enter the
     // single Provider/Auth IPC bridge while it is warming up.
     catalog_cache: Mutex<Option<Value>>,
+    catalog_generation: AtomicU64,
     stopped: AtomicBool,
     #[cfg(not(feature = "fixture"))]
     prepared: Pool<(), Bridge>,
@@ -195,9 +196,25 @@ impl Transport {
         Self {
             active: Mutex::new(None),
             catalog_cache: Mutex::new(None),
+            catalog_generation: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             #[cfg(not(feature = "fixture"))]
             prepared: Pool::new("Provider/Auth"),
+        }
+    }
+
+    fn invalidate_catalog_cache(&self) {
+        if let Ok(mut cache) = self.catalog_cache.lock() {
+            self.catalog_generation.fetch_add(1, Ordering::SeqCst);
+            *cache = None;
+        }
+    }
+
+    fn store_catalog_cache(&self, expected_generation: u64, value: Value) {
+        if let Ok(mut cache) = self.catalog_cache.lock() {
+            if self.catalog_generation.load(Ordering::SeqCst) == expected_generation {
+                *cache = Some(value);
+            }
         }
     }
 
@@ -317,20 +334,18 @@ pub fn request(body: Value) -> Result<Value, String> {
         }
     }
     if operation == "logout" {
-        if let Ok(mut cache) = transport.catalog_cache.lock() {
-            *cache = None;
-        }
+        transport.invalidate_catalog_cache();
     }
+    let catalog_generation = transport.catalog_generation.load(Ordering::SeqCst);
     let result = transport.request(body)?;
     if catalog {
-        if let Ok(mut cache) = transport.catalog_cache.lock() {
-            *cache = Some(result.clone());
-        }
+        transport.store_catalog_cache(catalog_generation, result.clone());
     }
-    if operation == "set_model_visibility" || result["status"] == "complete" {
-        if let Ok(mut cache) = transport.catalog_cache.lock() {
-            *cache = None;
-        }
+    if operation == "logout"
+        || operation == "set_model_visibility"
+        || result["status"] == "complete"
+    {
+        transport.invalidate_catalog_cache();
     }
     if catalog {
         crate::model_window::remember_catalog(&result);
@@ -605,5 +620,22 @@ mod tests {
             transport.shutdown();
             assert!(transport.prepared.wait_idle(Duration::from_millis(100)));
         }
+    }
+
+    #[test]
+    fn stale_in_flight_catalog_does_not_overwrite_concurrent_invalidation() {
+        let transport = Transport::new();
+        let before = transport.catalog_generation.load(Ordering::SeqCst);
+        transport.invalidate_catalog_cache();
+        transport.store_catalog_cache(before, serde_json::json!({ "providers": ["stale"] }));
+        assert!(transport.catalog_cache.lock().unwrap().is_none());
+
+        let current = transport.catalog_generation.load(Ordering::SeqCst);
+        let fresh = serde_json::json!({ "providers": ["fresh"] });
+        transport.store_catalog_cache(current, fresh.clone());
+        assert_eq!(
+            transport.catalog_cache.lock().unwrap().as_ref(),
+            Some(&fresh)
+        );
     }
 }

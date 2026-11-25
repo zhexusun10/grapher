@@ -6,6 +6,9 @@ import { configureExecutionRetries } from '../engine/retry-policy.ts';
 
 test('execution reconnects five times with fixed two second waits', () => {
   configureExecutionRetries();
+  const retryFn = SettingsManager.prototype.getRetrySettings;
+  configureExecutionRetries();
+  assert.equal(SettingsManager.prototype.getRetrySettings, retryFn, 'repeated configuration must be idempotent');
   const settings = SettingsManager.inMemory({
     retry: { enabled: false, maxRetries: 20, baseDelayMs: 10000, provider: { maxRetries: 10 } },
   });

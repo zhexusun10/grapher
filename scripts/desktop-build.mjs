@@ -309,6 +309,7 @@ function runTauriCli(args, { env, cwd = root } = {}) {
     cwd,
     env,
     stdio: 'inherit',
+    shell: process.platform === 'win32' && /\.cmd$/i.test(command),
   });
 }
 

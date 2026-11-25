@@ -35,7 +35,8 @@ class Worker {
       env: { ...process.env, GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_COMMAND_PROJECT: repository ? '1' : '0' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    this.done = new Promise(resolve => this.child.once('close', () => resolve()));
+    let resolveDone!: () => void;
+    this.done = new Promise(resolve => { resolveDone = resolve; });
     // Extension failures can echo UI input; diagnostics never enter durable logs.
     this.child.stderr.resume();
     const lines = createInterface({ input: this.child.stdout });
@@ -52,10 +53,12 @@ class Worker {
       else if (value.type === 'extension_error') event({ type: 'extension_ui_request', id: randomUUID(), method: 'notify', message: 'An extension operation failed. Check its configuration and supported execution modes.' });
     });
     const ended = () => {
+      if (this.closed) return;
       this.closed = true;
       lines.close();
       for (const pending of this.pending.values()) pending.reject(new Error('Extension command worker stopped'));
       this.pending.clear();
+      resolveDone();
     };
     this.child.once('error', ended);
     this.child.once('close', ended);
@@ -133,7 +136,11 @@ export class ExtensionCommands {
         job.status = 'failed';
         job.error = 'Extension command failed or is unavailable in this project. Commands that need a conversation must run in an active session.';
       }
-    } finally { job.worker?.close(); }
+    } finally {
+      const worker = job.worker;
+      job.worker = undefined;
+      worker?.close();
+    }
   }
 
   async dispatch(request: Event) {
@@ -144,6 +151,7 @@ export class ExtensionCommands {
       const worker = new Worker(repository, () => {});
       this.catalogs.add(worker);
       const timeout = setTimeout(() => worker.close(), 25_000);
+      timeout.unref();
       try {
         const catalog = await worker.request({ type: 'get_commands' });
         return { instance: this.instance, commands: catalog.commands.filter(available) };

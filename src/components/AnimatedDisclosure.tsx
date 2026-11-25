@@ -92,7 +92,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     const anchor = panel.closest<HTMLElement>(".workspace-details") ?? panel;
     const startAnchorTop = anchor.getBoundingClientRect().top;
     let scrollDelta = 0;
-    let revealProgress = 0;
+    let appliedScroll = 0;
     const scrollOwner = {};
     const following = container?.dataset.transcriptFollowing === "true"
       && container.dataset.transcriptScrollMode !== "latest";
@@ -106,9 +106,9 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
         }
         return;
       }
-      const targetAnchorTop = startAnchorTop - scrollDelta * revealProgress;
+      const targetAnchorTop = startAnchorTop - appliedScroll;
       const correction = anchor.getBoundingClientRect().top - targetAnchorTop;
-      if (Math.abs(correction) >= 0.5) container.scrollTop += correction;
+      if (Math.abs(correction) >= 0.5) container.scrollTop += Math.round(correction);
     };
     interruptedRef.current = false;
 
@@ -167,15 +167,25 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
 
     const duration = 280;
     const startTime = performance.now();
+    const heightDelta = targetHeight - startHeight;
+    const parsedOpacity = parseFloat(animator.style.opacity);
+    const startOpacity = Number.isFinite(parsedOpacity) ? parsedOpacity : (open ? 0 : 1);
+    const targetOpacity = open ? 1 : 0;
     const tick = (now: number) => {
       // rAF's frame timestamp can precede a performance.now() taken mid-frame
       // in useLayoutEffect; clamp at 0 so the first frame never scrolls backward.
       const progress = Math.min(1, Math.max(0, (now - startTime) / duration));
       // ease-out cubic
       const ease = 1 - Math.pow(1 - progress, 3);
-      animator.style.height = `${startHeight + (targetHeight - startHeight) * ease}px`;
-      animator.style.opacity = `${open ? ease : 1 - ease}`;
-      revealProgress = ease;
+      // Quantize to integer pixels so siblings below the disclosure (such as
+      // the node error/paused banner) never jitter against integer scrollHeight
+      // and scrollTop clamping on expand or collapse.
+      const nextHeight = Math.round(startHeight + heightDelta * ease);
+      animator.style.height = `${nextHeight}px`;
+      animator.style.opacity = `${startOpacity + (targetOpacity - startOpacity) * ease}`;
+      appliedScroll = heightDelta > 0
+        ? Math.round(scrollDelta * (nextHeight - startHeight) / heightDelta)
+        : Math.round(scrollDelta * ease);
       followAnchor();
       if (progress < 1) {
         rafIdRef.current = requestAnimationFrame(tick);

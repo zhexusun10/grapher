@@ -305,6 +305,10 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         result_execution: state.result_execution.as_ref(),
         run_metrics: state.run_metrics.as_ref(),
         plan_type: state.plan_type.as_deref(),
+        // File changes are read on demand through `get_file_changes`: a
+        // build-heavy Run can hold tens of thousands of paths, and the first
+        // screen only shows a collapsed trigger. Mark the omission so the
+        // browser knows to fetch instead of reading a stale empty summary.
         file_changes_omitted: (!state.run_id.is_empty()).then_some(true),
         file_changes: None,
         stop_requested: None,
@@ -364,13 +368,15 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         })
         .chain(state.execution_stop_requests.iter().map(String::as_str))
         .collect();
-    for execution in metadata["executions"].as_array_mut().unwrap() {
-        if execution["status"] == "failed"
-            && execution["id"]
-                .as_str()
-                .is_some_and(|id| interrupted.contains(id))
-        {
-            execution["status"] = json!("paused");
+    if let Some(executions) = metadata["executions"].as_array_mut() {
+        for execution in executions {
+            if execution["status"] == "failed"
+                && execution["id"]
+                    .as_str()
+                    .is_some_and(|id| interrupted.contains(id))
+            {
+                execution["status"] = json!("paused");
+            }
         }
     }
     if let Some(graph) = &state.review_graph {
@@ -386,16 +392,6 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         // keeps the committed graph; a commit, failure or abort clears it.
         metadata["graph"] = json!(graph);
         metadata["plan"] = json!(crate::compiler::compile(graph, false).ok());
-    }
-    if let Some(plan_type) = &state.plan_type {
-        metadata["planType"] = json!(plan_type);
-    }
-    if !state.run_id.is_empty() {
-        // File changes are read on demand through `get_file_changes`: a
-        // build-heavy Run can hold tens of thousands of paths, and the first
-        // screen only shows a collapsed trigger. Mark the omission so the
-        // browser knows to fetch instead of reading a stale empty summary.
-        metadata["fileChangesOmitted"] = json!(true);
     }
     Ok(metadata)
 }

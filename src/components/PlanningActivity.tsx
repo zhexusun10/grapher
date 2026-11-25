@@ -105,6 +105,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     return loaded;
   });
   const segments = useRef(initialSegments);
+  const terminalChecksRef = useRef<{ scope: string; map: Map<string, number> }>({ scope: "", map: new Map() });
   const [segmentVersion, setSegmentVersion] = useState(0);
   const hasSummarySegments = [...segments.current.values()].some(w => normalizeTranscriptProjection(w) === "summary");
   const hasProjectedSegments = [...segments.current.values()].some(w => Boolean(normalizeTranscriptProjection(w)));
@@ -363,7 +364,13 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     // A terminal summary and file EOF can race the writer's final flush even
     // when the first page already contained some output. Recheck the newest
     // freshly-read terminal window twice, then suspend again once it is stable.
-    const terminalChecks = new Map<string, number>();
+    // Keep the counter in a ref scoped to (key, retry, running) so falling back
+    // from an unsupported `cards` projection does not wipe pending rechecks.
+    const terminalChecksScope = `${key}:${retry}:${running ? 1 : 0}`;
+    if (terminalChecksRef.current.scope !== terminalChecksScope) {
+      terminalChecksRef.current = { scope: terminalChecksScope, map: new Map() };
+    }
+    const terminalChecks = terminalChecksRef.current.map;
     const staleEmpty = (id: string) => {
       const window = segments.current.get(id);
       return !!window && window.settled && window.end === window.total && !window.text &&

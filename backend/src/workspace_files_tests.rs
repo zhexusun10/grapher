@@ -426,3 +426,135 @@ fn materialize_replaces_file_with_case_aliased_directory_and_rejects_tracked_sym
         .unwrap_err();
     assert!(err.contains("conflicts with tracked path"), "{err}");
 }
+
+#[test]
+fn managed_environment_skips_nested_git_and_grapher_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path().join("store");
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    fs::create_dir_all(source.join(".agent-home/.grapher/pi-agent")).unwrap();
+    fs::create_dir_all(source.join(".agent-home/tool/.git")).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(source.join(".agent-home/config"), "keep").unwrap();
+    fs::write(
+        source.join(".agent-home/.grapher/pi-agent/models.json"),
+        "{\"providers\":{}}\n",
+    )
+    .unwrap();
+    fs::write(source.join(".agent-home/tool/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(source.join(".agent-home/tool/bin.sh"), "echo ok\n").unwrap();
+
+    let files = Files::environment(&store, &[".agent-home".into()], &[])
+        .unwrap()
+        .with_project_index(false);
+    let version = Uuid::new_v4().to_string();
+    files.capture(&source, &version, "", &[]).unwrap();
+    files.verify(&source, &version, "").unwrap();
+
+    // Inherited target receives ordinary files but never `.grapher` or `.git`.
+    files
+        .materialize(&target, std::slice::from_ref(&version), None, false)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join(".agent-home/config")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        fs::read_to_string(target.join(".agent-home/tool/bin.sh")).unwrap(),
+        "echo ok\n"
+    );
+    assert!(!target.join(".agent-home/.grapher").exists());
+    assert!(!target.join(".agent-home/tool/.git").exists());
+
+    // Materializing back onto a live root with nested `.grapher`/`.git` preserves them untouched.
+    fs::write(source.join(".agent-home/config"), "mutated").unwrap();
+    files
+        .materialize(&source, std::slice::from_ref(&version), None, false)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join(".agent-home/config")).unwrap(),
+        "keep"
+    );
+    assert!(source.join(".agent-home/.grapher/pi-agent/models.json").is_file());
+    assert!(source.join(".agent-home/tool/.git/HEAD").is_file());
+
+    // Top-level and multi-segment metadata scopes are still rejected if ever passed as a scope.
+    let bad_root = temp.path().join("bad-scope");
+    fs::create_dir_all(bad_root.join(".grapher")).unwrap();
+    fs::create_dir_all(bad_root.join("sub/.grapher")).unwrap();
+    for bad_scope in [".grapher", "sub/.grapher"] {
+        let bad_files =
+            Files::environment(&temp.path().join("store-bad"), &[bad_scope.into()], &[])
+                .unwrap()
+                .with_project_index(false);
+        let err = bad_files
+            .capture(&bad_root, &Uuid::new_v4().to_string(), "", &[])
+            .unwrap_err();
+        assert!(
+            err.contains("Managed environment contains unsupported Git/Runtime metadata path"),
+            "{bad_scope}: {err}"
+        );
+    }
+
+    // Symlinked nested `.grapher`/`.git` inside a managed scope are skipped untouched
+    // without following or inheriting the symlink target.
+    let external = temp.path().join("external-metadata");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("secret.txt"), "do not inherit").unwrap();
+    let link_source = temp.path().join("link-source");
+    let link_target = temp.path().join("link-target");
+    fs::create_dir_all(link_source.join(".agent-home")).unwrap();
+    fs::create_dir_all(&link_target).unwrap();
+    fs::write(link_source.join(".agent-home/keep.txt"), "ok").unwrap();
+    crate::path_safety::directory_link(&external, &link_source.join(".agent-home/.grapher"));
+    let link_files = Files::environment(
+        &temp.path().join("store-link"),
+        &[".agent-home".into()],
+        &[],
+    )
+    .unwrap()
+    .with_project_index(false);
+    let link_version = Uuid::new_v4().to_string();
+    link_files
+        .capture(&link_source, &link_version, "", &[])
+        .unwrap();
+    link_files
+        .materialize(&link_target, std::slice::from_ref(&link_version), None, false)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(link_target.join(".agent-home/keep.txt")).unwrap(),
+        "ok"
+    );
+    assert!(!link_target.join(".agent-home/.grapher").exists());
+    assert!(link_source.join(".agent-home/.grapher").exists());
+
+    // Rooted snapshots (the production workspace+state path) also skip nested `.grapher`/`.git`.
+    let rooted_store = temp.path().join("rooted-store");
+    let rooted_files = Files::environment(&rooted_store, &[], &[])
+        .unwrap()
+        .with_project_index(false);
+    let layouts = BTreeMap::from([(
+        "state".into(),
+        RootScope::normalized(vec![".agent-home".into()], vec![]),
+    )]);
+    let source_roots = BTreeMap::from([("state".into(), source.clone())]);
+    let target_roots = BTreeMap::from([("state".into(), temp.path().join("rooted-target"))]);
+    fs::create_dir_all(&target_roots["state"]).unwrap();
+    let rooted_version = Uuid::new_v4().to_string();
+    rooted_files
+        .capture_roots(&source_roots, &layouts, &rooted_version, &[])
+        .unwrap();
+    rooted_files
+        .verify_roots(&source_roots, &rooted_version)
+        .unwrap();
+    rooted_files
+        .materialize_roots(&target_roots, &rooted_version)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(target_roots["state"].join(".agent-home/config")).unwrap(),
+        "keep"
+    );
+    assert!(!target_roots["state"].join(".agent-home/.grapher").exists());
+    assert!(!target_roots["state"].join(".agent-home/tool/.git").exists());
+}

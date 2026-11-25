@@ -641,11 +641,28 @@ impl Files {
         collection: Collection<'_>,
     ) -> Result<(), String> {
         let name = path.strip_prefix(root).map_err(|error| error.to_string())?;
-        if self.scopes.is_some() && excluded(name) {
-            return Err(format!(
-                "Managed environment contains unsupported Git/Runtime metadata path: {}",
-                path.display()
-            ));
+        if let Some(scopes) = &self.scopes {
+            if excluded(name) {
+                let nested_in_valid_scope = scopes.iter().any(|scope| {
+                    !excluded(scope) && workspace::scope_contains_at(root, name, scope)
+                });
+                if !nested_in_valid_scope {
+                    return Err(format!(
+                        "Managed environment contains unsupported Git/Runtime metadata path: {}",
+                        path.display()
+                    ));
+                }
+                // Nested `.git` or `.grapher*` directories inside a managed scope
+                // (for example `$HOME/.grapher/pi-agent` or editable `.venv` git
+                // checkouts) cannot enter snapshot manifests; skip them untouched
+                // rather than failing the whole environment snapshot.
+                collection.note_untouched(Some(root), name)?;
+                eprintln!(
+                    "Skipping nested Git/Runtime metadata path (not inherited): {}",
+                    path.display()
+                );
+                return Ok(());
+            }
         }
         if self.is_excluded(root, name) || path == self.excluded_data {
             collection.note_untouched(Some(root), name)?;

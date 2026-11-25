@@ -837,6 +837,13 @@ test("provider loading stays in the Refresh icon without a status panel or layou
     await refresh.waitFor();
     await assertReady();
     await page.locator(".settings-modal").evaluate(el => Promise.allSettled(el.getAnimations().map(a => a.finished)));
+    // Wait for JS-driven modal entrance transform (Framer Motion) to settle before measuring layout.
+    await page.waitForFunction(() => {
+      const modal = document.querySelector(".settings-modal");
+      if (!modal) return false;
+      const transform = getComputedStyle(modal).transform;
+      return !transform || transform === "none" || transform === "matrix(1, 0, 0, 1, 0, 0)";
+    });
     assert.equal(requests.length, 1, "reopening Settings reuses the catalog without a loading panel");
     assert.equal(await page.locator(".provider-status-loading").count(), 0);
 
@@ -1448,8 +1455,8 @@ for (const type of ["tool", "thinking"]) {
         // reveal rather than the follow-to-bottom expansion covered separately.
         await scroller.evaluate(scroll => {
           // Model a real reader: only a gesture takes over from following.
-          scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
-          scroll.scrollTop = Math.max(0, scroll.scrollTop - 60);
+          scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
+          scroll.scrollTop = Math.max(0, scroll.scrollTop - 40);
         });
         await page.waitForTimeout(100);
         await header.click();

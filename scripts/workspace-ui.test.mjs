@@ -352,7 +352,8 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator('.run-item[data-run-id^="pending-"]').click({ button: "right" });
     assert.equal(await page.locator(".context-menu-item.danger").isDisabled(), true);
     await page.locator(".main-view-stage").click({ position: { x: 10, y: 10 } });
-    while (!planningRequested) await page.waitForTimeout(20);
+    for (let i = 0; !planningRequested && i < 250; i++) await page.waitForTimeout(20);
+    assert.equal(planningRequested, true, "detached planning request should start");
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
     await page.locator(".landing-screen").waitFor();
     await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
@@ -470,7 +471,8 @@ test("workspace removal commits backend deletion before pruning indexes and surv
     assert.equal(await page.locator('[data-run-id="run-a"]').count(), 1);
     rejectDeletion = false;
     await remove("Alpha");
-    while (removals.length < 2) await page.waitForTimeout(10);
+    for (let i = 0; removals.length < 2 && i < 500; i++) await page.waitForTimeout(10);
+    assert.equal(removals.length, 2, "second workspace removal request should start");
     assert.equal(await page.locator(".project-workspace-item").count(), 2, "pending deletion must not hide the workspace");
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
     await page.locator(".landing-screen").waitFor();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
@@ -710,6 +710,25 @@ test('MCP precedence is global, dedicated, then trusted project; overrides inher
     const untrusted = loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: false });
     assert.equal(untrusted.autoEnableCodemode, false);
     assert.equal(untrusted.servers[0].config.enabled, undefined);
+  } finally { f.close(); }
+});
+
+test('MCP deduplicates symlinked global/dedicated directories and strips UTF-8 BOM from project config', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.workspace, '.pi'));
+    writeFileSync(join(f.own, 'mcp.json'), '{not-json');
+    const link = join(f.base, 'global-link');
+    symlinkSync(f.own, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const loaded = loadGrapherMcpConfig({ globalDir: link, agentDir: f.own, cwd: f.workspace, projectTrusted: false });
+    assert.equal(loaded.errors.length, 1, 'identical symlinked agent directories must only be loaded once');
+
+    writeFileSync(join(f.own, 'mcp.json'), JSON.stringify({ mcpServers: { docs: { command: 'docs-cmd' } } }));
+    writeFileSync(join(f.workspace, '.pi/mcp.json'), '\uFEFF' + JSON.stringify({ mcpServers: { docs: { enabled: false } } }));
+    const bomLoaded = loadGrapherMcpConfig({ globalDir: link, agentDir: f.own, cwd: f.workspace, projectTrusted: true });
+    assert.deepEqual(bomLoaded.errors, []);
+    assert.equal(bomLoaded.servers.length, 1);
+    assert.equal(bomLoaded.servers[0].config.enabled, false);
   } finally { f.close(); }
 });
 

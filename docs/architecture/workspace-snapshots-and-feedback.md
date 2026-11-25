@@ -248,7 +248,8 @@ identical owner/group-based access decisions, including setuid/setgid behavior
 and setgid-directory inheritance; the source is never chowned. Each node still
 uses its own private project view and sandbox, not access to the whole Run
 parent. Preparation is also deterministic for a reused slot:
-entries no view can observe (ignored generated caches such as `__pycache__`, and
+entries no view can observe (ignored generated caches such as `__pycache__`,
+untracked reserved Grapher runtime directories without tracked descendants, and
 directories left holding nothing else) are removed instead of blocking the
 comparison, while unrecorded project content still fails it. A reused slot's
 native project Git is rebound to the recorded code reference when it still
@@ -300,8 +301,13 @@ relocation/migration is performed.
 ## Git collection
 
 New source/project-view snapshots collect raw physical bytes without running
-clean/smudge/EOL filters. Native `.gitignore` is not a collection boundary, and
-`.grapher*` project names are preserved. The graph index is separate from the
+clean/smudge/EOL filters. Native `.gitignore` is not a collection boundary.
+Reserved Grapher runtime directories (`.grapher`, `.grapher-worktrees`,
+`.grapher-workspaces`, `.grapher-state`, case-insensitively) and in-flight
+`.grapher-publish-<16-hex>.tmp` temp files are excluded from collection unless
+explicitly tracked in project Git (and skipped during nested-repository scans);
+ordinary project files such as `.grapher-project.json` or `.grapher-project/config`
+remain collected. The graph index is separate from the
 user's staged/unstaged distinctions. Publication uses a private raw-checkout
 repository so conversion cannot silently change the delivered bytes.
 
@@ -331,7 +337,7 @@ git add -f -A
 with pathspec exclusions for:
 
 - `.git` and Git internals;
-- `.grapher*` and Runtime data;
+- reserved Grapher runtime directories (`.grapher`, `.grapher-worktrees`, `.grapher-workspaces`, `.grapher-state`) and in-flight `.grapher-publish-<16-hex>.tmp` temp files (unless explicitly tracked in project Git; ordinary `.grapher-*` project files remain collected);
 - managed environment/cache scopes;
 - rebuildable tool caches (see below);
 - untracked macOS host metadata (`.DS_Store`, `._*`). Tracked metadata stays

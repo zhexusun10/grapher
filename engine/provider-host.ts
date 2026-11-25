@@ -65,10 +65,14 @@ let stopping = false;
 const stop = async () => {
   if (stopping) return;
   stopping = true;
+  if (!commandHost && commandHostLoading) {
+    try { commandHost = await commandHostLoading; } catch {}
+  }
   await commandHost?.close();
   adapter.close();
   process.exit(0);
 };
+process.stdout.on("error", () => { void stop(); });
 input.on("close", () => {
   inputClosed = true;
   // A vanished parent must not leave an interactive login child alive forever.

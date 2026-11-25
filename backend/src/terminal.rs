@@ -323,10 +323,20 @@ impl TerminalManager {
         });
 
         {
-            let mut map = self
-                .sessions
-                .lock()
-                .map_err(|_| "Terminal session registry lock poisoned".to_string())?;
+            let mut map = match self.sessions.lock() {
+                Ok(map) => map,
+                Err(_) => {
+                    session.kill();
+                    let _ = child.wait();
+                    return Err("Terminal session registry lock poisoned".to_string());
+                }
+            };
+            if map.len() >= MAX_TERMINAL_SESSIONS {
+                drop(map);
+                session.kill();
+                let _ = child.wait();
+                return Err("Too many open terminals; close an existing terminal first".into());
+            }
             map.insert(session_id.clone(), Arc::clone(&session));
         }
 
@@ -404,6 +414,7 @@ impl TerminalManager {
             Ok(thread) => thread,
             Err(error) => {
                 self.kill_session(&session_id);
+                let _ = child.wait();
                 return Err(format!("Failed to start PTY reader thread: {error}"));
             }
         };

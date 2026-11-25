@@ -110,7 +110,7 @@ interface ExtensionState {
 function readExtensionState(directory: string): ExtensionState {
   const path = join(directory, 'extensions.json');
   if (!existsSync(path)) return { overrides: {} };
-  const parsed = JSON.parse(readFileSync(path, 'utf8'));
+  const parsed = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''));
   const value = parsed?.overrides;
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(v => typeof v !== 'boolean')) {
     throw new Error('Invalid Grapher extensions.json');
@@ -134,7 +134,7 @@ function overrides(directory: string): Record<string, boolean> {
 async function resolveGlobal() {
   const agentDir = globalAgentDir();
   const path = join(agentDir, 'settings.json');
-  const settingsManager = SettingsManager.inMemory(existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}, { projectTrusted: false });
+  const settingsManager = SettingsManager.inMemory(existsSync(path) ? JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) : {}, { projectTrusted: false });
   const manager = new DefaultPackageManager({ cwd: agentDir, agentDir, settingsManager, builtinExtensions: builtins });
   // Settings must not install missing packages on the UI or agent startup path.
   return manager.resolve(async () => 'skip');

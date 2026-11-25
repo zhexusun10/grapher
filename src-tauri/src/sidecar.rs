@@ -4,10 +4,11 @@
 //! mode, reads the machine-readable stdout readiness handshake with bounded
 //! timeout and early-exit diagnostics, and shuts down cleanly by closing stdin
 //! before falling back to bounded force-termination.
-use crate::paths::{build_prepended_path, path_env_key};
+use crate::paths::{build_fallback_path, path_env_key};
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
@@ -28,6 +29,7 @@ pub struct SidecarConfig {
     pub bundled_node: Option<PathBuf>,
     pub trusted_git: Option<PathBuf>,
     pub managed_git_path: Option<PathBuf>,
+    pub base_path: Option<OsString>,
     pub data_dir: PathBuf,
     pub startup_timeout: Duration,
     pub shutdown_timeout: Duration,
@@ -49,6 +51,7 @@ impl SidecarConfig {
             bundled_node,
             trusted_git,
             managed_git_path: None,
+            base_path: None,
             data_dir,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
@@ -336,28 +339,29 @@ pub fn build_sidecar_command(config: &SidecarConfig) -> Result<Command, String> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut prepend_dirs = Vec::new();
+    let mut fallback_dirs = Vec::new();
     if let Some(node) = &config.bundled_node {
         command
             .env("GRAPHER_TRUSTED_NODE", node)
             .env("GRAPHER_NODE_PATH", node);
         if let Some(parent) = node.parent() {
-            prepend_dirs.push(parent.to_path_buf());
+            fallback_dirs.push(parent.to_path_buf());
         }
     }
     if let Some(git) = &config.trusted_git {
         command.env("GRAPHER_TRUSTED_GIT", git);
         if let Some(parent) = git.parent() {
-            prepend_dirs.push(parent.to_path_buf());
+            fallback_dirs.push(parent.to_path_buf());
         }
     }
     if let Some(managed_git) = &config.managed_git_path {
         command.env("GRAPHER_MANAGED_GIT_PATH", managed_git);
     }
-    if !prepend_dirs.is_empty() {
+    if !fallback_dirs.is_empty() || config.base_path.is_some() {
         let key = path_env_key();
         let existing = std::env::var_os(&key);
-        let merged = build_prepended_path(&prepend_dirs, existing.as_deref())?;
+        let base = config.base_path.as_deref().or(existing.as_deref());
+        let merged = build_fallback_path(base, &fallback_dirs)?;
         command.env(key, merged);
     }
 
@@ -665,10 +669,11 @@ fn force_terminate_child(child: &mut Child) {
     }
     #[cfg(unix)]
     {
-        let pid = child.id() as libc::pid_t;
-        if pid > 0 {
-            unsafe {
-                let _ = libc::kill(-pid, libc::SIGKILL);
+        if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+            if pid > 0 {
+                unsafe {
+                    let _ = libc::kill(-pid, libc::SIGKILL);
+                }
             }
         }
     }
@@ -743,12 +748,16 @@ exit 0"#,
             ),
         );
 
-        let config = SidecarConfig::new(
+        let mut config = SidecarConfig::new(
             script,
             resources.clone(),
             Some(fake_node.clone()),
             None,
             data.clone(),
+        );
+        let user_bin = temp.path().join("user/bin");
+        config.base_path = Some(
+            std::env::join_paths([&user_bin, &PathBuf::from("/usr/bin")]).unwrap(),
         );
         let sidecar = BackendSidecar::start(config).unwrap();
         assert_eq!(sidecar.backend_url().unwrap(), "http://127.0.0.1:43210");
@@ -761,7 +770,11 @@ exit 0"#,
         assert!(dumped.contains(&format!("DIR={}\n", resources.display())), "{dumped}");
         assert!(dumped.contains(&format!("NODE={}\n", fake_node.display())), "{dumped}");
         assert!(
-            dumped.contains(&format!("PATH={}:", fake_node.parent().unwrap().display())),
+            dumped.contains(&format!(
+                "PATH={}:/usr/bin:{}\n",
+                user_bin.display(),
+                fake_node.parent().unwrap().display()
+            )),
             "{dumped}"
         );
 

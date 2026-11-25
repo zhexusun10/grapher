@@ -214,7 +214,8 @@ test('prepared queue identities survive async input rewriting without recalling 
       args: ['--mode', 'rpc', '--no-tools', '--no-extensions', '--no-skills', '--no-approve', '--extension', extension,
         '--model', 'queue-test/test', '--session-dir', sessions],
       environment: { GRAPHER_MODE: 'node', GRAPHER_AGENT_KIND: 'serial', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
-        GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, PI_CODING_AGENT_DIR: agent } });
+        GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, PI_CODING_AGENT_DIR: agent,
+        GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS: 'python3=/usr/bin/python3' } });
     assert.equal(bound.success, true, bound.error);
     const ids = [randomUUID(), randomUUID(), randomUUID()];
     const marked = (text, id) => `${text}\n\n<grapher-node-steer-id>${id}</grapher-node-steer-id>`;

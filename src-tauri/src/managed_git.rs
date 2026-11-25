@@ -483,8 +483,12 @@ fn extract_archive(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 return Err(format!(
-                    "Failed to extract managed Git archive{}: {stderr}",
-                    if stderr.is_empty() { "" } else { ": " }
+                    "Failed to extract managed Git archive{}",
+                    if stderr.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {stderr}")
+                    }
                 ));
             }
             Ok(())

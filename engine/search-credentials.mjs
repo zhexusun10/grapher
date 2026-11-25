@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { toHostInput } from './path-identity.mjs';
+import { samePath, toHostInput } from './path-identity.mjs';
 
 export const TOP_DEDICATED_SEARCH_PROVIDERS = [
   ['parallel', 'PARALLEL_API_KEY'],
@@ -17,7 +17,7 @@ function isValidApiKey(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 8192 && !/[^\x21-\x7e]/.test(value);
 }
 
-function readSavedKeyFile(path, provider) {
+function readSavedKeyStore(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
@@ -27,8 +27,7 @@ function readSavedKeyFile(path, provider) {
       const entry = parsed.keys[name];
       if (entry !== undefined && !isValidApiKey(entry)) return undefined;
     }
-    const value = parsed.keys[provider];
-    return isValidApiKey(value) ? value : undefined;
+    return parsed.keys;
   } catch {
     return undefined;
   }
@@ -76,12 +75,14 @@ export function hasConfiguredDedicatedSearchApiInDir(agentDir, globalDir) {
   const globalAuth = !explicitAuth && process.env.GRAPHER_ISOLATED_PI_SEARCH !== '1'
     ? resolve(globalDir, 'better-web-search-auth.json')
     : undefined;
-  const inheritGlobal = globalAuth && globalAuth !== resolve(ownAuth);
+  const inheritGlobal = globalAuth && !samePath(globalAuth, ownAuth);
+  const ownKeys = readSavedKeyStore(ownAuth);
+  const globalKeys = inheritGlobal ? readSavedKeyStore(globalAuth) : undefined;
   return TOP_DEDICATED_SEARCH_PROVIDERS.some(([provider, env]) => {
     if (apis?.[provider] === false) return false;
     if (process.env[env]?.trim()) return true;
-    if (readSavedKeyFile(ownAuth, provider)) return true;
-    if (inheritGlobal && readSavedKeyFile(globalAuth, provider)) return true;
+    if (ownKeys && isValidApiKey(ownKeys[provider])) return true;
+    if (globalKeys && isValidApiKey(globalKeys[provider])) return true;
     return false;
   });
 }
