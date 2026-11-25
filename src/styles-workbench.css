@@ -509,6 +509,43 @@
   line-height: 1.4;
 }
 
+.working-indicator-dots {
+  display: inline-flex;
+  align-items: baseline;
+  margin-left: 1px;
+  gap: 0.5px;
+}
+
+.working-indicator-dot {
+  display: inline-block;
+  animation: working-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.working-indicator-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.working-indicator-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes working-dot-bounce {
+  0%, 50%, 100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  25% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .working-indicator-dot {
+    animation: none;
+  }
+}
+
 /* 虚拟列表负责屏幕外卸载；不要再叠加 content-visibility，避免快速滚动时出现延迟绘制闪烁。 */
 
 .chat-messages-stream {

@@ -107,7 +107,12 @@ test("empty composer continues without submitting a message; drafts and stop ret
       await working.waitFor({ state: "detached" });
     }
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=graph&finalize=snapshot&finalizeNode=sibling`);
-    await page.locator(".working-indicator").getByText("Working…", { exact: true }).waitFor();
+    const workingIndicator = page.locator(".working-indicator");
+    await workingIndicator.getByText("Working...", { exact: true }).waitFor();
+    assert.equal(await workingIndicator.locator(".working-indicator-dot").count(), 3,
+      "Working indicator renders three animated dots");
+    assert.equal(await workingIndicator.locator(".working-indicator-dot").first().evaluate(el => getComputedStyle(el).animationName),
+      "working-dot-bounce", "Working dots run the bounce animation");
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__composer-continuation?pending=1`);
     await page.locator("textarea").evaluate(input => {
       for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));

@@ -2736,6 +2736,7 @@ h3 {
 :root.window-inactive .activity-summary-icon.spin,
 :root.window-inactive .react-flow__edge.animated path,
 :root.window-inactive .sidebar-skeleton-item::after,
-:root.window-inactive .thinking-streaming-cursor {
+:root.window-inactive .thinking-streaming-cursor,
+:root.window-inactive .working-indicator-dot {
   animation-play-state: paused !important;
 }

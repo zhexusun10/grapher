@@ -426,6 +426,13 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   }, []);
   useEffect(() => () => workingObserverRef.current?.disconnect(), []);
 
+  const workingText = compacting ? "Compacting…" : (workingLabel ?? "Working…");
+  const workingBaseText = workingText.endsWith("…")
+    ? workingText.slice(0, -1)
+    : workingText.endsWith("...")
+      ? workingText.slice(0, -3)
+      : null;
+
   return (
     <div ref={panelRef} className={`workspace-details ${open ? "open" : ""}`}>
       <AnimatePresence initial={false}>
@@ -435,6 +442,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
             className="working-indicator"
             role="status"
             aria-live="polite"
+            aria-label={workingBaseText !== null ? workingText : undefined}
             initial={reduceMotion ? false : {
               opacity: 0, x: -4, height: 0, marginBottom: 0, paddingTop: 0, paddingBottom: 0,
             }}
@@ -445,7 +453,18 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
             transition={{ duration: reduceMotion ? 0 : 0.2, ease: [0.22, 1, 0.36, 1] }}
             style={{ overflow: "hidden" }}
           >
-            {compacting ? "Compacting…" : (workingLabel ?? "Working…")}
+            {workingBaseText !== null ? (
+              <>
+                <span className="working-indicator-label">{workingBaseText}</span>
+                <span className="working-indicator-dots" aria-hidden="true">
+                  <span className="working-indicator-dot">.</span>
+                  <span className="working-indicator-dot">.</span>
+                  <span className="working-indicator-dot">.</span>
+                </span>
+              </>
+            ) : (
+              workingText
+            )}
           </motion.div>
         )}
       </AnimatePresence>
