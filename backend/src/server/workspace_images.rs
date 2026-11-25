@@ -1,10 +1,21 @@
-//! Read-only raster previews scoped to a retained conversation workspace.
+//! Read-only raster previews scoped to a retained conversation workspace or `/tmp`.
 use super::{argument, open_file_context, open_file_roots, resolve_open_file_target, Service};
 use std::{fs, io::Read, path::PathBuf, sync::Arc};
 
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
-fn read_image(roots: &[PathBuf], path: &str) -> Result<(Vec<u8>, &'static str), String> {
+fn system_temp_image_roots() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        vec![PathBuf::from("/tmp")]
+    }
+    #[cfg(windows)]
+    {
+        vec![std::env::temp_dir()]
+    }
+}
+
+fn validate_relative_image_path(path: &str) -> Result<String, String> {
     // Validate independently of the host: Windows prefixes/ADS and backslash
     // traversal must remain invalid when a transcript is opened on Unix too.
     let path = path.replace('\\', "/");
@@ -21,11 +32,43 @@ fn read_image(roots: &[PathBuf], path: &str) -> Result<(Vec<u8>, &'static str), 
     {
         return Err("Invalid workspace image path".into());
     }
-    let target = resolve_open_file_target(roots, path)?;
-    let file = fs::File::open(target).map_err(|error| error.to_string())?;
-    if file.metadata().map_err(|error| error.to_string())?.len() > MAX_IMAGE_BYTES {
+    Ok(path.to_string())
+}
+
+fn open_regular_image_file(target: &std::path::Path) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(target).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Workspace image must be a regular file".into());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES {
         return Err("Workspace image exceeds 20 MiB".into());
     }
+    Ok(file)
+}
+
+fn read_image(
+    workspace_roots: &[PathBuf],
+    temp_roots: &[PathBuf],
+    path: &str,
+) -> Result<(Vec<u8>, &'static str), String> {
+    let (roots, relative) = if let Some(rest) = path
+        .strip_prefix("/tmp/")
+        .or_else(|| path.strip_prefix("/private/tmp/"))
+    {
+        (temp_roots, validate_relative_image_path(rest)?)
+    } else {
+        (workspace_roots, validate_relative_image_path(path)?)
+    };
+    let target = resolve_open_file_target(roots, &relative)?;
+    let file = open_regular_image_file(&target)?;
     let mut bytes = Vec::new();
     file.take(MAX_IMAGE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -70,7 +113,8 @@ pub(super) fn get_workspace_image(
     };
     let scope = execution_id.map(|id| vec![id]);
     let roots = open_file_roots(&context, scope.as_deref(), &["planner".into()])?;
-    read_image(&roots, &path)
+    let temp_roots = system_temp_image_roots();
+    read_image(&roots, &temp_roots, &path)
 }
 
 #[cfg(test)]
@@ -199,16 +243,54 @@ mod tests {
     fn workspace_images_read_rasters_and_reject_unsafe_or_unbounded_files() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("workspace");
+        let temp_root = temp.path().join("system-tmp");
         fs::create_dir_all(root.join("artifacts/中文 space")).unwrap();
+        fs::create_dir_all(root.join(".tmp")).unwrap();
+        fs::create_dir_all(temp_root.join("sub")).unwrap();
         let png = b"\x89PNG\r\n\x1a\npreview";
+        let tmp_png = b"\x89PNG\r\n\x1a\ntmp-preview";
         fs::write(root.join("artifacts/中文 space/截图.png"), png).unwrap();
+        fs::write(root.join(".tmp/card-preview.png"), png).unwrap();
+        fs::write(temp_root.join("compacted-card-preview.png"), tmp_png).unwrap();
+        fs::write(temp_root.join("sub/preview.png"), tmp_png).unwrap();
         let roots = vec![root.clone()];
-        let (bytes, mime) = read_image(&roots, "./artifacts/中文 space/截图.png").unwrap();
+        let temp_roots = vec![temp_root.clone()];
+        let (bytes, mime) =
+            read_image(&roots, &temp_roots, "./artifacts/中文 space/截图.png").unwrap();
         assert_eq!(bytes, png);
         assert_eq!(mime, "image/png");
+        assert_eq!(
+            read_image(&roots, &temp_roots, ".tmp/card-preview.png").unwrap(),
+            (png.to_vec(), "image/png")
+        );
+        assert_eq!(
+            read_image(&roots, &temp_roots, "./.tmp/card-preview.png").unwrap(),
+            (png.to_vec(), "image/png")
+        );
+        assert_eq!(
+            read_image(&roots, &temp_roots, "/tmp/compacted-card-preview.png").unwrap(),
+            (tmp_png.to_vec(), "image/png")
+        );
+        assert_eq!(
+            read_image(&roots, &temp_roots, "/private/tmp/sub/preview.png").unwrap(),
+            (tmp_png.to_vec(), "image/png")
+        );
+        // Workspace relative paths do not fall back to /tmp, and /tmp paths do not read workspace files.
+        assert!(read_image(&roots, &temp_roots, "compacted-card-preview.png").is_err());
+        assert!(read_image(&roots, &temp_roots, "/tmp/artifacts/中文 space/截图.png").is_err());
         for path in [
             "../outside.png",
             "/absolute.png",
+            "/tmp",
+            "/tmp/",
+            "/tmp/../outside.png",
+            "/tmp/sub/../../outside.png",
+            "/tmp//compacted-card-preview.png",
+            "/tmp/a\\..\\outside.png",
+            "/tmp/.git/image.png",
+            "/tmp/.grapher/image.png",
+            "/tmp/image.png:stream",
+            "\\tmp\\compacted-card-preview.png",
             "C:\\image.png",
             "artifacts/../x.png",
             "..\\outside.png",
@@ -218,13 +300,15 @@ mod tests {
             "missing.png",
             "artifacts",
         ] {
-            assert!(read_image(&roots, path).is_err(), "{path}");
+            assert!(read_image(&roots, &temp_roots, path).is_err(), "{path}");
         }
         fs::write(root.join("fake.png"), b"<svg onload='evil()'></svg>").unwrap();
-        assert!(read_image(&roots, "fake.png").is_err());
+        assert!(read_image(&roots, &temp_roots, "fake.png").is_err());
+        fs::write(temp_root.join("fake.png"), b"<svg onload='evil()'></svg>").unwrap();
+        assert!(read_image(&roots, &temp_roots, "/tmp/fake.png").is_err());
         let large = fs::File::create(root.join("large.png")).unwrap();
         large.set_len(MAX_IMAGE_BYTES + 1).unwrap();
-        assert!(read_image(&roots, "large.png")
+        assert!(read_image(&roots, &temp_roots, "large.png")
             .unwrap_err()
             .contains("20 MiB"));
 
@@ -232,6 +316,29 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("image.png"), png).unwrap();
         crate::path_safety::directory_link(&outside, &root.join("linked"));
-        assert!(read_image(&roots, "linked/image.png").is_err());
+        assert!(read_image(&roots, &temp_roots, "linked/image.png").is_err());
+        crate::path_safety::directory_link(&outside, &temp_root.join("linked"));
+        assert!(read_image(&roots, &temp_roots, "/tmp/linked/image.png").is_err());
+
+        #[cfg(unix)]
+        {
+            let real_tmp_dir = tempfile::Builder::new()
+                .prefix("grapher-workspace-image-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let dir_name = real_tmp_dir.path().file_name().unwrap().to_str().unwrap();
+            fs::write(real_tmp_dir.path().join("real.png"), tmp_png).unwrap();
+            let real_temp_roots = system_temp_image_roots();
+            assert_eq!(
+                read_image(&roots, &real_temp_roots, &format!("/tmp/{dir_name}/real.png")).unwrap(),
+                (tmp_png.to_vec(), "image/png")
+            );
+            // Non-regular files (such as FIFOs) must fail closed without blocking.
+            let fifo = real_tmp_dir.path().join("pipe.png");
+            let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+            assert!(open_regular_image_file(&fifo).is_err());
+            assert!(read_image(&roots, &real_temp_roots, &format!("/tmp/{dir_name}/pipe.png")).is_err());
+        }
     }
 }

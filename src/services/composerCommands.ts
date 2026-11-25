@@ -15,7 +15,7 @@ export const blockedCommands = new Set([
   "login", "logout", "settings",
 ]);
 export function parseSlashCommand(text: string): { name: string; args: string } | null {
-  const match = text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+  const match = text.trim().match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
   if (!match) return null;
   const args = (match[2] ?? "").trim();
   if (match[1] === "scoped" && /^(model|models)$/.test(args)) return { name: "scoped-models", args: "" };

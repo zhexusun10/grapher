@@ -2386,6 +2386,53 @@ test("fast streaming reasoning preserves upper DOM nodes and stays pinned withou
   } finally { await context.close(); }
 });
 
+test("expanded thinking card keeps its streaming glow until smooth typing finishes draining", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking", undefined, "no-preference");
+  try {
+    const longReasoning = "Step-by-step analysis: " + "checking invariants carefully. ".repeat(45) + "FINAL_COT_MARKER";
+    await page.evaluate(() => {
+      window.audit.append({ type: "message_start", message: { role: "assistant", content: [] } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0, content: "Starting..." } });
+    });
+    const card = page.locator('[data-thinking-view="live"] .thinking-card').first();
+    const body = card.locator(".thinking-card-body");
+    await body.waitFor();
+    await page.evaluate(content => {
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: content } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Starting..." + content } });
+      window.audit.append({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Starting..." + content }] } });
+    }, longReasoning);
+    // Immediately after thinking_end/message_end, smooth typing is still draining
+    // the long reasoning text; the expanded card must retain its glow/streaming state.
+    const duringDrain = await card.evaluate(el => ({
+      className: el.className,
+      hasPulse: Boolean(el.querySelector(".thinking-icon-box.pulse")),
+      hasStatus: Boolean(el.querySelector(".thinking-status.streaming")),
+      hasCursor: Boolean(el.querySelector(".thinking-streaming-cursor")),
+      hasFinal: (el.querySelector(".thinking-card-body")?.textContent ?? "").includes("FINAL_COT_MARKER"),
+    }));
+    assert.equal(duringDrain.hasFinal, false, "test expects typewriter drain to still be in progress");
+    assert.match(duringDrain.className, /\bstreaming\b/, "expanded CoT card must keep streaming glow while typing");
+    assert.equal(duringDrain.hasPulse, true, "expanded CoT icon glow must stay active while typing");
+    assert.equal(duringDrain.hasStatus, true, "expanded CoT status pill must stay active while typing");
+    assert.equal(duringDrain.hasCursor, true, "expanded CoT typing cursor must stay visible while typing");
+
+    // Once the remaining characters finish typing, the card settles cleanly.
+    await body.getByText("FINAL_COT_MARKER").waitFor({ timeout: 5000 });
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-thinking-view="live"] .thinking-card');
+      return el && el.classList.contains("settled") && !el.classList.contains("streaming");
+    }, { timeout: 3000 });
+    const afterDrain = await card.evaluate(el => ({
+      hasPulse: Boolean(el.querySelector(".thinking-icon-box.pulse")),
+      hasCursor: Boolean(el.querySelector(".thinking-streaming-cursor")),
+    }));
+    assert.equal(afterDrain.hasPulse, false, "icon glow should settle once typing finishes");
+    assert.equal(afterDrain.hasCursor, false, "typing cursor should clear once typing finishes");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const reducedMotion of ["no-preference"]) {
   test(`resolving an auto route keeps a Planner reader where they scrolled to (${reducedMotion})`, { timeout: 30_000 }, async () => {
     // Auto routing renders the Planner pane while the route is still undecided.

@@ -1008,6 +1008,7 @@ fn compact_json_line(
             }
         }
         "extension_error"
+        | "compaction"
         | "compaction_start"
         | "compaction_end"
         | "grapher_process_started"

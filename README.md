@@ -62,7 +62,7 @@ Goal → Planner → Compiled Graph → Deterministic Rust Runtime
 
 ## Why Grapher
 
-- **Visual, Steerable Workbench** — Chat with agents, manage provider auth and per-role models, inspect live tool calls, thinking traces, and file diffs, and pause or steer any running node from a single UI.
+- **Visual, Steerable Workbench** — Chat with agents, manage provider auth and per-role models, inspect live tool calls, thinking traces, and file diffs, open an integrated workspace terminal, and pause or steer any running node from a single UI.
 - **Smart Workspace Handoffs** — At idle boundaries, small dispatches (≤3 nodes after the worker cap) work directly in your source tree. With isolation enabled, larger waves use private workspaces and publish after the whole batch succeeds, replacing each changed file atomically. Shared-source work refills free worker slots without waiting for unrelated siblings; overlapping edits are not isolated.
 - **Bounded Feedback & Rework** — Connect review or verification nodes back to implementation nodes with explicit retry limits—catching regressions automatically without runaway loops.
 - **Unbiased Models, Deterministic Harness** — Systemic orchestration rules live in the Rust runtime rather than bloated system prompts, keeping models sharp, general-purpose, and free of framework prior bias.
@@ -72,7 +72,7 @@ Goal → Planner → Compiled Graph → Deterministic Rust Runtime
 
 <p align="center">
   <img src="assets/readme-home.png" width="100%" alt="Current Grapher home screen with a detailed AI video detection pipeline goal and Serial and Graph mode controls">
-  <br><sub>Start with a goal and choose Serial or Graph. Auto routing can be enabled in Harness settings.</sub>
+  <br><sub>Start with a goal and choose Serial or Graph. Auto routing can be enabled in UI settings.</sub>
 </p>
 
 **More agents are not always better.** Grapher gives you a fast single-agent mode for linear work and a compiled task graph when parallelism pays off:

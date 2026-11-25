@@ -2,6 +2,7 @@ import React, { memo, useCallback } from "react";
 import type { FileAttachment, ImageAttachment, TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
+import { CompactedCard } from "./CompactedCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { ActivitySummaryRow, type CardsTransitionPhase } from "./ActivitySummaryRow";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
@@ -27,6 +28,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, cards
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
   if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} getChildExpanded={getChildExpanded} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  if (item.type === "compaction") return <CompactedCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} />;

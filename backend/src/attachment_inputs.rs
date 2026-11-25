@@ -365,7 +365,10 @@ pub(crate) fn remove(
 
 /// Ensure `<root>/attachment-inputs/<run>` exists so sandboxed executions can
 /// bind it read-only at launch and immediately see live-steer uploads.
-#[cfg(any(not(feature = "fixture"), test))]
+#[cfg(any(
+    all(not(feature = "fixture"), any(target_os = "macos", target_os = "linux")),
+    test
+))]
 pub(crate) fn ensure_run_directory(root: &Path, run: &str) -> Result<PathBuf, String> {
     let run = Uuid::parse_str(run).map_err(|_| "Invalid attachment Run ID")?;
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
@@ -447,7 +450,10 @@ pub(crate) fn adopt_for_run(
 /// sandboxed executions: `<root>/attachment-inputs/<run>` (created if absent so
 /// live steers become readable immediately) plus any adopted pre-run attachment
 /// directories owned by this Run in the cleanup manifest.
-#[cfg(any(not(feature = "fixture"), test))]
+#[cfg(any(
+    all(not(feature = "fixture"), any(target_os = "macos", target_os = "linux")),
+    test
+))]
 pub(crate) fn read_only_directories_for_run(
     root: &Path,
     run_id: &str,

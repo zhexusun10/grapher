@@ -50,6 +50,7 @@ import {
   appendPlannerError, applyPartitionerDelta, applyPartitionerMessageEnd,
   applyPlannerAssistantMessageEnd, applyPlannerEdgeEditsToState, applyPlannerNodeEditsToState, applyPlannerExtensionError,
   applyPlannerTextDelta, applyPlannerThinkingUpdate, applyPlannerToolCallUpdate,
+  applyPlannerCompaction,
   applyPlannerToolExecutionEnd, applyPlannerToolExecutionStart, applyPlannerUserMessageStart,
   initialPlannerStream,
 } from "./services/plannerStream";
@@ -2444,9 +2445,8 @@ export default function App() {
                 }
 
                 setPlannerStream((prev) => applyPlannerToolExecutionEnd(prev, pEvent, resText, exitCode, isErr, truncated, args));
-              } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end") {
-                const compacting = pEvent.type === "compaction_start";
-                queuePlannerStream((prev) => (!!prev.compacting === compacting ? prev : { ...prev, compacting }));
+              } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end" || pEvent?.type === "compaction") {
+                queuePlannerStream((prev) => applyPlannerCompaction(prev, pEvent));
               }
             } else if (event.type === "error") {
               endLocalWork(scope);

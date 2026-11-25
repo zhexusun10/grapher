@@ -58,16 +58,24 @@ export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null
     direction = ["ArrowUp", "PageUp", "Home"].includes(key) || (key === " " && (event as KeyboardEvent).shiftKey) ? -1
       : ["ArrowDown", "PageDown", "End", " "].includes(key) ? 1 : 0;
   }
+  const pixelWheel = event.type === "wheel" && !(event as WheelEvent).deltaMode;
+  let remaining = pixelWheel ? Math.abs(direction) : 0;
   let node = event.target as HTMLElement | null;
   if (!node || typeof node.closest !== "function") return false;
   for (; node && node !== scroller; node = node.parentElement) {
     const style = getComputedStyle(node);
     if (!/^(auto|scroll|overlay)$/.test(style.overflowY) || node.scrollHeight <= node.clientHeight + 1) continue;
+    if (style.overscrollBehaviorY === "contain" || style.overscrollBehaviorY === "none") return true;
     // scrollHeight/clientHeight are rounded integers even when the browser's
     // actual scroll range is fractional, so allow a 1px boundary tolerance.
-    const canScroll = direction < 0 ? node.scrollTop > 1
-      : direction > 0 ? node.scrollTop < node.scrollHeight - node.clientHeight - 1 : true;
-    if (canScroll || style.overscrollBehaviorY === "contain" || style.overscrollBehaviorY === "none") return true;
+    const available = direction < 0 ? node.scrollTop
+      : direction > 0 ? node.scrollHeight - node.clientHeight - node.scrollTop : Infinity;
+    if (available <= 1) continue;
+    if (!pixelWheel || remaining <= 0) return true;
+    // A wheel gesture larger than the remaining inner scroll room chains its
+    // overflow into the outer conversation scroller on the same event.
+    remaining -= available;
+    if (remaining <= 0) return true;
   }
   return false;
 }

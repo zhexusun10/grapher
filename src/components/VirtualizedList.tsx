@@ -35,6 +35,7 @@ const MeasuredListRow = memo(function MeasuredListRow({ id, measureElement, rowE
 function rowHeightKind(id: string): string {
   if (id.startsWith("summary_")) return "summary";
   if (id.startsWith("think_")) return "think";
+  if (id.startsWith("compact_") || id.startsWith("planner_compact_")) return "compaction";
   if (id.startsWith("divider_")) return "divider";
   if (id.startsWith("tool") || id.startsWith("call_")) return "tool";
   if (id.startsWith("err_") || id.startsWith("system_")) return "error";
@@ -96,13 +97,21 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const kindHeightStatsRef = useRef(new Map<string, { sum: number; count: number }>());
   const statsHeightsRef = useRef(new Map<string, number>());
   const frozenEstimatesRef = useRef(new Map<string, number>());
+  // Track ONLY live post-mount ResizeObserver height deltas on already-mounted
+  // rows so Commit #2 never double-compensates newly mounted rows whose initial
+  // estimate-to-actual height delta was already handled by rangePrependAnchor.
+  const pendingResizeDeltasRef = useRef(new Map<string, number>());
 
-  const measure = useCallback((id: string, height: number, sync = false, deferToRaf = false) => {
+  const measure = useCallback((id: string, height: number, sync = false, deferToRaf = false, isLiveResize = false) => {
     if (height <= 0 || transitionPhaseRef.current !== "idle") return;
     const existing = heights.current.get(id);
     if (existing !== undefined && Math.abs(existing - height) < 0.25) return;
-    if (existing !== undefined) {
+    if (existing !== undefined && isLiveResize) {
       resizedRevisionRef.current += 1;
+      pendingResizeDeltasRef.current.set(
+        id,
+        (pendingResizeDeltasRef.current.get(id) ?? 0) + (height - existing),
+      );
     }
     const kind = rowHeightKind(id);
     const prevForStats = statsHeightsRef.current.get(id);
@@ -167,7 +176,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const height = rect.height > 0 ? rect.height : element.offsetHeight;
     if (height <= 0) return;
     if (!sync) {
-      measure(id, height, false, false);
+      measure(id, height, false, false, false);
       return;
     }
     const parentEl = parentRef.current;
@@ -182,7 +191,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       Boolean(
         parentEl && rect.top < parentEl.getBoundingClientRect().top + parentEl.clientTop - 1,
       );
-    measure(id, height, needsSync, !needsSync);
+    measure(id, height, needsSync, !needsSync, true);
   }, [measure]);
   const previousIds = useRef<string[]>([]);
   const ids = useMemo(() => shareJson(previousIds.current, items.map(item => item.id)), [items]);
@@ -309,12 +318,41 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     ? null
     : (keepTransitionAnchor ? transitionAnchorRef.current : readingAnchor.current);
   if ((readingHistory || (!externalTransitionAnchor && !pinnedToBottom && !followingLatest && !restoreRef.current)) && structureChanged && parent && ref.current) {
-    const top = parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top;
-    if (top + parent.clientHeight > 0) {
+    const parentBounds = parent.getBoundingClientRect();
+    const elementRect = ref.current.getBoundingClientRect();
+    const top = parentBounds.top + parent.clientTop - elementRect.top;
+    // Lists strictly above the viewport are compensated via `aboveViewportBottom`
+    // (or their deferred execution wrapper) so we never fail on an unmounted row
+    // or double-compensate with ViewportExecutionHistory.
+    if (elementRect.bottom > parentBounds.top + 2 && top + parent.clientHeight > 0) {
       const retained = retainedRowAnchor(beforeIds, ids, previousOffsets.current, offsets, top, top + parent.clientHeight);
-      const row = retained && ref.current.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
-      if (row && retained) {
-        anchor = { id: retained.id, visualTop: row.getBoundingClientRect().top };
+      let row = retained
+        ? (rowElements.current.get(retained.id) ?? ref.current.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`))
+        : null;
+      let anchorId = row && row.isConnected && retained ? retained.id : null;
+      if (!anchorId) {
+        // Fallback when `before` offsets drifted from DOM geometry: scan the
+        // actually mounted visible rows so a prepend never drops its anchor.
+        const nextIndices = new Map(ids.map((id, index) => [id, index]));
+        const scanStart = Math.max(0, previousRangeStartRef.current);
+        const scanEnd = Math.min(beforeIds.length, previousRangeEndRef.current || beforeIds.length);
+        for (let prevIndex = scanStart; prevIndex < scanEnd; prevIndex++) {
+          const candidateId = beforeIds[prevIndex];
+          const nextIndex = nextIndices.get(candidateId);
+          if (nextIndex === undefined) continue;
+          if (Math.abs((offsets[nextIndex] ?? 0) - (previousOffsets.current[prevIndex] ?? 0)) < 1) continue;
+          const candidateRow = rowElements.current.get(candidateId);
+          if (!candidateRow || !candidateRow.isConnected) continue;
+          const rect = candidateRow.getBoundingClientRect();
+          if (rect.bottom > parentBounds.top && rect.top < parentBounds.bottom) {
+            row = candidateRow;
+            anchorId = candidateId;
+            break;
+          }
+        }
+      }
+      if (row && anchorId) {
+        anchor = { id: anchorId, visualTop: row.getBoundingClientRect().top };
         if (transitionPhase !== "idle") transitionAnchorRef.current = anchor;
         // Newly inserted rows start with estimated heights; keep the anchor
         // through the measurements that replace them, or the reader is dragged
@@ -518,15 +556,33 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       const gesture = gestureRowAnchor.current;
       const bounds = visibleBounds();
       if (gesture && parent && bounds) {
+        const row = rowElements.current.get(gesture.id)
+          ?? ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
         if (gesture.awaitingScroll && Math.abs(parent.scrollTop - gesture.scrollTop) > 0.5) {
           gesture.awaitingScroll = false;
           cancelGestureTimer();
-          // A row may have resized before the browser applied this gesture.
-          // Reconcile it now even if no further measurements arrive.
-          if (pendingGestureMeasurementRef.current && mounted.current) setHeightVersion(value => value + 1);
+          // Reconcile any resize that arrived while awaiting this scroll
+          // synchronously right here so the next wheel event cannot clobber it
+          // or defer it to a later paint frame.
+          if (pendingGestureMeasurementRef.current) {
+            pendingGestureMeasurementRef.current = false;
+            pendingResizeDeltasRef.current.clear();
+            if (row && row.isConnected) {
+              const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
+              const delta = row.getBoundingClientRect().top - expectedTop;
+              if (Math.abs(delta) > 1) {
+                parent.scrollTop += delta;
+                if (ref.current) {
+                  liveTopRef.current = Math.round(parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top);
+                }
+                dispatchScrollAdjusted(parent);
+              }
+              gesture.visualTop = row.getBoundingClientRect().top;
+              gesture.scrollTop = parent.scrollTop;
+            }
+          }
         }
-        const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
-        if (!row) {
+        if (!row || !row.isConnected) {
           cancelGestureTimer();
           gestureRowAnchor.current = null;
           pendingGestureMeasurementRef.current = false;
@@ -597,7 +653,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       for (const [id, element] of rowElements.current) {
         if (!element.isConnected) continue;
         const rectHeight = element.getBoundingClientRect().height;
-        measure(id, rectHeight > 0 ? rectHeight : element.offsetHeight, true);
+        measure(id, rectHeight > 0 ? rectHeight : element.offsetHeight, true, false, true);
       }
     };
     const onExternalScrollAdjusted = () => {
@@ -691,8 +747,17 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     ? Math.round(parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top)
     : null;
   const pixelOverscan = Math.max(height * 1.8, 1200);
-  const hysteresisSlack = pixelOverscan - Math.max(height * 0.65, 440);
+  const safeMargin = Math.max(height * 0.65, 440);
   const liveTop = liveTopRef.current;
+  const prevStart = previousRangeStartRef.current;
+  const prevEnd = previousRangeEndRef.current;
+  const liveWithinSafeWindow =
+    !structureChanged &&
+    liveTop !== null &&
+    prevEnd > prevStart &&
+    prevEnd <= offsets.length - 1 &&
+    (prevStart === 0 || liveTop >= (offsets[prevStart] ?? 0) + safeMargin) &&
+    (prevEnd >= ids.length || liveTop + height <= (offsets[prevEnd] ?? 0) - safeMargin);
   // Preserve window hysteresis across unrelated re-renders (such as new
   // streaming output arriving while the reader scrolled slightly upward inside
   // the overscan buffer): shifting `range.start` early mounts unmeasured older
@@ -702,7 +767,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     liveTop !== null &&
     !pinnedToBottom &&
     transitionPhase === "idle" &&
-    Math.abs(liveTop - viewport.top) <= hysteresisSlack
+    liveWithinSafeWindow
       ? viewport.top
       : (liveTop ?? viewport.top);
   const top = restoreTop ?? anchorTop ?? externalTop ?? (pinnedToBottom ? Math.max(effectiveViewportTop, totalHeight - height) : effectiveViewportTop);
@@ -770,27 +835,44 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   // every visible row BEFORE the async measurement re-render runs. Capture a
   // visible retained row's pre-commit screen position here so `useLayoutEffect`
   // compensates `scrollTop` synchronously before the browser paints.
+  // Also track lists sitting strictly above the viewport (e.g. an earlier
+  // execution turn in a multi-turn conversation) so mounting rows into them
+  // never pushes the currently visible conversation below them.
   let rangePrependAnchor: { id: string; visualTop: number } | null = null;
+  let aboveViewportBottom: number | null = null;
   if (
-    virtual &&
     !pinnedToBottom &&
     !followingLatest &&
     !anchor &&
     !restoreRef.current &&
     parent &&
-    ref.current &&
-    range.start < previousRangeStartRef.current
+    ref.current
   ) {
     const parentBounds = parent.getBoundingClientRect();
-    for (let index = range.start; index < range.end; index++) {
-      const id = ids[index];
-      const element = rowElements.current.get(id);
-      if (!element || !element.isConnected) continue;
-      const rect = element.getBoundingClientRect();
-      if (rect.bottom > parentBounds.top && rect.top < parentBounds.bottom) {
-        rangePrependAnchor = { id, visualTop: rect.top };
-        break;
+    const elementRect = ref.current.getBoundingClientRect();
+    const windowChanged = virtual && (range.start !== previousRangeStartRef.current || range.end !== previousRangeEndRef.current);
+    if (elementRect.bottom <= parentBounds.top + 2 && (structureChanged || windowChanged)) {
+      const deferredAncestor = ref.current.closest<HTMLElement>("[data-deferred-height-compensated='true']");
+      const delegatedAbove = Boolean(deferredAncestor && deferredAncestor.getBoundingClientRect().bottom <= parentBounds.top + 2);
+      if (!delegatedAbove) {
+        aboveViewportBottom = elementRect.bottom;
       }
+    } else if (virtual && range.start < previousRangeStartRef.current) {
+      let fallbackAnchor: { id: string; visualTop: number } | null = null;
+      for (let index = range.start; index < range.end; index++) {
+        const id = ids[index];
+        const element = rowElements.current.get(id);
+        if (!element || !element.isConnected) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.bottom > parentBounds.top && rect.top < parentBounds.bottom) {
+          rangePrependAnchor = { id, visualTop: rect.top };
+          break;
+        }
+        if (!fallbackAnchor && rect.top >= parentBounds.top) {
+          fallbackAnchor = { id, visualTop: rect.top };
+        }
+      }
+      if (!rangePrependAnchor) rangePrependAnchor = fallbackAnchor;
     }
   }
 
@@ -803,6 +885,38 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const prevRangeStart = previousRangeStartRef.current;
     previousRangeStartRef.current = rangeStart;
     previousRangeEndRef.current = rangeEnd;
+    const syncLiveTop = (scroller: HTMLElement) => {
+      if (!ref.current) return;
+      const parentRect = scroller.getBoundingClientRect();
+      const elementRect = ref.current.getBoundingClientRect();
+      liveTopRef.current = Math.round(parentRect.top + scroller.clientTop - elementRect.top);
+    };
+    const rebaseGestureAnchor = (scroller: HTMLElement) => {
+      const gesture = gestureRowAnchor.current;
+      if (!gesture) return;
+      const gestureRow = rowElements.current.get(gesture.id);
+      if (gestureRow && gestureRow.isConnected) {
+        gesture.visualTop = gestureRow.getBoundingClientRect().top;
+        gesture.scrollTop = scroller.scrollTop;
+      } else {
+        gestureRowAnchor.current = null;
+        pendingGestureMeasurementRef.current = false;
+      }
+    };
+    const consumePendingResizeDelta = (limitIndex: number): number => {
+      if (pendingResizeDeltasRef.current.size === 0) return 0;
+      let total = 0;
+      for (const [id, rowDelta] of pendingResizeDeltasRef.current) {
+        if (limitIndex === Infinity) {
+          total += rowDelta;
+          continue;
+        }
+        const rowIndex = ids.indexOf(id);
+        if (rowIndex >= 0 && rowIndex < limitIndex) total += rowDelta;
+      }
+      pendingResizeDeltasRef.current.clear();
+      return total;
+    };
     // Child layout effects can measure newly mounted overscan rows before this
     // commit, while `offsets` still contains their estimates. Capture the
     // measurement revision when `offsets` was computed so those later child
@@ -816,6 +930,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     // A staged transcript is measured inside a zero-height clipped wrapper
     // behind the live stream; it must not scroll the shared conversation pane.
     if (ref.current?.closest("[data-transcript-staged='true']")) {
+      pendingResizeDeltasRef.current.clear();
       previousOffsets.current = offsets;
       previousOffsetIds.current = ids;
       return;
@@ -836,6 +951,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       if (row) {
         const delta = row.getBoundingClientRect().top - parent.getBoundingClientRect().top - restore.top;
         if (Math.abs(delta) > 0.5) parent.scrollTop += delta;
+        syncLiveTop(parent);
+        rebaseGestureAnchor(parent);
+        pendingResizeDeltasRef.current.clear();
         onRestoreScrollRef.current?.(parent.scrollTop);
         dispatchScrollAdjusted(parent);
         previousOffsets.current = offsets;
@@ -853,15 +971,20 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     let scheduledSyncCommit = false;
     readingAnchor.current = anchor;
     if (externalTransitionAnchor && parent) {
+      pendingResizeDeltasRef.current.clear();
       syncCardsTransitionAnchorScroll();
     } else if (anchor && parent) {
       const retained = anchor;
-      const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
+      const row = rowElements.current.get(retained.id)
+        ?? ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
       let shifted = false;
-      if (row) {
+      pendingResizeDeltasRef.current.clear();
+      if (row && row.isConnected) {
         const visualDelta = row.getBoundingClientRect().top - retained.visualTop;
         if (Math.abs(visualDelta) >= 0.5) {
           parent.scrollTop += visualDelta;
+          syncLiveTop(parent);
+          rebaseGestureAnchor(parent);
           dispatchScrollAdjusted(parent);
           shifted = true;
         }
@@ -879,7 +1002,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         // rAF would unmount every visible row for one frame if any state update
         // (such as `setLoadingOlder(false)`) renders after the anchor releases.
         updateViewport();
-        if (hasPendingMeasurements && rangePrependSyncCountRef.current < 4) {
+        if (hasPendingMeasurements && rangePrependSyncCountRef.current < 8) {
           rangePrependSyncCountRef.current += 1;
           scheduledSyncCommit = true;
           setHeightVersion(value => value + 1);
@@ -893,36 +1016,54 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         }
       }
       if (bottomPinnedNow && parent) {
+        pendingResizeDeltasRef.current.clear();
         if (before !== offsets) {
           parent.scrollTop = parent.scrollHeight;
+          syncLiveTop(parent);
+          rebaseGestureAnchor(parent);
           // A follower's own pin is not the reader scrolling back down. Report it
           // like any other row-height correction so a gesture that just turned
           // following off cannot be undone by a scroll it did not make.
           dispatchScrollAdjusted(parent);
           if (transitionPhase === "idle") scheduleViewportUpdate();
         }
+      } else if (!followingLatestNow && parent && ref.current && aboveViewportBottom !== null && parent.scrollTop > 0) {
+        const preRenderResizeDelta = consumePendingResizeDelta(Infinity);
+        const shift = (ref.current.getBoundingClientRect().bottom - aboveViewportBottom) + preRenderResizeDelta;
+        if (Math.abs(shift) >= 0.5) {
+          parent.scrollTop += shift;
+          syncLiveTop(parent);
+          rebaseGestureAnchor(parent);
+          dispatchScrollAdjusted(parent);
+          updateViewport();
+          if (hasPendingMeasurements && rangePrependSyncCountRef.current < 8) {
+            rangePrependSyncCountRef.current += 1;
+            scheduledSyncCommit = true;
+            setHeightVersion(value => value + 1);
+          }
+        } else if (hasPendingMeasurements && rangePrependSyncCountRef.current < 8) {
+          rangePrependSyncCountRef.current += 1;
+          scheduledSyncCommit = true;
+          setHeightVersion(value => value + 1);
+        }
       } else if (!followingLatestNow && parent && rangePrependAnchor && rangeStart < prevRangeStart) {
         // Compensate newly mounted unmeasured older rows BEFORE the browser
         // paints this frame, preventing a one-frame jump down and snap back.
         const anchoredRow = rowElements.current.get(rangePrependAnchor.id);
+        const anchoredIndex = ids.indexOf(rangePrependAnchor.id);
+        const preRenderResizeDelta = anchoredIndex >= 0 ? consumePendingResizeDelta(anchoredIndex) : 0;
         if (anchoredRow && anchoredRow.isConnected) {
-          const shift = anchoredRow.getBoundingClientRect().top - rangePrependAnchor.visualTop;
+          const shift = (anchoredRow.getBoundingClientRect().top - rangePrependAnchor.visualTop) + preRenderResizeDelta;
           if (Math.abs(shift) >= 0.5) {
             parent.scrollTop += shift;
+            syncLiveTop(parent);
+            rebaseGestureAnchor(parent);
             dispatchScrollAdjusted(parent);
-            const gesture = gestureRowAnchor.current;
-            if (gesture) {
-              const gestureRow = rowElements.current.get(gesture.id);
-              if (gestureRow && gestureRow.isConnected) {
-                gesture.visualTop = gestureRow.getBoundingClientRect().top;
-                gesture.scrollTop = parent.scrollTop;
-              }
-            }
             // Flush both `viewport.top` (from the compensated `scrollTop`) and
             // `offsets` (from child measurements already stored in `heights`)
             // in one synchronous pre-paint commit so `visibleRows` never runs
             // with a stale `viewport.top` and unmounts visible bottom rows.
-            if (rangePrependSyncCountRef.current < 4) {
+            if (rangePrependSyncCountRef.current < 8) {
               rangePrependSyncCountRef.current += 1;
               scheduledSyncCommit = true;
               updateViewport();
@@ -932,7 +1073,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
             } else {
               scheduleViewportUpdate();
             }
-          } else if (hasPendingMeasurements && rangePrependSyncCountRef.current < 4) {
+          } else if (hasPendingMeasurements && rangePrependSyncCountRef.current < 8) {
             rangePrependSyncCountRef.current += 1;
             scheduledSyncCommit = true;
             setHeightVersion(value => value + 1);
@@ -945,13 +1086,14 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       else if (!followingLatestNow && parent && before !== offsets && before.length > 1 &&
           previousOffsetIds.current[0] === ids[0]) {
         const gesture = gestureRowAnchor.current;
-        const row = gesture && ref.current?.querySelector<HTMLElement>(
-          `[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
-        if (gesture && row) {
+        const row = gesture && (rowElements.current.get(gesture.id) ?? ref.current?.querySelector<HTMLElement>(
+          `[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`));
+        if (gesture && row && row.isConnected) {
           if (gesture.awaitingScroll && Math.abs(parent.scrollTop - gesture.scrollTop) > 0.5) {
             gesture.awaitingScroll = false;
           }
           if (!gesture.awaitingScroll) {
+            pendingResizeDeltasRef.current.clear();
             // Only a measured row change justifies moving scrollTop here. A route,
             // pane or animation re-render can momentarily report different
             // geometry while the commit settles; compensating that transient
@@ -964,6 +1106,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
               const delta = row.getBoundingClientRect().top - expectedTop;
               if (Math.abs(delta) > 1) {
                 parent.scrollTop += delta;
+                syncLiveTop(parent);
                 dispatchScrollAdjusted(parent);
                 if (transitionPhase === "idle") updateViewport();
               }
@@ -987,19 +1130,29 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
             const delegatedAbove = Boolean(deferredAncestor && deferredAncestor.getBoundingClientRect().bottom <= parentTop + 2);
             if (!delegatedAbove) {
               const index = strictlyAbove ? before.length - 1 : rowAt(before, liveViewportTop);
-              if (index < offsets.length) {
-                const delta = offsets[index] - before[index];
-                const distFromBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
-                if (Math.abs(delta) >= 0.5 && distFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
-                  parent.scrollTop += delta;
-                  dispatchScrollAdjusted(parent);
-                  if (transitionPhase === "idle") updateViewport();
-                }
+              // Sum ONLY live post-mount ResizeObserver deltas above the
+              // viewport. Using `offsets[index] - before[index]` would include
+              // newly mounted rows whose heights were already compensated by
+              // `rangePrependAnchor` on Commit #1, double-shifting scrollTop.
+              const delta = consumePendingResizeDelta(strictlyAbove ? Infinity : index);
+              const distFromBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
+              if (Math.abs(delta) >= 0.5 && distFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
+                parent.scrollTop += delta;
+                syncLiveTop(parent);
+                dispatchScrollAdjusted(parent);
+                if (transitionPhase === "idle") updateViewport();
               }
+            } else {
+              pendingResizeDeltasRef.current.clear();
             }
+          } else {
+            pendingResizeDeltasRef.current.clear();
           }
         }
       }
+    }
+    if (!gestureRowAnchor.current?.awaitingScroll) {
+      pendingResizeDeltasRef.current.clear();
     }
     if (!scheduledSyncCommit && !hasPendingMeasurements) {
       rangePrependSyncCountRef.current = 0;

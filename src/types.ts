@@ -347,11 +347,23 @@ export interface PlanStreamEvent {
   summary?: PlanningSummary;
 }
 
+export interface CompactionItemInfo {
+  reason?: "manual" | "threshold" | "overflow";
+  tokensBefore?: number;
+  tokensAfter?: number;
+  summary: string;
+  firstKeptEntryId?: string;
+  readFiles?: string[];
+  modifiedFiles?: string[];
+  fromHook?: boolean;
+}
+
 export interface TranscriptItem {
   id: string;
-  type: "text" | "thinking" | "tool_call" | "system" | "divider" | "activity_summary";
+  type: "text" | "thinking" | "tool_call" | "compaction" | "system" | "divider" | "activity_summary";
   role?: "user" | "assistant" | "system";
   content?: string;
+  compaction?: CompactionItemInfo;
   userTurnOffset?: number;
   steerRequestId?: string;
   images?: ImageAttachment[];

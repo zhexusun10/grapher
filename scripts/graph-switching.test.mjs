@@ -652,7 +652,9 @@ for (const reducedMotion of ["no-preference"]) {
             const send = box.querySelector(".prompt-box-send-btn");
             const sendRect = send.getBoundingClientRect();
             const painted = document.elementFromPoint(sendRect.x + sendRect.width / 2, sendRect.y + sendRect.height / 2);
-            window.homeComposerFrames.push({ x: rect.x, y: rect.y, opacity,
+            const modeSelector = box.querySelector(".prompt-box-mode-selector");
+            window.homeComposerFrames.push({ x: rect.x, y: rect.y, width: rect.width, opacity,
+              modeOpacity: modeSelector ? Number(getComputedStyle(modeSelector).opacity) : null,
               sendPainted: !!painted && send.contains(painted) });
           }
           if (window.sampleHomeComposer) requestAnimationFrame(sample);
@@ -675,6 +677,15 @@ for (const reducedMotion of ["no-preference"]) {
         assert.ok(distance(sourceComposer, destinationComposer) > 4, "node and home composers have different positions");
         assert.ok(homeFrames.some(frame => distance(frame, sourceComposer) > 1 && distance(frame, destinationComposer) > 1),
           "returning home preserves the shared composer position animation, not just a crossfade");
+        if (Math.abs(sourceComposer.width - destinationComposer.width) > 4) {
+          const minW = Math.min(sourceComposer.width, destinationComposer.width);
+          const maxW = Math.max(sourceComposer.width, destinationComposer.width);
+          assert.ok(homeFrames.some(frame => frame.width > minW + 1 && frame.width < maxW - 1),
+            "returning home smoothly interpolates composer width instead of snapping on frame 0");
+        }
+        assert.ok(homeFrames.some(frame => frame.modeOpacity !== null && frame.modeOpacity < 0.95) &&
+          homeFrames.at(-1).modeOpacity > 0.99,
+          "returning home smoothly fades in the landing mode selector");
       }
       assert.equal(await page.locator(".landing-screen textarea").inputValue(), "", "node draft does not leak into home");
       await page.locator('[data-run-id="b"]').click();

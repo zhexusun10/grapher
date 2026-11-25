@@ -289,6 +289,7 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
     pendingOlder.current = null;
     const latest = windowRef.current;
     if (!latest || normalizeTranscriptProjection(latest) !== normalizeTranscriptProjection(page) || latest.start !== page.nextOffset) {
+      setHoldingOlder(false);
       return true;
     }
     try {
@@ -297,11 +298,12 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
       const next = prependTranscriptPage(latest, page);
       if (fromScroll) {
         try { flushSync(() => { publish(next); setHoldingOlder(false); }); }
-        catch { publish(next); }
+        catch { publish(next); setHoldingOlder(false); }
       } else {
         publish(next);
+        setHoldingOlder(false);
       }
-    } catch (caught) { failedOlder.current = true; setError(String(caught)); }
+    } catch (caught) { failedOlder.current = true; setError(String(caught)); setHoldingOlder(false); }
     return true;
   });
   useEffect(() => {
@@ -399,7 +401,8 @@ function ExecutionHistory({ runId, execution, endOffset, deferredReveal = false,
   }, [cardsTransition, settled, cardsUnsupported, fullCacheKey, runId, execution.id, endOffset, lifetime]);
 
   const initialReady = useAutoTranscriptHistory(wrapperRef, hasOlder, loadingOlder, error, window,
-    preserveReading => { void loadOlder(preserveReading, false); }, ready, window ? window.end - window.start : 0, holdingOlder);
+    preserveReading => { void loadOlder(preserveReading, false); }, ready, window ? window.end - window.start : 0, holdingOlder,
+    undefined, commitPendingOlder);
 
   useLayoutEffect(() => {
     notifyLoading(!initialReady);

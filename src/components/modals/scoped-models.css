@@ -10,7 +10,7 @@
 .scoped-models-modal button:not(:disabled):hover { filter: none; }
 .scoped-models-modal .settings-cancel-btn {
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 9px 16px;
   background: transparent;
   color: var(--text-secondary);

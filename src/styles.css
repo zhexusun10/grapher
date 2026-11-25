@@ -765,7 +765,7 @@ h3 {
   align-items: center;
   gap: 9px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
@@ -833,7 +833,7 @@ h3 {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   border: 1px solid var(--border-default, rgba(0, 0, 0, 0.12));
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
   padding: 4px;
   display: flex;
@@ -1031,7 +1031,7 @@ h3 {
   font-size: 12.5px;
   font-weight: 500;
   min-height: 34px;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 7px 14px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1082,7 +1082,7 @@ h3 {
   background: var(--status-danger);
   color: #FFFFFF;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 500;
@@ -1283,7 +1283,7 @@ h3 {
 .sidebar-skeleton-item {
   height: 44px;
   min-height: 44px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface-hover);
   box-sizing: border-box;
@@ -1363,7 +1363,7 @@ h3 {
   text-align: left;
   padding: 8px 10px;
   margin-bottom: 4px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-primary);
@@ -1535,7 +1535,7 @@ h3 {
   gap: 10px;
   width: 100%;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
@@ -1668,7 +1668,7 @@ h3 {
   display: grid;
   place-items: center;
   color: var(--text-secondary);
-  border-radius: 8px;
+  border-radius: 10px;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -1681,7 +1681,7 @@ h3 {
 .secondary {
   min-height: 34px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 7px 14px;
   background: var(--bg-canvas);
   font-size: 12.5px;
@@ -1701,7 +1701,7 @@ h3 {
   background: var(--brand-default);
   color: var(--text-inverse);
   border: 1px solid var(--brand-default);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 7px 14px;
   font-size: 12.5px;
   font-weight: 600;
@@ -2731,7 +2731,6 @@ h3 {
 /* Pause infinite decorative animations when the window is hidden or unfocused
    in desktop mode so WKWebView stops burning GPU/WindowServer frames off-focus. */
 :root.window-inactive .run-dot.running-pulse,
-:root.window-inactive .working-indicator-dot,
 :root.window-inactive .thinking-icon-box.pulse,
 :root.window-inactive .tool-call-card.running::before,
 :root.window-inactive .activity-summary-icon.spin,

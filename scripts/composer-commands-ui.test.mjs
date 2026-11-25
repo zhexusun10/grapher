@@ -149,15 +149,38 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
     await page.waitForFunction(() => JSON.parse(document.querySelector("output").textContent).calls.length === 2);
     assert.equal((await output()).calls[1].scope.role, "nodeAgent");
     assert.equal((await output()).config.roleModels.nodeAgent.thinkingLevel, "off");
-    for (const command of ["/quit", "/new", "/tree", "/new/tree", "/mcp", "/extension", "/help"]) {
+    for (const command of ["/quit", "/new", "/tree"]) {
       await submit(command);
       await page.locator('[role="alert"]').waitFor();
       assert.equal(await composer.inputValue(), command);
       assert.equal((await output()).calls.length, 2);
     }
+    // Paths, unknown/unregistered slash text, and bare-only commands followed by prompt text
+    // pass through as ordinary prompts instead of failing as invalid commands.
+    const passthroughPrompts = [
+      "/Users/jerry/Desktop/grapher/src/App.tsx 请帮我看看",
+      "/new/tree",
+      "/login 接口返回 401",
+      "/settings 页面白屏",
+      "/session 超时了",
+      "/dashboard 页面报错",
+      "/mcp",
+      "/extension",
+      "/help",
+    ];
+    for (const [index, promptText] of passthroughPrompts.entries()) {
+      await submit(promptText);
+      const expectedCalls = 3 + index;
+      await page.waitForFunction(expected => JSON.parse(document.querySelector("output").textContent).calls.length === expected, expectedCalls);
+      assert.deepEqual((await output()).calls.at(-1), { prompt: promptText });
+      assert.equal(await composer.inputValue(), "");
+      assert.equal(await page.locator('[role="alert"]').count(), 0);
+    }
+    const callsAfterPassthrough = (await output()).calls.length;
     await submit("/name Before run");
     await page.locator('[role="alert"]').waitFor();
     assert.equal(renames.length, 0);
+    assert.equal((await output()).calls.length, callsAfterPassthrough);
     const errorCard = page.locator('.prompt-command-popover[role="alert"]');
     assert.match(await errorCard.innerText(), /请先开始或打开一个对话/);
     const errorStyles = await errorCard.evaluate(el => {
@@ -708,6 +731,132 @@ test("slash command confirmation notices auto-dismiss and reset on repeat, while
     await page.clock.runFor(10_000);
     await expect(statusNotice).toBeVisible();
 
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    await server.close();
+  }
+});
+
+test("unrecognized slash prompts work with attachments and catalog failures while real commands still validate", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const page = await browser.newPage();
+    const errors = [];
+    let catalogFails = false;
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.route("**/api/*", async route => {
+      const url = route.request().url();
+      if (url.endsWith("/extension_command")) {
+        if (catalogFails) {
+          await route.fulfill({ status: 503, json: { error: "Temporary host failure" } });
+          return;
+        }
+        await route.fulfill({ json: { result: { instance: "host", commands: [] } } });
+        return;
+      }
+      const result = url.endsWith("/list_files") ? { files: [] } : url.endsWith("/list_skills") ? { skills: [] }
+        : url.endsWith("/provider_auth") ? { providers: [], warning: null, models: [] }
+        : url.endsWith("/write_workspace_attachment") ? { name: "note.txt", path: "/tmp/attachment-inputs/11111111-1111-1111-1111-111111111111/note.txt" }
+        : {};
+      await route.fulfill({ json: { result } });
+    });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands`);
+    const composer = page.locator("textarea").first();
+    const fileInput = page.locator('input[type="file"]');
+    const output = async () => JSON.parse(await page.locator("output").textContent());
+    const submit = async text => { await composer.fill(text); await composer.press("Escape"); await composer.press("Enter"); };
+
+    // Real command still rejects attachments.
+    await fileInput.setInputFiles({ name: "note.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+    await submit("/model test/two");
+    await expect(page.locator('.prompt-command-popover[role="alert"]')).toContainText("Pi 指令不能携带附件");
+    assert.equal((await output()).calls.length, 0);
+
+    // Unrecognized slash text with attachment submits normally.
+    await submit("/dashboard 页面报错，看附件");
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output").textContent).calls.length === 1);
+    assert.equal((await output()).calls[0].prompt, "@/tmp/attachment-inputs/11111111-1111-1111-1111-111111111111/note.txt /dashboard 页面报错，看附件");
+    assert.equal(await page.locator('[role="alert"]').count(), 0);
+
+    // Even when extension catalog loading fails, unknown slash text and paths pass through as prompts,
+    // while known history commands still fail explicitly.
+    catalogFails = true;
+    await submit("/foo bar");
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output").textContent).calls.length === 2);
+    assert.deepEqual((await output()).calls[1], { prompt: "/foo bar" });
+
+    await submit("/Users/jerry/Desktop/grapher/src/App.tsx");
+    await page.waitForFunction(() => JSON.parse(document.querySelector("output").textContent).calls.length === 3);
+    assert.deepEqual((await output()).calls[2], { prompt: "/Users/jerry/Desktop/grapher/src/App.tsx" });
+
+    await submit("/compact");
+    await expect(page.locator('.prompt-command-popover[role="alert"]')).toContainText("扩展指令加载失败");
+    assert.equal((await output()).calls.length, 3);
+
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    await server.close();
+  }
+});
+
+test("/reload invalidates cached command catalog so newly registered commands are not short-circuited as prompts", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const page = await browser.newPage();
+    const errors = [];
+    const executed = [];
+    let reloaded = false;
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.route("**/api/*", async route => {
+      const url = route.request().url();
+      if (url.endsWith("/extension_command")) {
+        const body = route.request().postDataJSON();
+        if (body.operation === "catalog") {
+          const commands = reloaded
+            ? [{ name: "reload", description: "Reload extensions" }, { name: "fresh-cmd", description: "Fresh command" }]
+            : [{ name: "reload", description: "Reload extensions" }];
+          await route.fulfill({ json: { result: { instance: "host", commands } } });
+          return;
+        }
+        if (body.operation === "execute") {
+          executed.push(body.text);
+          if (body.text === "/reload") reloaded = true;
+          await route.fulfill({ json: { result: { ok: true } } });
+          return;
+        }
+        if (body.operation === "poll") {
+          await route.fulfill({ json: { result: { status: "complete", events: [{ method: "notify", message: `ran ${executed.at(-1)}` }] } } });
+          return;
+        }
+        await route.fulfill({ json: { result: {} } });
+        return;
+      }
+      const result = url.endsWith("/list_files") ? { files: [] } : url.endsWith("/list_skills") ? { skills: [] }
+        : url.endsWith("/provider_auth") ? { providers: [], warning: null, models: [] }
+        : {};
+      await route.fulfill({ json: { result } });
+    });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands`);
+    const composer = page.locator("textarea").first();
+    const output = async () => JSON.parse(await page.locator("output").textContent());
+    const submit = async text => { await composer.fill(text); await composer.press("Escape"); await composer.press("Enter"); };
+
+    // Populate cache, then reload to introduce /fresh-cmd.
+    await submit("/reload");
+    await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("ran /reload");
+    // Immediately execute /fresh-cmd without reopening the menu; cache must not short-circuit it as a prompt.
+    await submit("/fresh-cmd");
+    await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("ran /fresh-cmd");
+    assert.deepEqual(executed, ["/reload", "/fresh-cmd"]);
+    assert.equal((await output()).calls.length, 0);
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

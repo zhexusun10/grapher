@@ -75,6 +75,9 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // the user hasn't scrolled up. `smoothContent` trails `rawContent` during the
     // post-stream drain too, so keep following until it catches up.
     const stillTyping = isStreaming || smoothContent.length < rawContent.length;
+    // Keep the card's streaming glow, status pill, and typing cursor active
+    // while an expanded CoT card is still draining queued typewriter characters.
+    const isVisuallyStreaming = isStreaming || (isExpanded && hasVisibleContent && smoothContent.length < rawContent.length);
     isStreamingRef.current = isStreaming;
     stillTypingRef.current = stillTyping;
     const pinBodyToBottom = () => {
@@ -266,7 +269,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // reasoning). Keep its card and say so instead of making the card vanish.
     return (
       <CardReveal animate={animateAppear}>
-        <div ref={cardRef} className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"}${animateAppear ? " appear-active" : ""} ${className}`.trim()}>
+        <div ref={cardRef} className={`thinking-card ${isVisuallyStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"}${animateAppear ? " appear-active" : ""} ${className}`.trim()}>
           <div
             className="thinking-card-header"
             onClick={toggleExpand}
@@ -292,7 +295,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
               <span className="thinking-expand-icon">
                 <ChevronRight size={14} className={`thinking-expand-chevron ${isExpanded ? "open" : ""}`} />
               </span>
-              <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
+              <div className={`thinking-icon-box ${isVisuallyStreaming ? "pulse" : ""}`}>
                 <span className="thinking-icon-glyph">
                   <Sparkles size={14} />
                 </span>
@@ -302,7 +305,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
 
             <div className="thinking-header-right">
               <AnimatePresence initial={false}>
-                {isStreaming && (
+                {isVisuallyStreaming && (
                   <motion.span
                     key="thinking-streaming-status"
                     className="thinking-status streaming"
@@ -345,7 +348,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                   <MarkdownRenderer
                     content={smoothContent}
                     isStreaming={stillTyping}
-                    streamingCursor={isStreaming}
+                    streamingCursor={isVisuallyStreaming}
                     className="thinking-markdown"
                   />
                 </div>

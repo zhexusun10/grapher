@@ -238,7 +238,7 @@
   background: #ffffff;
   border: 1px solid rgba(59, 130, 246, 0.25);
   box-shadow: 0 1px 4px rgba(59, 130, 246, 0.08);
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 12px;
   color: #2563eb;
 }
@@ -371,7 +371,7 @@
 /* Matches the Settings footer cancel button. */
 .create-node-actions .create-node-cancel-btn {
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 9px 16px;
   background: transparent;
   color: var(--text-secondary);
@@ -469,7 +469,7 @@
 
 .node-task-content .markdown-content pre {
   margin: 8px 0;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .node-task-card.editing .node-task-content {
@@ -503,36 +503,10 @@
 .working-indicator {
   display: flex;
   align-items: center;
-  gap: 7px;
   margin: 10px 4px 2px;
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
-}
-
-.working-indicator-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--brand-default, #2563EB);
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
-  animation: workingPulse 1.4s ease-in-out infinite;
-}
-
-@keyframes workingPulse {
-
-  0%,
-  100% {
-    opacity: .4;
-    transform: scale(.85);
-    box-shadow: 0 0 3px rgba(37, 99, 235, 0.3);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1.15);
-    box-shadow: 0 0 10px rgba(37, 99, 235, 0.7);
-  }
 }
 
 /* 虚拟列表负责屏幕外卸载；不要再叠加 content-visibility，避免快速滚动时出现延迟绘制闪烁。 */
@@ -621,7 +595,7 @@
   pointer-events: none;
   width: 26px;
   height: 26px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border-default, #E2E8F0);
   background: var(--bg-surface);
   color: var(--text-secondary, #64748B);
@@ -705,7 +679,7 @@
   border: 1px solid var(--brand-border);
   border-radius: 12px 12px 2px 12px;
   color: var(--text-primary);
-  font-size: 14.5px;
+  font-size: 15px;
   line-height: 1.6;
   word-break: break-word;
   white-space: pre-wrap;
@@ -785,7 +759,7 @@
   padding: 0;
   display: block;
   appearance: none;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.15));
   background: var(--bg-surface);
@@ -888,10 +862,10 @@
   border-radius: 0;
   box-shadow: none;
   color: var(--text-primary);
-  font-size: 14.5px;
+  font-size: 15px;
   /* Integer pixel line-height avoids fractional-pixel scrollHeight rounding
      that would bounce the bottom-pinned footer up and down on line wraps. */
-  line-height: 24px;
+  line-height: 27px;
   display: block;
   word-break: break-word;
 }
@@ -905,8 +879,8 @@
 
 .chat-bubble-assistant .markdown-content,
 .chat-message-assistant .markdown-content {
-  font-size: 14.5px;
-  line-height: 24px;
+  font-size: 15px;
+  line-height: 27px;
   color: var(--text-primary);
 }
 
@@ -922,13 +896,13 @@
 
 .chat-bubble-assistant .markdown-content code:not(pre code),
 .chat-message-assistant .markdown-content code:not(pre code) {
-  font-size: 13px;
+  font-size: 0.9em;
 }
 
 .chat-bubble-assistant .markdown-content pre code,
 .chat-message-assistant .markdown-content pre code {
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 13.5px;
+  line-height: 21px;
 }
 
 /* 单节点串行执行内容（无多余卡片包裹，直接在页面里靠左展示） */
@@ -1001,7 +975,7 @@ button.session-label-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-radius: 8px;
+  border-radius: 10px;
   box-sizing: border-box;
   transition: background-color 0.15s ease, opacity 0.15s ease;
 }
@@ -1158,7 +1132,7 @@ button.session-label-toggle:focus-visible {
   padding: 4px 9px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
@@ -1292,7 +1266,7 @@ button.session-label-toggle:focus-visible {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   border: none;
   color: var(--text-secondary);
@@ -1601,7 +1575,7 @@ button.session-label-toggle:focus-visible {
   padding: 0;
   border: 1px solid var(--border-default);
   border-right: none;
-  border-radius: 8px 0 0 8px;
+  border-radius: 10px 0 0 10px;
   background: var(--bg-surface);
   color: var(--text-secondary);
   cursor: pointer;
@@ -2110,7 +2084,7 @@ button.session-label-toggle:focus-visible {
 .approval-row .text-button {
   min-height: 32px;
   padding: 6px 11px;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .approval-row .text-button:hover:not(:disabled) {
@@ -2233,7 +2207,7 @@ button.session-label-toggle:focus-visible {
   justify-content: center;
   width: 26px;
   height: 26px;
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--status-danger-subtle, #fef2f2);
   border: 1px solid var(--status-danger-border, #fecaca);
   color: #ef4444;
@@ -2263,7 +2237,7 @@ button.session-label-toggle:focus-visible {
   width: 24px;
   height: 24px;
   padding: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   border: none;
   color: #94a3b8;
@@ -2338,16 +2312,7 @@ button.session-label-toggle:focus-visible {
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 6px;
   color: var(--text-secondary);
-}
-
-.workspace-details .working-indicator-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  margin: 0;
 }
 
 .workspace-details-trigger {
@@ -2444,7 +2409,7 @@ button.session-label-toggle:focus-visible {
   padding: 10px 12px;
   background: var(--status-danger-subtle);
   border: 1px solid var(--status-danger-border);
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--status-danger-text);
   font-size: 12.5px;
   line-height: 19px;
@@ -2466,7 +2431,7 @@ button.session-label-toggle:focus-visible {
   color: var(--status-danger-text);
   background: var(--status-danger-subtle);
   border: 1px solid var(--status-danger-border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 10px 12px;
   margin: 8px 0;
   white-space: pre-wrap;
@@ -2602,7 +2567,7 @@ button.session-label-toggle:focus-visible {
   resize: vertical;
   width: 100%;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 15px;
   background: var(--bg-surface);
   font-family: var(--font-mono, monospace);
@@ -2810,7 +2775,7 @@ button.session-label-toggle:focus-visible {
 
 .settings-modal-footer .settings-cancel-btn {
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 9px 16px;
   background: transparent;
   color: var(--text-secondary);
@@ -2841,7 +2806,7 @@ button.session-label-toggle:focus-visible {
   max-width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg-canvas);
   color: var(--text-primary);
   font-size: 12px;
@@ -3128,7 +3093,7 @@ button.session-label-toggle:focus-visible {
   gap: 8px 12px;
   margin-top: 10px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-secondary);
@@ -3275,7 +3240,7 @@ button.session-label-toggle:focus-visible {
   flex: none;
   padding: 0 10px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg-canvas);
   color: var(--text-primary);
   font-size: 13px;
@@ -3321,7 +3286,7 @@ button.session-label-toggle:focus-visible {
   height: 28px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 0 10px;
   font-size: 12px;
   color: var(--text-primary);
@@ -3397,7 +3362,7 @@ button.session-label-toggle:focus-visible {
   .workbench-view-switcher button {
     min-height: 32px;
     padding: 0 12px;
-    border-radius: 8px;
+    border-radius: 10px;
     color: var(--text-secondary);
     font-size: 12.5px;
     font-weight: 500;
@@ -3584,7 +3549,7 @@ button.session-label-toggle:focus-visible {
   padding: 0 11px;
   font-size: 12.5px;
   font-weight: 500;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -3731,7 +3696,7 @@ button.session-label-toggle:focus-visible {
   padding: 9px 11px;
   max-height: 150px;
   overflow-y: auto;
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   font-size: 12px;
@@ -3803,7 +3768,7 @@ button.session-label-toggle:focus-visible {
   padding: 0 12px;
   font-size: 12.5px;
   font-weight: 500;
-  border-radius: 8px;
+  border-radius: 10px;
   cursor: pointer;
   transition: background-color 140ms ease, border-color 140ms ease;
 }

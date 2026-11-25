@@ -18,19 +18,24 @@ function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boole
  * burst by bytes, then reveal measured rows and wait for another upward gesture. */
 export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, hasOlder: boolean,
   busy: boolean, error: string, progress: unknown, loadOlder: (preserveReading: boolean) => void,
-  ready: boolean, loadedBytes: number, holdingOlder = false, olderSource?: string): boolean {
+  ready: boolean, loadedBytes: number, holdingOlder = false, olderSource?: string,
+  commitPendingOlder?: (fromScroll?: boolean) => boolean): boolean {
   const load = useStableCallback(loadOlder);
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
   const filledInitialRef = useRef(false);
   const measuredViewportRef = useRef("");
   const busyRetryRef = useRef<number | null>(null);
+  const hasOlderRef = useRef(hasOlder);
+  hasOlderRef.current = hasOlder;
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const holdingOlderRef = useRef(holdingOlder);
   holdingOlderRef.current = holdingOlder;
   const olderSourceRef = useRef(olderSource);
   olderSourceRef.current = olderSource;
+  const commitPendingRef = useRef(commitPendingOlder);
+  commitPendingRef.current = commitPendingOlder;
   // The prompt or an earlier turn is already in the DOM above a partially
   // loaded transcript. A fast fling can cross that gap before the page arrives,
   // briefly exposing content that is not actually adjacent to the loaded rows.
@@ -60,9 +65,20 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
     const containMissingHistory = () => {
       if (element.closest("[data-transcript-staged='true']") || parent.dataset.transcriptScrollMode === "latest" ||
           (parent.dataset.transcriptHistoryReading !== "true" && performance.now() - lastGesture > 1000)) return;
-      const top = olderInsertionTop(element, olderSourceRef.current);
+      let top = olderInsertionTop(element, olderSourceRef.current);
       if (top === null) return;
-      const overshoot = top - parent.getBoundingClientRect().top - parent.clientTop;
+      let overshoot = top - parent.getBoundingClientRect().top - parent.clientTop;
+      // When the next older page is already prefetched in memory, commit it
+      // synchronously BEFORE clamping so fast upward scrolling crosses into
+      // the older rows seamlessly instead of bouncing back off the boundary.
+      if (overshoot >= -1 && holdingOlderRef.current && commitPendingRef.current) {
+        if (commitPendingRef.current(true)) {
+          if (!hasOlderRef.current) return;
+          top = olderInsertionTop(element, olderSourceRef.current);
+          if (top === null) return;
+          overshoot = top - parent.getBoundingClientRect().top - parent.clientTop;
+        }
+      }
       if (overshoot <= 1) return;
       // A short initial tail cannot fill the viewport even at the bottom. Do
       // not push the reader there: it would turn an in-flight background fill

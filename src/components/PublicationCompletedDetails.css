@@ -165,6 +165,6 @@
   max-height: 200px;
   overflow: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg-canvas);
 }

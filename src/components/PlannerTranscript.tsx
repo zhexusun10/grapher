@@ -5,6 +5,7 @@ import { VirtualizedList } from "./VirtualizedList";
 import { visibleTranscriptRows, matchActivitySummary, stabilizeActivitySummaryIds, type ActivitySummaryAnchor } from "../services/transcriptLayout";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
+import { CompactedCard } from "./CompactedCard";
 import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { ActivitySummaryRow, type CardsTransitionPhase } from "./ActivitySummaryRow";
 import { markCardsPresented } from "../services/cardAnimations";
@@ -44,6 +45,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
   if (item.type === "activity_summary") return <ActivitySummaryRow item={item} expanded={expanded} transitionPhase={cardsTransition} defaultThinkingExpanded={true} getChildExpanded={getChildExpanded} onExpandedChange={expand} onChildResize={onChildResize} onChildExpandedChange={onChildExpandedChange} />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  if (item.type === "compaction") return <CompactedCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.errorItems || (item.type === "system" && (item.isError || item.status === "error")) ||
       (item.type === "text" && item.role === "assistant" && (item.isError || item.status === "error"))) {
     return <TranscriptErrorCard item={item} expanded={expanded} onExpandedChange={expand} />;
@@ -88,7 +90,7 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
   if (prevCardsCollapsedRef.current && !props.cardsCollapsed) {
     markCardsPresented(
       items
-        .filter(item => item.type === "tool_call" || item.type === "thinking")
+        .filter(item => item.type === "tool_call" || item.type === "thinking" || item.type === "compaction")
         .map(item => item.id),
     );
   }

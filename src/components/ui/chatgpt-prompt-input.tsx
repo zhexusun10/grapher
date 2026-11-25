@@ -144,6 +144,42 @@ interface PromptBoxProps
 
 export const PROMPT_BOX_RESIZE_DURATION = 0.3;
 const COMPOSER_EASE = [0.22, 1, 0.36, 1] as const;
+
+interface ComposerHandoffSnapshot {
+  left: number;
+  bottom: number;
+  width: number;
+  height: number;
+  backgroundColor: string;
+  hasModeSelector: boolean;
+  capturedAt: number;
+}
+
+interface ActiveComposerRegistration {
+  element: HTMLDivElement;
+  hasModeSelector: boolean;
+}
+
+const activeComposers = new Map<string, ActiveComposerRegistration>();
+const departingComposerSnapshots = new Map<string, ComposerHandoffSnapshot>();
+const HANDOFF_SNAPSHOT_TTL_MS = 120;
+
+function measureComposerSnapshot(
+  element: HTMLDivElement,
+  hasModeSelector: boolean
+): ComposerHandoffSnapshot | null {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return {
+    left: rect.left,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+    backgroundColor: getComputedStyle(element).backgroundColor,
+    hasModeSelector,
+    capturedAt: performance.now(),
+  };
+}
 // A pointer click leaves the send button under the cursor. Do not repaint it
 // as the red Stop control in that same click; wait briefly for the pointer to
 // leave, then show the live control.
@@ -267,9 +303,19 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const isPresent = useIsPresent();
     const containerRef = useRef<HTMLDivElement | null>(null);
     const flowRef = useRef<HTMLDivElement | null>(null);
+    const textareaRowRef = useRef<HTMLDivElement | null>(null);
+    const modeSelectorRef = useRef<HTMLDivElement | null>(null);
     const resizeFromRef = useRef<number | null>(null);
     const resizeAnimationRef = useRef<Animation | null>(null);
+    const handoffAnimationRef = useRef<Animation | null>(null);
+    const modeSelectorAnimationRef = useRef<Animation | null>(null);
     const hasMeasuredHeightRef = useRef(false);
+    const hasModeSelector = planMode !== undefined && Boolean(onPlanModeChange);
+    const hasModeSelectorRef = useRef(hasModeSelector);
+    hasModeSelectorRef.current = hasModeSelector;
+    const reduceMotionRef = useRef(reduceMotion);
+    reduceMotionRef.current = reduceMotion;
+    const resizeTextareaRef = useRef<() => void>(() => {});
     const internalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const followInputEndRef = useRef(false);
@@ -738,6 +784,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
       const from = resizeFromRef.current ?? box.getBoundingClientRect().height;
       resizeFromRef.current = null;
+      handoffAnimationRef.current?.cancel();
+      handoffAnimationRef.current = null;
       resizeAnimationRef.current?.cancel();
       resizeAnimationRef.current = null;
       box.removeAttribute("data-resizing");
@@ -788,9 +836,164 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       };
     }, [compact, isExpanded, currentText, reduceMotion, expandDelay, revealInputEnd]);
 
+    resizeTextareaRef.current = resizeTextarea;
+
     useLayoutEffect(() => {
       resizeTextarea();
     }, [currentText, resizeTextarea]);
+
+    // Keep the active composer registry aligned if the mode selector toggles
+    // without changing `layoutId`.
+    useLayoutEffect(() => {
+      const box = containerRef.current;
+      if (!layoutId || !box) return;
+      const current = activeComposers.get(layoutId);
+      if (current?.element === box) current.hasModeSelector = hasModeSelector;
+    }, [layoutId, hasModeSelector]);
+
+    // Smoothly morph width, height, surface tint, and landing mode selector
+    // across shared-composer navigation handoffs instead of snapping them on
+    // frame 0 while the bottom anchor glides.
+    useLayoutEffect(() => {
+      const box = containerRef.current;
+      if (!layoutId || !box) return;
+
+      let prev: ComposerHandoffSnapshot | null = null;
+      const existing = activeComposers.get(layoutId);
+      if (existing && existing.element !== box && existing.element.isConnected) {
+        prev = measureComposerSnapshot(existing.element, existing.hasModeSelector);
+      } else {
+        const departed = departingComposerSnapshots.get(layoutId);
+        if (departed && performance.now() - departed.capturedAt <= HANDOFF_SNAPSHOT_TTL_MS) {
+          prev = departed;
+        }
+      }
+      departingComposerSnapshots.delete(layoutId);
+      activeComposers.set(layoutId, { element: box, hasModeSelector: hasModeSelectorRef.current });
+
+      if (prev && !reduceMotionRef.current && typeof box.animate === "function") {
+        const targetRect = box.getBoundingClientRect();
+        const targetBg = getComputedStyle(box).backgroundColor;
+        const targetTextareaWidth = internalTextareaRef.current?.getBoundingClientRect().width ?? 0;
+        const fromFrame: Keyframe = {};
+        const toFrame: Keyframe = {};
+        let animateBox = false;
+        let animateHeight = false;
+
+        const dx = prev.left - targetRect.left;
+        const dy = prev.bottom - targetRect.bottom;
+        if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) {
+          fromFrame.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+          toFrame.transform = "translate3d(0px, 0px, 0)";
+          animateBox = true;
+        }
+
+        if (Math.abs(prev.width - targetRect.width) >= 1) {
+          fromFrame.width = `${prev.width}px`;
+          toFrame.width = `${targetRect.width}px`;
+          if (prev.width > targetRect.width) {
+            fromFrame.maxWidth = `${prev.width}px`;
+            toFrame.maxWidth = `${targetRect.width}px`;
+          }
+          animateBox = true;
+        }
+
+        const textareaRow = textareaRowRef.current;
+        const chromeHeight = textareaRow
+          ? targetRect.height - textareaRow.getBoundingClientRect().height
+          : 0;
+        const safeFromHeight = Math.max(prev.height, chromeHeight + 24);
+        if (Math.abs(safeFromHeight - targetRect.height) >= 1) {
+          fromFrame.height = `${safeFromHeight}px`;
+          toFrame.height = `${targetRect.height}px`;
+          animateBox = true;
+          animateHeight = true;
+        }
+
+        if (prev.backgroundColor && targetBg && prev.backgroundColor !== targetBg) {
+          fromFrame.backgroundColor = prev.backgroundColor;
+          toFrame.backgroundColor = targetBg;
+          animateBox = true;
+        }
+
+        if (animateBox) {
+          // Lock the flow placeholder to the settled target height so animated
+          // box heights do not shift centered landing layouts during handoff.
+          if (flowRef.current) flowRef.current.style.height = `${targetRect.height}px`;
+          if (animateHeight) box.setAttribute("data-resizing", "");
+          const animation = box.animate([fromFrame, toFrame], {
+            duration: PROMPT_BOX_RESIZE_DURATION * 1000,
+            easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+            fill: "backwards",
+          });
+          handoffAnimationRef.current = animation;
+          const cleanup = (finished: boolean) => {
+            if (handoffAnimationRef.current !== animation) return;
+            handoffAnimationRef.current = null;
+            if (animateHeight && !resizeAnimationRef.current) {
+              box.removeAttribute("data-resizing");
+            }
+            if (flowRef.current && box.isConnected) {
+              const settledHeight = `${box.getBoundingClientRect().height}px`;
+              if (flowRef.current.style.height !== settledHeight) {
+                flowRef.current.style.height = settledHeight;
+              }
+            }
+            if (finished && internalTextareaRef.current && box.isConnected) {
+              const finalWidth = internalTextareaRef.current.getBoundingClientRect().width;
+              if (Math.abs(finalWidth - targetTextareaWidth) >= 1) {
+                resizeTextareaRef.current();
+              }
+            }
+          };
+          animation.onfinish = () => cleanup(true);
+          animation.oncancel = () => cleanup(false);
+        }
+
+        const modeSelector = modeSelectorRef.current;
+        if (
+          !prev.hasModeSelector &&
+          hasModeSelectorRef.current &&
+          modeSelector &&
+          typeof modeSelector.animate === "function"
+        ) {
+          const modeAnim = modeSelector.animate(
+            [
+              { opacity: 0, transform: "translateX(8px) scale(0.96)" },
+              { opacity: 1, transform: "translateX(0px) scale(1)" },
+            ],
+            {
+              duration: 240,
+              delay: 40,
+              easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+              fill: "backwards",
+            }
+          );
+          modeSelectorAnimationRef.current = modeAnim;
+          const cleanupMode = () => {
+            if (modeSelectorAnimationRef.current === modeAnim) {
+              modeSelectorAnimationRef.current = null;
+            }
+          };
+          modeAnim.onfinish = cleanupMode;
+          modeAnim.oncancel = cleanupMode;
+        }
+      }
+
+      return () => {
+        const current = activeComposers.get(layoutId);
+        if (current?.element === box) {
+          const snapshot = measureComposerSnapshot(box, current.hasModeSelector);
+          if (snapshot) departingComposerSnapshots.set(layoutId, snapshot);
+          activeComposers.delete(layoutId);
+        }
+        handoffAnimationRef.current?.cancel();
+        handoffAnimationRef.current = null;
+        if (!resizeAnimationRef.current) box.removeAttribute("data-resizing");
+        modeSelectorAnimationRef.current?.cancel();
+        modeSelectorAnimationRef.current = null;
+      };
+    }, [layoutId]);
 
     // The shared projection measures a zero-height bottom anchor, not the box's
     // changing top edge. Reserve the real height in flow so transcript padding
@@ -801,6 +1004,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       const flow = flowRef.current;
       if (!layoutId || !box || !flow) return;
       const reserveHeight = () => {
+        if (handoffAnimationRef.current) return;
         const height = `${box.getBoundingClientRect().height}px`;
         if (flow.style.height !== height) flow.style.height = height;
       };
@@ -817,6 +1021,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       let width = textarea.getBoundingClientRect().width;
       const observer = new ResizeObserver(() => {
         const nextWidth = textarea.getBoundingClientRect().width;
+        if (handoffAnimationRef.current) {
+          width = nextWidth;
+          return;
+        }
         if (nextWidth !== width) {
           width = nextWidth;
           resizeTextarea();
@@ -1150,8 +1358,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         commands.clearNotice();
         let promptCommand = false;
         try {
-          if (hasAttachment) throw new Error(t("Pi 指令不能携带附件，请先移除附件。"));
-          const result = await commands.execute(trimmed);
+          const result = await commands.execute(trimmed, { hasAttachment });
           promptCommand = result === "prompt";
           if (isCurrent() && result === "handled") setCommandText("");
         } catch (error) {
@@ -1624,7 +1831,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         </div>}
         {attachmentError && <p role="alert" className="prompt-box-attachment-error">{attachmentError}</p>}
         {/* Textarea Input */}
-        <div className="prompt-box-textarea-row">
+        <div ref={textareaRowRef} className="prompt-box-textarea-row">
           <textarea
             {...restProps}
             ref={(el) => {
@@ -1760,8 +1967,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
           <div className="prompt-box-right-actions">
-            {planMode !== undefined && onPlanModeChange && (
+            {hasModeSelector && onPlanModeChange && (
               <div
+                ref={modeSelectorRef}
                 className="prompt-box-mode-selector"
                 role="group"
                 aria-label={t("执行规划模式")}
@@ -1873,18 +2081,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     if (!layoutId) return prompt;
     return (
       <div ref={flowRef} className={`prompt-box-flow ${compact ? "compact" : ""}`}>
-        <motion.div
-          className="prompt-box-anchor"
-          layoutId={layoutId}
-          layout="position"
-          layoutCrossfade={false}
-          // Local height changes must not restart a navigation handoff.
-          layoutDependency={isPresent ? textareaId : undefined}
-          initial={false}
-          transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
-        >
+        <div className="prompt-box-anchor">
           {prompt}
-        </motion.div>
+        </div>
       </div>
     );
   }

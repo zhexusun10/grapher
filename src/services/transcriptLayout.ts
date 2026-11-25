@@ -269,6 +269,7 @@ export function visibleTranscriptRows(
 export function estimateTranscriptRowHeight(id: string): number {
   if (id.startsWith("summary_")) return 28;
   if (id.startsWith("think_")) return 44;
+  if (id.startsWith("compact_") || id.startsWith("planner_compact_")) return 38;
   if (id.startsWith("divider_")) return 25;
   if (id.startsWith("tool") || id.startsWith("call_")) return 48;
   if (id.startsWith("err_") || id.startsWith("system_")) return 32;

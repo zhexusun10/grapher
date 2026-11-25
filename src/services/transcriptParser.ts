@@ -3,6 +3,7 @@ import { utf8Bytes } from "../lib/BoundedLruCache";
 import { extensionErrorText } from "./extensionErrors";
 import { matchRequestedUserTurn, plannerContentSteerId, plannerContentText, stripPiImageDimensionHints, stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
+import { createCompactionTranscriptItem, extractCompactionInfo } from "./compactionEvent";
 import { toolOutputPreview, truncateToolArgs } from "./toolOutput";
 import { findToolCallIndex, laterToolPhase, toolNameUpdate, type ToolCallPhase } from "./toolCallUpdates";
 
@@ -615,13 +616,31 @@ export function parseTranscriptChunkLines(
         continue;
       }
 
-      // Auto-compaction is surfaced through the working indicator, not as chat rows.
+      // Auto- and manual-compaction: show "Compacting…" while in flight, and
+      // emit a collapsible Compacted card once Pi finishes with a result.
       if (event.type === "compaction_start") {
         state.compacting = true;
         continue;
       }
-      if (event.type === "compaction_end") {
+      if (event.type === "compaction_end" || event.type === "compaction") {
         state.compacting = false;
+        const compaction = extractCompactionInfo(event);
+        if (compaction) {
+          currentItems = closeThinkingItems(currentItems);
+          const previous = currentItems[currentItems.length - 1];
+          const isDuplicate = previous?.type === "compaction" &&
+            previous.compaction?.summary === compaction.summary &&
+            previous.compaction?.tokensBefore === compaction.tokensBefore &&
+            previous.compaction?.firstKeptEntryId === compaction.firstKeptEntryId;
+          if (!isDuplicate) {
+            const parsedTs = typeof event.timestamp === "number"
+              ? event.timestamp
+              : typeof event.timestamp === "string"
+                ? (Date.parse(event.timestamp) || Date.now())
+                : Date.now();
+            currentItems.push(createCompactionTranscriptItem(rowId("compact"), compaction, parsedTs));
+          }
+        }
         continue;
       }
 

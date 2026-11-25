@@ -52,14 +52,25 @@ test("Markdown allowlist preserves useful formatting, code, links, images and in
 test("Workspace Markdown images stay inert until resolved by their conversation", () => {
   const cache = new StreamingMarkdownCache();
   const markdown = '![截图](artifacts/user-preview-current/screenshots/01-main-menu.png)\n\n'
-    + '![中文](<./artifacts/中文 space/截图.png>)';
+    + '![中文](<./artifacts/中文 space/截图.png>)\n\n'
+    + '![工作区临时](.tmp/card-preview.png)\n\n'
+    + '![系统临时](/tmp/compacted-card-preview.png)\n\n'
+    + '![macOS 临时](/private/tmp/sub/card-preview.png)\n\n'
+    + '![文件协议临时](file:///tmp/中文%20space/截图.png)';
   for (const streaming of [true, false]) {
     const output = cache.render(markdown, streaming);
     assert.match(output, /data-workspace-path="artifacts\/user-preview-current\/screenshots\/01-main-menu\.png"/);
     assert.match(output, /data-workspace-path="artifacts\/中文 space\/截图\.png"/);
+    assert.match(output, /data-workspace-path="\.tmp\/card-preview\.png"/);
+    assert.match(output, /data-workspace-path="\/tmp\/compacted-card-preview\.png"/);
+    assert.match(output, /data-workspace-path="\/tmp\/sub\/card-preview\.png"/);
+    assert.match(output, /data-workspace-path="\/tmp\/中文 space\/截图\.png"/);
     assert.doesNotMatch(output, /\ssrc=/, "workspace paths must not generate browser GETs");
   }
-  for (const src of ['/api/control', '../outside.png', '%2e%2e/outside.png', 'C:\\outside.png',
+  for (const src of ['/api/control', '/etc/passwd', '/tmp', '/tmp/', '/tmp/../etc/passwd',
+    '/tmp/%2e%2e/etc/passwd', '/tmp//preview.png', '/tmp/.git/a.png', '/tmp/.grapher/a.png',
+    'file:///etc/passwd', 'file://evil.test/tmp/a.png', '//tmp/a.png',
+    '../outside.png', '%2e%2e/outside.png', 'C:\\outside.png',
     '//evil.test/image.png', 'data:image/svg+xml,evil', 'blob:https://example.test/forged', '.git/image.png', '.grapher/image.png']) {
     const output = sanitizeHtml(`<img src="${src}" data-workspace-path="forged.png" onerror="evil()" alt="preview">`);
     assert.doesNotMatch(output, /<img|data-workspace-path|\ssrc=|onerror/, src);

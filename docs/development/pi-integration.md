@@ -48,7 +48,7 @@ not Pi's session-local Ctrl+P cycling scope.
 
 Enabled extensions register their composer commands through Pi's ordinary extension loader and `get_commands` protocol. [extension-commands.ts](../../engine/extension-commands.ts) supplies an independent command context when no matching active Pi process is available; command names and handlers are not maintained in per-package lists. It loads the selected extensions for the composer's current repository, including trusted project extensions and MCP overrides. Each discovery or execution uses a short-lived RPC worker with an in-memory Pi context, without creating a Grapher Run, saving a session, or making model calls. Host, project, invocation and dialog identities fence replies; changing projects or leaving the composer cancels pending dialogs, and abandoned invocations expire. Settings' read-only extension catalog remains separate from this explicit command-loading path.
 
-The composer reads one command catalog: the matching active Pi process when present, otherwise the selected project's independent command host. It does not merge a second catalog into an active process or synthesize MCP/third-party extension entries and subcommands. Opening `/` shows catalog loading/failure state and a refresh/retry control. Extension selection changes invalidate the catalog, and scope/revision/request checks discard stale responses. Unknown or disabled commands receive an explicit error instead of a misleading request to start a conversation.
+The composer reads one command catalog: the matching active Pi process when present, otherwise the selected project's independent command host. It does not merge a second catalog into an active process or synthesize MCP/third-party extension entries and subcommands. Opening `/` shows catalog loading/failure state and a refresh/retry control. Extension selection changes invalidate the catalog, and scope/revision/request checks discard stale responses. Unrecognized `/...` inputs (such as file paths, URL routes, or disabled/unknown command names) pass through as normal prompts instead of failing.
 
 Extension dialogs focus their first control and return focus on close. Selection lists longer than eight options have a text filter; arrow keys navigate choices and Escape cancels. Input dialogs submit with Enter and preserve newlines with Shift+Enter; editors retain Enter for newlines and submit with Ctrl/Cmd+Enter. IME confirmation never submits or cancels a dialog.
 
@@ -57,9 +57,13 @@ its original goal prompt; it works only in the main conversation composer (Graph
 Planner or Serial), not in a Graph node agent dialog. `/compact`, `/session` (`/stats`) and `/copy` require an **active** Pi process because they operate on conversation history. Registered extension commands, including `/reload`, use the matching active process when available and otherwise the independent command context; operations that request a real conversation or inference fail explicitly there.
 `/mcp` appears when the selected command context has registered it. With an active process it reports that process's connection status; without one it reports the independent context's status for the selected project. `/mcp login`, `/mcp logout` and `/mcp reconnect` retain Pi's server selection and authentication flows (optional server name). MCP must be enabled for the role. Command names in both contexts come from `get_commands`. Skills keep their existing
 prompt-expansion path, and active-session prompt templates use ordinary message
-submission. Unknown commands (including `/help`) and session-management commands (`/quit`, `/exit`,
-`/new`, `/tree`, `/fork`, `/clone`, `/resume`, session switching, auth and Pi
-settings) are rejected, never submitted as an ordinary goal. `/reload` delegates
+submission. Bare session-management commands (`/quit`, `/exit`,
+`/new`, `/tree`, `/fork`, `/clone`, `/resume`, `/import`, `/sessions`, `/login`,
+`/logout`, and `/settings`, with no arguments) are rejected rather than submitted
+as an ordinary goal; paths containing a second `/`, prompts with text after a
+bare-only command (for example `/login ...`, `/settings ...`, `/session ...`),
+and unrecognized slash-prefixed text (including `/help`) pass through as normal
+prompts (and may carry attachments). `/reload` delegates
 to Pi's command-context reload action after the current turn becomes idle; the
 adapter does not implement a second resource loader. `/compact` likewise uses an
 adapter extension command that waits for idle, then awaits the SDK compaction

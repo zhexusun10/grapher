@@ -428,7 +428,6 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
   return (
     <div ref={panelRef} className={`workspace-details ${open ? "open" : ""}`}>
-      {/* The collapsing row clips vertically but keeps the dot's horizontal glow. */}
       <AnimatePresence initial={false}>
         {showWorking && (
           <motion.div
@@ -444,9 +443,8 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
               opacity: 0, x: -4, height: 0, marginBottom: 0, paddingTop: 0, paddingBottom: 0,
             }}
             transition={{ duration: reduceMotion ? 0 : 0.2, ease: [0.22, 1, 0.36, 1] }}
-            style={{ clipPath: "inset(0 -12px)" }}
+            style={{ overflow: "hidden" }}
           >
-            <span className="working-indicator-dot" />
             {compacting ? "Compacting…" : (workingLabel ?? "Working…")}
           </motion.div>
         )}
@@ -1986,7 +1984,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         // while its grid row is still clipped. Use that target height so a card
         // that will end up taller than the viewport never scrolls partway while
         // it briefly looks short enough.
-        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body");
+        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body, .compacted-card-body");
         const targetHeight = body
           ? Math.max(cardBounds.height, headerBounds.height + body.offsetHeight + (card.offsetHeight - card.clientHeight))
           : cardBounds.height;

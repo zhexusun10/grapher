@@ -183,6 +183,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     pendingOlder.current = null;
     const latest = segments.current.get(pending.id);
     if (latest && (normalizeTranscriptProjection(latest) !== normalizeTranscriptProjection(pending.page) || latest.start !== pending.page.nextOffset)) {
+      setHoldingOlder(false);
       return true;
     }
     try {
@@ -191,11 +192,12 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         ? prependTranscriptPage(latest, pending.page) : windowFromPage(pending.page, !pending.page.running);
       if (fromScroll) {
         try { flushSync(() => { publish(pending.id, next); setHoldingOlder(false); }); }
-        catch { publish(pending.id, next); }
+        catch { publish(pending.id, next); setHoldingOlder(false); }
       } else {
         publish(pending.id, next);
+        setHoldingOlder(false);
       }
-    } catch (caught) { failedOlder.current = true; setError(caught instanceof Error ? caught.message : String(caught)); }
+    } catch (caught) { failedOlder.current = true; setError(caught instanceof Error ? caught.message : String(caught)); setHoldingOlder(false); }
     return true;
   });
   useEffect(() => {
@@ -328,7 +330,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const loadedBytes = [...segments.current.values()].reduce((sum, window) => sum + window.end - window.start, 0);
   const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,
     preserveReading => { void loadOlder(preserveReading, undefined, false, false); }, ready, loadedBytes, holdingOlder,
-    olderTarget(planningIds, segments.current) ?? undefined);
+    olderTarget(planningIds, segments.current) ?? undefined, commitPendingOlder);
 
   useLayoutEffect(() => { notifyOutput(output); }, [key, output, notifyOutput]);
   useLayoutEffect(() => {

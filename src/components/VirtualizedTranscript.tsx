@@ -221,7 +221,7 @@ function annotateSegmentItems(
   const previousIds = mode === "live" ? new Set(previousItems.map(item => item.id)) : null;
   return items.map(item => {
     const isNewInLiveChunk = previousIds !== null && !previousIds.has(item.id);
-    if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
+    if ((item.type === "thinking" || item.type === "tool_call" || item.type === "compaction") && item.animateAppear === undefined) {
       const shouldAnimate = !settled && (inline || suppressInitialAppear ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
       item = { ...item, animateAppear: shouldAnimate };
     }
@@ -641,7 +641,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       let currentItems = [...closedPrependedItems, ...currentTailItems];
 
       currentItems = currentItems.map(item => {
-        if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
+        if ((item.type === "thinking" || item.type === "tool_call" || item.type === "compaction") && item.animateAppear === undefined) {
           item = { ...item, animateAppear: false };
         }
         if (item.type !== "thinking") return item;
@@ -775,7 +775,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       // avoiding per-chunk metadata scans and deep structural-sharing walks.
       if (isIncrementalLive && previousItems[index] === item) return item;
       const isNewInLiveChunk = isIncrementalLive && !previousIds!.has(item.id);
-      if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
+      if ((item.type === "thinking" || item.type === "tool_call" || item.type === "compaction") && item.animateAppear === undefined) {
         const shouldAnimate = !settled && (inline || suppressInitialAppear ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
         item = { ...item, animateAppear: shouldAnimate };
       }
@@ -950,7 +950,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   if (prevCardsCollapsedRef.current && !cardsCollapsed) {
     markCardsPresented(
       items
-        .filter(item => item.type === "tool_call" || item.type === "thinking")
+        .filter(item => item.type === "tool_call" || item.type === "thinking" || item.type === "compaction")
         .map(item => item.id),
     );
   }

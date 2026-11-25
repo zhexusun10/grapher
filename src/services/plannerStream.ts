@@ -2,6 +2,7 @@ import type { PlanMode, Snapshot, TranscriptItem } from "../types";
 import type { PlannerEdgeEdit, PlannerNodeEdit } from "../lib/plannerGraphEdits";
 import { plannerContentText, stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
+import { createCompactionTranscriptItem, extractCompactionInfo } from "./compactionEvent";
 import { upsertToolCall } from "./toolCallUpdates";
 import { appendItemDelta } from "./transcriptUpdates";
 import { extensionErrorText } from "./extensionErrors";
@@ -76,6 +77,40 @@ export function appendPlannerError(
     ...(markErrorStage ? { startedAt: undefined, stage: "error" as const } : {}),
     items: nextItems,
   };
+}
+
+export function applyPlannerCompaction(
+  prev: PlannerStreamState,
+  event: any,
+): PlannerStreamState {
+  if (event?.type === "compaction_start") {
+    return prev.compacting ? prev : { ...prev, compacting: true };
+  }
+  if (event?.type === "compaction_end" || event?.type === "compaction") {
+    const compaction = extractCompactionInfo(event);
+    if (!compaction) {
+      return prev.compacting ? { ...prev, compacting: false } : prev;
+    }
+    const closed = closeThinkingItems(prev.items);
+    const previous = closed[closed.length - 1];
+    const isDuplicate = previous?.type === "compaction" &&
+      previous.compaction?.summary === compaction.summary &&
+      previous.compaction?.tokensBefore === compaction.tokensBefore &&
+      previous.compaction?.firstKeptEntryId === compaction.firstKeptEntryId;
+    if (isDuplicate) {
+      return prev.compacting ? { ...prev, compacting: false } : prev;
+    }
+    const now = Date.now();
+    return {
+      ...prev,
+      compacting: false,
+      items: [
+        ...closed,
+        createCompactionTranscriptItem(`planner_compact_${now}_${closed.length}`, compaction, now, true),
+      ],
+    };
+  }
+  return prev;
 }
 
 export function applyPlannerExtensionError(

@@ -250,7 +250,7 @@ try {
 
     const summaryText = zh
       ? '已检查仓库与数据集规范，并将流水线编译为 **12 个节点、6 个执行批次** 的有向图（含 1 条有界反馈回路）：\n\n- **基础与防泄漏（`01`–`02`）**：并行搭建 `src/forensics/` 工程与测试基线，同时按来源冻结 `train/val/test` 划分。\n- **三条独立分支（`03`–`08`）**：空间、时序、频域各自隔离研发与验证评估；`08_freq_robustness` 压测不达标时通过 `<FEEDBACK>` 仅驱动 `05_freq_branch` 返工。\n- **冻结与单次留出评估（`09`–`12`）**：`09_ensemble_selection` 锁定融合权重后，并行完成留出集评估（`10`）与 `forensics-detect` CLI 打包（`11`），由 `12_final_report` 汇总验证交付。'
-      : 'Compiled a **12-node, 6-batch** execution graph with one bounded feedback loop:\n\n- **Foundation & leakage gate (`01`–`02`)**: Scaffold `src/forensics/` and `pytest` alongside source-grouped split freezing.\n- **Parallel modality lanes (`03`–`08`)**: Spatial, temporal, and frequency branches train and audit in isolation; `08_freq_robustness` sends bounded `<FEEDBACK>` to `05_freq_branch` only.\n- **Freeze, holdout & delivery (`09`–`12`)**: `09_ensemble_selection` locks weights on val, fanning out to holdout eval (`10`) and CLI bundle (`11`) before `12_final_report`.';
+      : 'Compiled a **12-node, 6-batch** graph with one bounded feedback loop:\n\n- **Foundation & leakage gate (`01`–`02`)**: Scaffold `src/forensics/` and `pytest` alongside source-grouped split freezing.\n- **Parallel modality lanes (`03`–`08`)**: Spatial, temporal, and frequency branches train and audit in isolation; `08_freq_robustness` sends bounded `<FEEDBACK>` to `05_freq_branch` only.\n- **Freeze, holdout & delivery (`09`–`12`)**: `09_ensemble_selection` locks val weights, fanning out to holdout eval (`10`) and CLI bundle (`11`) before `12_final_report`.';
 
     const transcriptEvents = [
       {

@@ -49,6 +49,10 @@ test("nested gestures chain only at the boundary in their scroll direction", () 
   const gesture = (type: string, details: object = {}) => ({ type, target: inner, ...details }) as unknown as Event;
   try {
     assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), true);
+    inner.scrollTop = 5;
+    middle.scrollTop = 0;
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -40 }), scroller), false,
+      "a wheel delta larger than the remaining inner room chains to the conversation");
     inner.scrollTop = 0;
     assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), false);
     assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: 20 }), scroller), true);
