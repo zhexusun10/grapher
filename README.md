@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **Grapher has been rebranded and moved to Pi<sup>n</sup> (`Pi-n`).**
+> Active development, releases, and documentation now continue at **[https://github.com/zhexusun10/Pi-n](https://github.com/zhexusun10/Pi-n)**. This repository is preserved as a historical archive of Grapher through `v1.9.18`.
+
 <p align="center">
   <img src="assets/icon-dots.svg" width="80" height="80" alt="Grapher logo">
 </p>

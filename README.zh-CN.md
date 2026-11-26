@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **Grapher 现已正式更名为 Pi<sup>n</sup>（`Pi-n`）并迁移至新仓库。**
+> 后续开发、版本发布与最新文档均已迁移至 **[https://github.com/zhexusun10/Pi-n](https://github.com/zhexusun10/Pi-n)**。本仓库仅作为 Grapher 至 `v1.9.18` 的历史存档保留。
+
 <p align="center">
   <img src="assets/icon-dots.svg" width="80" height="80" alt="Grapher 标志">
 </p>
